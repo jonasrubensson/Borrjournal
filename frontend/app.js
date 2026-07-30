@@ -1,0 +1,1721 @@
+/* Borrjournal - webbgränssnitt. Ingen build-kedja, medvetet: en fil att läsa och ändra i. */
+"use strict";
+
+const S = {
+  token: localStorage.getItem("bj_token") || null,
+  user: JSON.parse(localStorage.getItem("bj_user") || "null"),
+  route: "oversikt",
+  id: null,
+  tab: "journal",
+  step: 0,
+  form: {},
+  data: {},
+  filter: {},
+  loading: false,
+};
+
+const $ = (s) => document.querySelector(s);
+const root = () => $("#root");
+const esc = (s) =>
+  String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const num = (v, unit = "") => (v === null || v === undefined || v === "" ? "—" : `${v}${unit}`);
+const STATUS = { ok: "I drift", soon: "Service snart", action: "Åtgärd krävs" };
+const tag = (s) => `<span class="tag ${s}">${STATUS[s] || s}</span>`;
+
+function dt(iso, withTime = true) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const p = (n) => String(n).padStart(2, "0");
+  const date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return withTime ? `${date} ${p(d.getHours())}:${p(d.getMinutes())}` : date;
+}
+function nowStamp() {
+  return dt(new Date().toISOString());
+}
+function bytes(n) {
+  if (!n) return "—";
+  return n < 1024 * 1024 ? `${Math.round(n / 1024)} kB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+let toastTimer;
+function toast(msg, bad = false) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = "toast up" + (bad ? " bad" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.className = "toast"), 3600);
+}
+
+/* ---------------- API ---------------- */
+async function api(path, options = {}) {
+  const opts = { ...options, headers: { ...(options.headers || {}) } };
+  if (S.token) opts.headers.Authorization = `Bearer ${S.token}`;
+  if (opts.body && !(opts.body instanceof FormData)) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(opts.body);
+  }
+  const res = await fetch(`/api${path}`, opts);
+  if (res.status === 401 && S.token) {
+    logout("Sessionen har gått ut. Logga in igen.");
+    throw new Error("401");
+  }
+  if (!res.ok) {
+    let detail = `Fel ${res.status}`;
+    try {
+      detail = (await res.json()).detail || detail;
+    } catch (_) {}
+    const err = new Error(detail);
+    err.status = res.status;
+    throw err;
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+function logout(msg) {
+  S.token = null;
+  S.user = null;
+  localStorage.removeItem("bj_token");
+  localStorage.removeItem("bj_user");
+  render();
+  if (msg) toast(msg, true);
+}
+
+/* ---------------- routing ---------------- */
+const ROUTES = [
+  ["oversikt", "Översikt", "M3 10 L10 3 L17 10 M5 8 v9 h10 V8"],
+  ["kunder", "Kunder", "M10 9 a3 3 0 1 0 0-6 a3 3 0 0 0 0 6 M3 17 c0-4 3-6 7-6 s7 2 7 6"],
+  ["paminnelser", "Påminnelser", "M10 3 a5 5 0 0 0-5 5 c0 4-2 5-2 5 h14 s-2-1-2-5 a5 5 0 0 0-5-5 M8 16 a2 2 0 0 0 4 0"],
+  ["journal", "Journal", "M5 3 h10 v14 H5z M8 7 h6 M8 10 h6 M8 13 h4"],
+  ["pumpar", "Pumpar", "M6 3 h8 v5 h-8z M10 8 v9 M6 17 h8"],
+  ["ny", "Ny", "M10 4 v12 M4 10 h12"],
+];
+
+function go(route, id) {
+  const hash = id ? `#/${route}/${id}` : `#/${route}`;
+  if (location.hash === hash) applyHash();
+  else location.hash = hash;
+}
+
+function applyHash() {
+  const parts = (location.hash || "#/oversikt").replace(/^#\/?/, "").split("/");
+  S.route = parts[0] || "oversikt";
+  S.id = parts[1] || null;
+  if (S.route === "kund") S.tab = parts[2] || "journal";
+  if (S.route === "admin") S.tab = parts[1] || "konton";
+  if (S.route === "ny" && !S.id) S.step = S.step || 0;
+  window.scrollTo(0, 0);
+  render();
+}
+window.addEventListener("hashchange", applyHash);
+
+/* ---------------- inloggning ---------------- */
+let loginNeedsTotp = false;
+
+function viewLogin(error = "") {
+  root().innerHTML = `
+  <div class="login">
+    <div class="box">
+      <div class="bn">Borrjournal</div><span class="bs">KUND &amp; ANLÄGGNING</span>
+      ${error ? `<div class="err">${esc(error)}</div>` : ""}
+      <label class="f" for="u">Användarnamn</label>
+      <input id="u" autocomplete="username" autocapitalize="none">
+      <label class="f" for="p">Lösenord</label>
+      <input id="p" type="password" autocomplete="current-password">
+      ${
+        loginNeedsTotp
+          ? `<label class="f" for="t">Engångskod</label>
+             <input id="t" inputmode="numeric" autocomplete="one-time-code" maxlength="6">`
+          : ""
+      }
+      <button class="btn pri" id="lg">Logga in</button>
+    </div>
+  </div>`;
+  const submit = () => doLogin();
+  $("#lg").onclick = submit;
+  ["u", "p", "t"].forEach((id) => {
+    const el = $("#" + id);
+    if (el) el.onkeydown = (e) => e.key === "Enter" && submit();
+  });
+  ($("#t") || $("#u")).focus();
+}
+
+async function doLogin() {
+  const body = { username: $("#u").value.trim(), password: $("#p").value };
+  const totp = $("#t");
+  if (totp) body.totp_code = totp.value.trim();
+  try {
+    const res = await api("/login", { method: "POST", body });
+    S.token = res.token;
+    S.user = res.user;
+    localStorage.setItem("bj_token", res.token);
+    localStorage.setItem("bj_user", JSON.stringify(res.user));
+    loginNeedsTotp = false;
+    go("oversikt");
+    toast(`Inloggad som ${res.user.full_name || res.user.username}`);
+  } catch (e) {
+    if (e.status === 428) {
+      loginNeedsTotp = true;
+      viewLogin("Ange engångskoden från din autentiseringsapp.");
+      return;
+    }
+    viewLogin(e.message);
+  }
+}
+
+/* ---------------- skal ---------------- */
+function shell(inner) {
+  const u = S.user || {};
+  const initials = (u.full_name || u.username || "?")
+    .split(" ")
+    .map((w) => w[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+  const navHtml = ROUTES.map(([r, label, d]) => {
+    const on = S.route === r || (r === "kunder" && S.route === "kund") || (r === "pumpar" && S.route === "anlaggningar");
+    const badge = r === "paminnelser" && S.badge ? `<span class="cnt badge">${S.badge}</span>` : "";
+    return `<a href="#/${r}" class="${on ? "on" : ""}">
+      <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="${d}" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <span>${label}</span>${badge}</a>`;
+  }).join("");
+
+  return `
+  <div class="app">
+    <aside class="side">
+      <div class="brand">
+        <svg width="20" height="26" viewBox="0 0 20 26" fill="none" aria-hidden="true">
+          <path d="M10 1 L10 25" stroke="#1F7A8C" stroke-width="2"/>
+          <path d="M4 7h12M4 13h12M4 19h12" stroke="#5E7C87" stroke-width="1.4"/>
+          <path d="M10 25 l-4-4 h8 z" fill="#1F7A8C"/></svg>
+        <span class="bn">Borrjournal<span class="bs">KUND &amp; ANLÄGGNING</span></span>
+      </div>
+      <div class="navgroup">Register</div>
+      <nav class="nav">${navHtml}
+        ${u.role === "admin" ? `<a href="#/admin/konton" class="${S.route === "admin" ? "on" : ""}"><svg width="18" height="18" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M10 2v3M10 15v3M2 10h3M15 10h3" stroke="currentColor" stroke-width="1.5"/></svg><span>Konton</span></a>` : ""}
+      </nav>
+      <div class="foot">${esc(u.full_name || u.username || "")}<br>${esc(u.role || "")}<br>
+        <button onclick="logout()">Logga ut</button></div>
+    </aside>
+    <div class="main">
+      <div class="top">
+        <div class="search">
+          <span class="ic"><svg width="15" height="15" viewBox="0 0 15 15" fill="none"><circle cx="6.5" cy="6.5" r="4.7" stroke="currentColor" stroke-width="1.5"/><path d="M10 10 L14 14" stroke="currentColor" stroke-width="1.5"/></svg></span>
+          <input id="gq" type="search" placeholder="Sök kund, brunn, pumpmodell, serienr, journal" autocomplete="off">
+          <div id="gres"></div>
+        </div>
+        <button class="btn pri sm" onclick="go('ny')">+ Ny</button>
+        <div class="who"><span class="av">${esc(initials)}</span><span>${esc(u.full_name || u.username || "")}</span></div>
+      </div>
+      <main class="view" id="view">${inner}</main>
+    </div>
+  </div>`;
+}
+
+function mountShell(inner) {
+  root().innerHTML = shell(inner);
+  const q = $("#gq");
+  q.value = S.gq || "";
+  q.oninput = debounce(globalSearch, 250);
+  q.onkeydown = (e) => {
+    if (e.key === "Escape") {
+      q.value = "";
+      $("#gres").innerHTML = "";
+    }
+  };
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".search")) {
+      const g = $("#gres");
+      if (g) g.innerHTML = "";
+    }
+  });
+}
+
+function debounce(fn, ms) {
+  let t;
+  return (...a) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...a), ms);
+  };
+}
+
+async function globalSearch() {
+  const q = $("#gq").value.trim();
+  S.gq = q;
+  const box = $("#gres");
+  if (q.length < 2) {
+    box.innerHTML = "";
+    return;
+  }
+  const r = await api(`/search?q=${encodeURIComponent(q)}`);
+  const groups = [];
+  if (r.customers.length)
+    groups.push(
+      `<div class="grp">Kunder</div>` +
+        r.customers
+          .map(
+            (c) => `<button onclick="go('kund','${c.id}')">${esc(c.name)}
+        <span class="s">${esc(c.customer_no)} · ${esc(c.property_designation || "")} ${esc(c.municipality || "")}</span></button>`
+          )
+          .join("")
+    );
+  if (r.facilities.length)
+    groups.push(
+      `<div class="grp">Anläggningar och pumpar</div>` +
+        r.facilities
+          .map(
+            (f) => `<button onclick="go('kund','${f.customer_id}')">${esc(f.facility_no)} · ${esc(f.facility_type)}
+        <span class="s">${esc(f.customer.name)} · ${esc([f.pump_manufacturer, f.pump_model].filter(Boolean).join(" ") || "ingen pump")} ${f.pump_serial ? "· " + esc(f.pump_serial) : ""}</span></button>`
+          )
+          .join("")
+    );
+  if (r.journal.length)
+    groups.push(
+      `<div class="grp">Journal</div>` +
+        r.journal
+          .map(
+            (j) => `<button onclick="go('kund','${j.customer_id}')">${esc(j.title)}
+        <span class="s">${esc(j.customer.name)} · ${dt(j.created_at)}</span></button>`
+          )
+          .join("")
+    );
+  if (r.files.length)
+    groups.push(
+      `<div class="grp">Filer</div>` +
+        r.files
+          .map(
+            (f) => `<button onclick="go('kund','${f.customer.id}')">${esc(f.filename)}
+        <span class="s">${esc(f.customer.name)}</span></button>`
+          )
+          .join("")
+    );
+  box.innerHTML = groups.length
+    ? `<div class="results">${groups.join("")}</div>`
+    : `<div class="results"><div class="grp">Inga träffar</div></div>`;
+}
+
+/* ---------------- brunnsprofil ---------------- */
+function profile(f) {
+  const H = 210;
+  const max = Math.max(f.total_depth_m || 0, 1);
+  const sc = (d) => ((d || 0) / max) * H;
+  const yj = sc(f.soil_depth_m);
+  const yv = sc(f.water_level_m);
+  const yf = sc(f.casing_length_m);
+  return `<div class="profile">
+    <svg width="86" height="${H + 26}" viewBox="0 0 86 ${H + 26}" role="img" aria-label="Profil, djup ${num(f.total_depth_m)} meter">
+      <g class="strata">
+        <rect x="20" y="14" width="46" height="${yj}" fill="#8A7A63"/>
+        <rect x="20" y="${14 + yj}" width="46" height="${H - yj}" fill="#5D6E75"/>
+        <rect x="20" y="${14 + yv}" width="46" height="${H - yv}" fill="#2A6F80" opacity=".55"/>
+        <rect x="20" y="14" width="46" height="${yf}" fill="none" stroke="#C9A227" stroke-width="2.5"/>
+        <rect x="41" y="14" width="4" height="${H}" fill="#0E1F2A" opacity=".55"/>
+      </g>
+      <line x1="14" y1="14" x2="72" y2="14" stroke="#0E1F2A" stroke-width="1.5"/>
+      <text x="43" y="${H + 24}" font-family="IBM Plex Mono, monospace" font-size="9" fill="#6B7A80" text-anchor="middle">BERG</text>
+    </svg>
+    <div class="lbls">
+      <div class="plabel"><span class="t">Markyta</span><span class="d">0 m</span></div>
+      <div class="plabel"><span class="t">Foderrör</span><span class="d">${num(f.casing_length_m, " m")}</span></div>
+      <div class="plabel"><span class="t">Vattennivå</span><span class="d">${num(f.water_level_m, " m")}</span></div>
+      <div class="plabel"><span class="t">Totalt djup</span><span class="d">${num(f.total_depth_m, " m")}</span></div>
+    </div></div>`;
+}
+
+/* ---------------- vyer ---------------- */
+async function viewDashboard() {
+  mountShell(`<div class="skel" style="width:40%"></div><div class="skel"></div><div class="skel"></div>`);
+  const d = await api("/dashboard");
+  const attention = d.attention.length
+    ? d.attention
+        .map(
+          (f) => `<div class="filerow" style="cursor:pointer" onclick="go('kund','${f.customer_id}')">
+      <div class="ftype ${f.status === "action" ? "pdf" : "other"}" style="${f.status === "action" ? "background:#A6402F" : "background:#B3801F"}">${esc(f.facility_no.replace(/^B-/, ""))}</div>
+      <div style="flex:1;min-width:0"><div style="font-weight:600">${esc(f.customer.name)}</div>
+        <div class="fmeta">${esc(f.facility_type)} · ${num(f.total_depth_m, " m")} · service senast ${f.service_due || "okänt"}</div></div>
+      ${tag(f.status)}</div>`
+        )
+        .join("")
+    : `<div class="empty"><div class="big">Inget att planera in</div><p>Alla anläggningar ligger inom sitt serviceintervall.</p></div>`;
+
+  $("#view").innerHTML = `
+  <div class="spread">
+    <div><div class="eyebrow">${dt(new Date().toISOString(), false)}</div><h1>Översikt</h1>
+      <p class="lead">${d.counts.customers} kunder och ${d.counts.facilities} anläggningar i registret.</p></div>
+    <button class="btn pri" onclick="go('ny')">+ Ny brunn eller pump</button>
+  </div>
+  <div class="stats">
+    <div class="stat"><div class="v">${d.counts.customers}</div><div class="l">Kunder</div></div>
+    <div class="stat"><div class="v">${d.counts.facilities}</div><div class="l">Anläggningar</div></div>
+    <div class="stat warn"><div class="v">${d.counts.soon}</div><div class="l">Service snart</div></div>
+    <div class="stat bad"><div class="v">${d.counts.action}</div><div class="l">Åtgärd krävs</div></div>
+  </div>
+  <div class="grid2">
+    <div class="card"><div class="hd"><h2>Senaste journalanteckningar</h2></div><div class="pad" style="padding-top:4px">
+      ${
+        d.latest_journal.length
+          ? d.latest_journal
+              .map(
+                (j) => `<div class="jentry" style="cursor:pointer" onclick="go('kund','${j.customer_id}')">
+        <div class="jmeta"><span class="dt">${dt(j.created_at, false)}</span>${dt(j.created_at).slice(11)} · ${esc(j.author_name)}</div>
+        <div class="jbody"><div class="h"><span class="ttl">${esc(j.title)}</span><span class="tag n">${esc(j.entry_type)}</span></div>
+          <p class="tsub">${esc(j.customer.name)}</p></div></div>`
+              )
+              .join("")
+          : `<div class="empty"><div class="big">Journalen är tom</div><p>Anteckningar du skriver hamnar här.</p></div>`
+      }
+    </div></div>
+    <div class="card"><div class="hd"><h2>Att planera in</h2></div><div class="pad" style="padding-top:4px">${attention}</div></div>
+  </div>`;
+}
+
+async function viewCustomers() {
+  mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
+  const rows = await api("/customers");
+  S.data.customers = rows;
+  const f = S.filter.customerStatus || "";
+  const shown = f ? rows.filter((c) => c.status === f) : rows;
+  $("#view").innerHTML = `
+  <div class="spread">
+    <div><div class="eyebrow">Register</div><h1>Kunder</h1><p class="lead">${shown.length} av ${rows.length} visas.</p></div>
+    <div class="row">
+      <select style="width:auto" onchange="S.filter.customerStatus=this.value;viewCustomers()">
+        ${[["", "Alla statusar"], ["ok", "I drift"], ["soon", "Service snart"], ["action", "Åtgärd krävs"]]
+          .map(([v, l]) => `<option value="${v}"${f === v ? " selected" : ""}>${l}</option>`)
+          .join("")}
+      </select>
+      <button class="btn pri" onclick="go('ny')">+ Ny anläggning</button>
+    </div>
+  </div>
+  <div class="card">
+    <table><thead><tr><th>Kundnr</th><th>Namn</th><th>Fastighet</th><th>Anläggningar</th><th>Pump</th><th>Status</th></tr></thead>
+    <tbody>${shown
+      .map((c) => {
+        const pumps = [...new Set(c.facilities.map((x) => [x.pump_manufacturer, x.pump_model].filter(Boolean).join(" ")).filter(Boolean))];
+        return `<tr class="clickable" onclick="go('kund','${c.id}')">
+        <td data-l="Kundnr" class="tid">${esc(c.customer_no)}</td>
+        <td data-l="Namn"><div class="tname">${esc(c.name)}</div><div class="tsub">${esc(c.customer_type)} · ${esc(c.phone || "")}</div></td>
+        <td data-l="Fastighet">${esc(c.property_designation || "—")}<div class="tsub">${esc(c.municipality || "")}</div></td>
+        <td data-l="Anläggningar" class="tid">${c.facilities.map((x) => esc(x.facility_no)).join(", ") || "—"}</td>
+        <td data-l="Pump" class="tid">${esc(pumps.join(", ") || "—")}</td>
+        <td data-l="Status">${tag(c.status)}</td></tr>`;
+      })
+      .join("")}</tbody></table>
+    ${shown.length ? "" : `<div class="empty"><div class="big">Inga kunder att visa</div><p>Byt filter eller registrera en ny anläggning.</p></div>`}
+  </div>`;
+}
+
+async function viewPumps() {
+  mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
+  const [pumps, facets] = await Promise.all([api("/pumps"), api("/facets")]);
+  $("#view").innerHTML = `
+  <div class="spread">
+    <div><div class="eyebrow">Flotta</div><h1>Pumpar och modeller</h1>
+      <p class="lead">En rad per modell. Klicka på en modell för att se alla berörda kunder – underlaget du behöver om en serie visar sig ha fabriksfel.</p></div>
+  </div>
+  <div class="card">
+    <table><thead><tr><th>Tillverkare</th><th>Modell</th><th>Antal</th><th>Först installerad</th><th>Senast installerad</th><th></th></tr></thead>
+    <tbody>${
+      pumps.length
+        ? pumps
+            .map(
+              (p) => `<tr class="clickable" onclick="openModel('${encodeURIComponent(p.pump_manufacturer)}','${encodeURIComponent(p.pump_model)}')">
+      <td data-l="Tillverkare"><span class="tname">${esc(p.pump_manufacturer || "Okänd")}</span></td>
+      <td data-l="Modell" class="mono">${esc(p.pump_model)}</td>
+      <td data-l="Antal"><span class="tag n">${p.count} st</span></td>
+      <td data-l="Först" class="tid">${esc(p.first_installed || "—")}</td>
+      <td data-l="Senast" class="tid">${esc(p.last_installed || "—")}</td>
+      <td>→</td></tr>`
+            )
+            .join("")
+        : ""
+    }</tbody></table>
+    ${pumps.length ? "" : `<div class="empty"><div class="big">Inga pumpar registrerade</div><p>Fyll i tillverkare och modell på en anläggning, så syns den här.</p></div>`}
+  </div>
+  <p class="lead" style="margin-top:16px">Behöver du filtrera på annat än modell – djup, typ, installationsdatum – finns
+    <a href="#/anlaggningar">hela anläggningslistan</a> med fler filter. Modeller i registret: ${facets.models.length}.</p>`;
+}
+
+function openModel(manufacturer, model) {
+  S.filter = { pump_manufacturer: decodeURIComponent(manufacturer), pump_model: decodeURIComponent(model) };
+  go("anlaggningar");
+}
+
+async function viewFacilities() {
+  mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
+  const facets = await api("/facets");
+  const f = S.filter;
+  const qs = new URLSearchParams();
+  ["pump_manufacturer", "pump_model", "facility_type", "status", "installed_from", "installed_to"].forEach((k) => {
+    if (f[k]) qs.set(k, f[k]);
+  });
+  const rows = await api(`/facilities?${qs}`);
+  const active = [f.pump_manufacturer, f.pump_model, f.facility_type, f.status && STATUS[f.status]].filter(Boolean);
+
+  const opt = (value, label, current) => `<option value="${esc(value)}"${current === value ? " selected" : ""}>${esc(label)}</option>`;
+  $("#view").innerHTML = `
+  <div class="spread">
+    <div><div class="eyebrow">Flotta</div><h1>Anläggningar</h1>
+      <p class="lead">${rows.length} träffar${active.length ? " · filter: " + esc(active.join(" · ")) : ""}</p></div>
+    <div class="row">
+      <button class="btn ghost sm" onclick="clearFilter()">Rensa filter</button>
+      <button class="btn sm" onclick="exportCsv()">Exportera CSV</button>
+    </div>
+  </div>
+  <div class="card" style="margin-bottom:16px"><div class="pad">
+    <div class="fgrid">
+      <div><label class="f">Tillverkare</label><select onchange="setFilter('pump_manufacturer',this.value)">
+        ${opt("", "Alla", f.pump_manufacturer || "")}${facets.manufacturers.map((m) => opt(m, m, f.pump_manufacturer || "")).join("")}</select></div>
+      <div><label class="f">Modell</label><select onchange="setFilter('pump_model',this.value)">
+        ${opt("", "Alla", f.pump_model || "")}${facets.models.map((m) => opt(m, m, f.pump_model || "")).join("")}</select></div>
+      <div><label class="f">Typ</label><select onchange="setFilter('facility_type',this.value)">
+        ${opt("", "Alla", f.facility_type || "")}${facets.facility_types.map((m) => opt(m, m, f.facility_type || "")).join("")}</select></div>
+      <div><label class="f">Status</label><select onchange="setFilter('status',this.value)">
+        ${opt("", "Alla", f.status || "")}${Object.entries(STATUS).map(([v, l]) => opt(v, l, f.status || "")).join("")}</select></div>
+      <div><label class="f">Installerad från</label><input type="date" value="${esc(f.installed_from || "")}" onchange="setFilter('installed_from',this.value)"></div>
+      <div><label class="f">Installerad till</label><input type="date" value="${esc(f.installed_to || "")}" onchange="setFilter('installed_to',this.value)"></div>
+    </div>
+  </div></div>
+  <div class="card">
+    <table><thead><tr><th>ID</th><th>Kund</th><th>Typ</th><th>Djup</th><th>Pump</th><th>Serienr</th><th>Installerad</th><th>Status</th></tr></thead>
+    <tbody>${rows
+      .map(
+        (x) => `<tr class="clickable" onclick="go('kund','${x.customer_id}')">
+      <td data-l="ID" class="tid">${esc(x.facility_no)}</td>
+      <td data-l="Kund"><span class="tname">${esc(x.customer.name)}</span><div class="tsub">${esc(x.customer.property_designation || "")} ${esc(x.customer.municipality || "")}</div></td>
+      <td data-l="Typ">${esc(x.facility_type)}</td>
+      <td data-l="Djup" class="tid">${num(x.total_depth_m, " m")}</td>
+      <td data-l="Pump">${esc([x.pump_manufacturer, x.pump_model].filter(Boolean).join(" ") || "—")}</td>
+      <td data-l="Serienr" class="tid">${esc(x.pump_serial || "—")}</td>
+      <td data-l="Installerad" class="tid">${esc(x.pump_installed_at || "—")}</td>
+      <td data-l="Status">${tag(x.status)}</td></tr>`
+      )
+      .join("")}</tbody></table>
+    ${rows.length ? "" : `<div class="empty"><div class="big">Inga träffar</div><p>Lätta på filtren för att se fler anläggningar.</p></div>`}
+  </div>`;
+}
+
+function setFilter(key, value) {
+  if (value) S.filter[key] = value;
+  else delete S.filter[key];
+  viewFacilities();
+}
+function clearFilter() {
+  S.filter = {};
+  viewFacilities();
+}
+async function exportCsv() {
+  const qs = new URLSearchParams();
+  ["pump_manufacturer", "pump_model", "status"].forEach((k) => S.filter[k] && qs.set(k, S.filter[k]));
+  const res = await fetch(`/api/facilities.csv?${qs}`, { headers: { Authorization: `Bearer ${S.token}` } });
+  if (!res.ok) return toast("Exporten misslyckades", true);
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `anlaggningar-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast("CSV nedladdad");
+}
+
+async function viewJournalAll() {
+  mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
+  const [rows, facets] = await Promise.all([api("/journal"), api("/facets")]);
+  const t = S.filter.entryType || "";
+  const shown = t ? rows.filter((j) => j.entry_type === t) : rows;
+  $("#view").innerHTML = `
+  <div class="spread">
+    <div><div class="eyebrow">Alla kunder</div><h1>Journal</h1>
+      <p class="lead">Datum, tid och signatur sätts av servern när anteckningen sparas.</p></div>
+    <select style="width:auto" onchange="S.filter.entryType=this.value;viewJournalAll()">
+      <option value="">Alla typer</option>
+      ${facets.entry_types.map((x) => `<option${t === x ? " selected" : ""}>${esc(x)}</option>`).join("")}
+    </select>
+  </div>
+  <div class="card"><div class="pad">${
+    shown.length
+      ? shown.map((j) => journalEntryHtml(j, true)).join("")
+      : `<div class="empty"><div class="big">Inga anteckningar</div></div>`
+  }</div></div>`;
+}
+
+function journalEntryHtml(j, showCustomer = false) {
+  return `<div class="jentry"${showCustomer ? ` style="cursor:pointer" onclick="go('kund','${j.customer_id}')"` : ""}>
+    <div class="jmeta"><span class="dt">${dt(j.created_at, false)}</span>${dt(j.created_at).slice(11)}<br>${esc(j.author_name)}</div>
+    <div class="jbody">
+      <div class="h"><span class="ttl">${esc(j.title)}</span><span class="tag n">${esc(j.entry_type)}</span>
+        ${showCustomer && j.customer ? `<span class="tsub">${esc(j.customer.name)}</span>` : ""}</div>
+      <p>${esc(j.body)}</p>
+      ${
+        j.attachments && j.attachments.length
+          ? `<div class="jatt">${j.attachments.map((a) => `<a href="#" onclick="openFile('${a.id}');return false">↳ ${esc(a.filename)}</a>`).join("")}</div>`
+          : ""
+      }
+    </div></div>`;
+}
+
+/* ---------------- kundvy ---------------- */
+async function viewCustomer() {
+  mountShell(`<div class="skel" style="width:35%"></div><div class="skel"></div><div class="skel"></div>`);
+  const id = S.id;
+  const [c, journal, files, reminders] = await Promise.all([
+    api(`/customers/${id}`),
+    api(`/customers/${id}/journal`),
+    api(`/customers/${id}/files`),
+    api(`/reminders?status=open&customer_id=${id}`),
+  ]);
+  S.data.customer = c;
+  S.data.journal = journal;
+  S.data.files = files;
+  S.data.reminders = reminders;
+
+  const docs = files.filter((f) => f.kind === "dokument");
+  const imgs = files.filter((f) => f.kind === "bild");
+  const facility = c.facilities[0];
+  const T = (id_, label, n) =>
+    `<button class="${S.tab === id_ ? "on" : ""}" onclick="go('kund','${c.id}/${id_}')">${label}${
+      n !== undefined ? `<span class="c">${n}</span>` : ""
+    }</button>`;
+
+  $("#view").innerHTML = `
+  <button class="back" onclick="go('kunder')">← Alla kunder</button>
+  <div class="chead">
+    <div class="spread" style="margin-bottom:0">
+      <div><div class="eyebrow">${esc(c.customer_no)} · registrerad ${dt(c.created_at, false)}</div>
+        <h1>${esc(c.name)}</h1>
+        <p class="lead">${esc(c.property_designation || "")}${c.municipality ? ", " + esc(c.municipality) : ""}</p></div>
+      <div class="row">${tag(c.status)}
+        <button class="btn sm" onclick="go('kund','${c.id}/journal')">+ Journalanteckning</button></div>
+    </div>
+    <div class="facts">
+      <div class="fact"><div class="k">Kundtyp</div><div class="v">${esc(c.customer_type)}</div></div>
+      <div class="fact"><div class="k">Telefon</div><div class="v"><a href="tel:${esc(c.phone)}">${esc(c.phone || "—")}</a></div></div>
+      <div class="fact"><div class="k">E-post</div><div class="v"><a href="mailto:${esc(c.email)}">${esc(c.email || "—")}</a></div></div>
+      <div class="fact"><div class="k">Anläggningar</div><div class="v mono" style="font-size:13.5px">${c.facilities.map((x) => esc(x.facility_no)).join(", ") || "—"}</div></div>
+      <div class="fact"><div class="k">Service senast</div><div class="v mono" style="font-size:13.5px">${esc(facility?.service_due || "—")}</div></div>
+    </div>
+  </div>
+  <div class="grid2">
+    <div>
+      <div class="tabs">${T("journal", "Journal", journal.length)}${T("dokument", "Dokument", docs.length)}${T("bilder", "Bilder", imgs.length)}${T("paminnelser", "Påminnelser", reminders.length)}${T("anlaggning", "Anläggning", c.facilities.length)}</div>
+      <div class="card"><div class="pad" id="tabbody"></div></div>
+    </div>
+    ${
+      facility
+        ? `<div class="card"><div class="hd"><h2>${esc(facility.facility_no)} · profil</h2>${tag(facility.status)}</div>
+      <div class="pad">${profile(facility)}
+        <div class="facts tight" style="margin-top:16px">
+          <div class="fact"><div class="k">Typ</div><div class="v">${esc(facility.facility_type)}</div></div>
+          <div class="fact"><div class="k">Jorddjup</div><div class="v mono">${num(facility.soil_depth_m, " m")}</div></div>
+          <div class="fact"><div class="k">Kapacitet</div><div class="v mono">${num(facility.capacity_lph, " l/h")}</div></div>
+          <div class="fact"><div class="k">Pump</div><div class="v">${esc([facility.pump_manufacturer, facility.pump_model].filter(Boolean).join(" ") || facility.pump_status || "—")}</div></div>
+          <div class="fact"><div class="k">Serienummer</div><div class="v mono" style="font-size:13px">${esc(facility.pump_serial || "—")}</div></div>
+          <div class="fact"><div class="k">Installerad</div><div class="v mono">${esc(facility.pump_installed_at || "—")}</div></div>
+        </div></div></div>`
+        : ""
+    }
+  </div>`;
+  renderTab();
+}
+
+function renderTab() {
+  const c = S.data.customer;
+  const body = $("#tabbody");
+  if (!body) return;
+  if (S.tab === "journal") body.innerHTML = tabJournal(c, S.data.journal);
+  else if (S.tab === "paminnelser") body.innerHTML = tabReminders(c, S.data.reminders);
+  else if (S.tab === "dokument") body.innerHTML = tabFiles(c, S.data.files.filter((f) => f.kind === "dokument"));
+  else if (S.tab === "bilder") body.innerHTML = tabImages(c, S.data.files.filter((f) => f.kind === "bild"));
+  else body.innerHTML = tabFacilities(c);
+  wireUploads();
+}
+
+function tabJournal(c, journal) {
+  const readOnly = S.user.role === "lasare";
+  const facilityOptions = c.facilities
+    .map((f) => `<option value="${f.id}">${esc(f.facility_no)} · ${esc(f.facility_type)}</option>`)
+    .join("");
+  return `
+  ${
+    readOnly
+      ? ""
+      : `<div class="jnew">
+    <div class="spread" style="margin-bottom:0;align-items:center">
+      <strong style="font-family:var(--cond);text-transform:uppercase;letter-spacing:.05em">Ny anteckning</strong>
+      <span class="stamp">${nowStamp()} · ${esc(S.user.full_name || S.user.username)}</span>
+    </div>
+    <p class="hint">Tidsstämpeln sätts av servern när du sparar, inte av telefonens klocka.</p>
+    <div class="fgrid">
+      <div><label class="f" for="jtyp">Typ av händelse</label>
+        <select id="jtyp">${["Service", "Borrning", "Installation", "Telefon", "Besök", "Anmärkning", "Vattenprov", "Övrigt"]
+          .map((t) => `<option>${t}</option>`)
+          .join("")}</select></div>
+      <div><label class="f" for="jfac">Gäller anläggning</label>
+        <select id="jfac"><option value="">Kunden generellt</option>${facilityOptions}</select></div>
+    </div>
+    <label class="f" for="jttl">Rubrik</label>
+    <input id="jttl" placeholder="T.ex. Filterbyte och tryckkontroll">
+    <label class="f" for="jtxt">Anteckning</label>
+    <textarea id="jtxt" placeholder="Mätvärden, åtgärder, vad kunden sa, vad som ska följas upp."></textarea>
+    <div class="fgrid">
+      <div><label class="f" for="jfup">Följ upp senast <span style="text-transform:none;letter-spacing:0">(valfritt)</span></label>
+        <input id="jfup" type="date"></div>
+      <div><label class="f" for="jfupt">Rubrik på uppföljningen</label>
+        <input id="jfupt" placeholder="Lämna tom för att återanvända rubriken ovan"></div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn pri sm" id="jsave">Spara anteckning</button>
+      <span class="hint" style="margin:0">Fyller du i ett datum skapas en påminnelse kopplad till anteckningen.</span>
+    </div></div>`
+  }
+  ${journal.length ? journal.map((j) => journalEntryHtml(j)).join("") : `<div class="empty"><div class="big">Journalen är tom</div><p>Första anteckningen skriver du här ovanför.</p></div>`}`;
+}
+
+async function saveJournal() {
+  const btn = $("#jsave");
+  btn.disabled = true;
+  try {
+    await api(`/customers/${S.data.customer.id}/journal`, {
+      method: "POST",
+      body: {
+        entry_type: $("#jtyp").value,
+        facility_id: $("#jfac").value || null,
+        title: $("#jttl").value,
+        body: $("#jtxt").value,
+        followup_date: $("#jfup").value || "",
+        followup_title: $("#jfupt").value || "",
+      },
+    });
+    toast($("#jfup").value ? "Anteckning och uppföljning sparade" : "Anteckning sparad");
+    S.data.journal = await api(`/customers/${S.data.customer.id}/journal`);
+    S.data.reminders = await api(`/reminders?status=open&customer_id=${S.data.customer.id}`);
+    refreshBadge();
+    renderTab();
+  } catch (e) {
+    toast(e.message, true);
+    btn.disabled = false;
+  }
+}
+
+function fileIcon(f) {
+  if (f.kind === "bild") return "img";
+  if (f.content_type.includes("pdf")) return "pdf";
+  if (f.content_type.includes("word")) return "doc";
+  return "other";
+}
+function fileLabel(f) {
+  const t = fileIcon(f);
+  return t === "pdf" ? "PDF" : t === "doc" ? "DOCX" : t === "img" ? "BILD" : "FIL";
+}
+
+function tabFiles(c, files) {
+  const readOnly = S.user.role === "lasare";
+  return `
+  ${
+    readOnly
+      ? ""
+      : `<div class="drop" id="drop">
+    <div class="big">Släpp filer här</div>
+    <p style="margin:6px 0 0">PDF, DOCX, XLSX eller bild. Kopplas till ${esc(c.name)}.</p>
+    <button class="btn ghost sm" style="margin-top:10px" onclick="document.getElementById('fin').click()">Välj filer</button>
+    <input type="file" id="fin" multiple hidden accept=".pdf,.docx,.doc,.xlsx,.txt,image/*">
+    <div class="progress" id="prog" hidden><i style="width:0"></i></div>
+  </div>`
+  }
+  <div style="margin-top:16px">${
+    files.length
+      ? files
+          .map(
+            (f) => `<div class="filerow">
+      <div class="ftype ${fileIcon(f)}">${fileLabel(f)}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.filename)}</div>
+        <div class="fmeta">${bytes(f.size_bytes)} · ${dt(f.uploaded_at, false)} · ${esc(f.uploaded_by)}</div></div>
+      <button class="btn ghost sm" onclick="openFile('${f.id}')">Öppna</button>
+      ${readOnly ? "" : `<button class="btn danger sm" onclick="deleteFile('${f.id}')">Ta bort</button>`}
+    </div>`
+          )
+          .join("")
+      : `<div class="empty"><div class="big">Inga dokument</div><p>Ladda upp borrprotokoll, intyg och offerter här.</p></div>`
+  }</div>`;
+}
+
+function tabImages(c, imgs) {
+  const readOnly = S.user.role === "lasare";
+  return `
+  <div class="imgs">
+    ${imgs
+      .map(
+        (f) => `<div class="thumb">
+      <img src="/api/files/${f.id}/thumb" alt="${esc(f.caption || f.filename)}" loading="lazy" onclick="openFile('${f.id}')" style="cursor:zoom-in">
+      <div class="cap">${esc(f.caption || f.filename)}<span class="m">${dt(f.uploaded_at, false)}${readOnly ? "" : ` · <button onclick="deleteFile('${f.id}')" style="background:none;border:none;padding:0;color:#A6402F;font-family:var(--mono);font-size:10.5px;cursor:pointer">ta bort</button>`}</span></div>
+    </div>`
+      )
+      .join("")}
+    ${
+      readOnly
+        ? ""
+        : `<button class="thumb" style="border-style:dashed;cursor:pointer;background:#FAFCFC;display:grid;place-items:center;min-height:150px;color:var(--ink-2)"
+        onclick="document.getElementById('fin').click()">
+        <span style="text-align:center"><span style="font-size:22px">+</span><br>
+        <span style="font-family:var(--cond);text-transform:uppercase;font-size:13px;letter-spacing:.05em">Lägg till bild</span></span></button>`
+    }
+  </div>
+  ${
+    readOnly
+      ? ""
+      : `<div class="row" style="margin-top:14px">
+    <input type="file" id="fin" multiple hidden accept="image/*" capture="environment">
+    <button class="btn ghost sm" onclick="document.getElementById('fin').click()">Ta foto eller välj bild</button>
+    <span class="hint" style="margin:0">På telefonen öppnas kameran direkt.</span>
+    <div class="progress" id="prog" hidden style="width:100%"><i style="width:0"></i></div>
+  </div>`
+  }
+  ${imgs.length ? "" : `<p class="hint" style="margin-top:12px">Inga bilder än. Foton från borrplatsen hamnar här.</p>`}`;
+}
+
+function tabFacilities(c) {
+  return (
+    c.facilities
+      .map(
+        (f) => `<div style="padding-bottom:16px;margin-bottom:16px;border-bottom:1px solid #E9EEEE">
+    <div class="spread" style="margin-bottom:6px">
+      <div><div class="eyebrow">${esc(f.facility_no)}</div><strong style="font-size:16px">${esc(f.facility_type)}</strong></div>
+      ${tag(f.status)}</div>
+    <div class="facts" style="border-top:none;padding-top:6px;margin-top:0">
+      <div class="fact"><div class="k">Borrad</div><div class="v mono">${esc(f.drilled_at || "—")}</div></div>
+      <div class="fact"><div class="k">Totalt djup</div><div class="v mono">${num(f.total_depth_m, " m")}</div></div>
+      <div class="fact"><div class="k">Jorddjup</div><div class="v mono">${num(f.soil_depth_m, " m")}</div></div>
+      <div class="fact"><div class="k">Foderrör</div><div class="v mono">${num(f.casing_length_m, " m")}</div></div>
+      <div class="fact"><div class="k">Vattennivå</div><div class="v mono">${num(f.water_level_m, " m")}</div></div>
+      <div class="fact"><div class="k">Kapacitet</div><div class="v mono">${num(f.capacity_lph, " l/h")}</div></div>
+      <div class="fact"><div class="k">Pump</div><div class="v">${esc([f.pump_manufacturer, f.pump_model].filter(Boolean).join(" ") || "—")}</div></div>
+      <div class="fact"><div class="k">Serienummer</div><div class="v mono" style="font-size:13px">${esc(f.pump_serial || "—")}</div></div>
+      <div class="fact"><div class="k">Pumpdjup</div><div class="v mono">${num(f.pump_depth_m, " m")}</div></div>
+      <div class="fact"><div class="k">Tryckkärl</div><div class="v">${esc(f.pressure_tank || "—")}</div></div>
+      <div class="fact"><div class="k">Serviceintervall</div><div class="v mono">${f.service_interval_months} mån</div></div>
+      <div class="fact"><div class="k">Senaste service</div><div class="v mono">${esc(f.last_service_at || "—")}</div></div>
+      <div class="fact"><div class="k">Koordinater</div><div class="v mono" style="font-size:12.5px">${esc(f.coordinates || "—")}</div></div>
+      <div class="fact"><div class="k">Vattenprov</div><div class="v">${esc(f.water_sample || "—")}</div></div>
+    </div>
+    ${f.bedrock_notes ? `<p class="lead" style="margin-top:10px"><span class="eyebrow">Berg och lager</span>${esc(f.bedrock_notes)}</p>` : ""}
+    ${f.access_notes ? `<p class="lead" style="margin-top:10px"><span class="eyebrow">Åtkomst</span>${esc(f.access_notes)}</p>` : ""}
+    ${
+      S.user.role === "lasare"
+        ? ""
+        : `<div class="row" style="margin-top:12px">
+      <button class="btn ghost sm" onclick="markService('${f.id}')">Registrera service idag</button>
+      <button class="btn ghost sm" onclick="setStatus('${f.id}','action')">Flagga åtgärd krävs</button>
+      <button class="btn ghost sm" onclick="setStatus('${f.id}','ok')">Rensa flagga</button>
+    </div>`
+    }
+  </div>`
+      )
+      .join("") +
+    (S.user.role === "lasare"
+      ? ""
+      : `<button class="btn ghost sm" onclick="startOnboardingFor('${c.id}')">+ Lägg till anläggning på denna kund</button>`)
+  );
+}
+
+async function markService(facilityId) {
+  const today = new Date().toISOString().slice(0, 10);
+  await api(`/facilities/${facilityId}`, { method: "PATCH", body: { last_service_at: today, status: "ok" } });
+  toast(`Service registrerad ${today}`);
+  viewCustomer();
+}
+async function setStatus(facilityId, status) {
+  await api(`/facilities/${facilityId}`, { method: "PATCH", body: { status } });
+  toast(status === "action" ? "Flaggad för åtgärd" : "Flaggan rensad");
+  viewCustomer();
+}
+
+/* ---------------- filer ---------------- */
+function wireUploads() {
+  const input = $("#fin");
+  const drop = $("#drop");
+  if (input) input.onchange = () => uploadFiles([...input.files]);
+  if (drop) {
+    drop.ondragover = (e) => {
+      e.preventDefault();
+      drop.classList.add("hot");
+    };
+    drop.ondragleave = () => drop.classList.remove("hot");
+    drop.ondrop = (e) => {
+      e.preventDefault();
+      drop.classList.remove("hot");
+      uploadFiles([...e.dataTransfer.files]);
+    };
+  }
+  const save = $("#jsave");
+  if (save) save.onclick = saveJournal;
+}
+
+async function uploadFiles(files) {
+  if (!files.length) return;
+  const prog = $("#prog");
+  const bar = prog?.querySelector("i");
+  if (prog) prog.hidden = false;
+  let done = 0;
+  for (const file of files) {
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      await api(`/customers/${S.data.customer.id}/files`, { method: "POST", body: fd });
+    } catch (e) {
+      toast(`${file.name}: ${e.message}`, true);
+    }
+    done++;
+    if (bar) bar.style.width = `${(done / files.length) * 100}%`;
+  }
+  toast(done > 1 ? `${done} filer uppladdade` : "Filen uppladdad");
+  S.data.files = await api(`/customers/${S.data.customer.id}/files`);
+  renderTab();
+}
+
+async function openFile(id) {
+  // Filerna kräver token, så de hämtas som blob och öppnas lokalt.
+  const res = await fetch(`/api/files/${id}`, { headers: { Authorization: `Bearer ${S.token}` } });
+  if (!res.ok) return toast("Filen kunde inte öppnas", true);
+  const url = URL.createObjectURL(await res.blob());
+  window.open(url, "_blank");
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+async function deleteFile(id) {
+  if (!confirm("Ta bort filen permanent?")) return;
+  await api(`/files/${id}`, { method: "DELETE" });
+  S.data.files = await api(`/customers/${S.data.customer.id}/files`);
+  renderTab();
+  toast("Filen borttagen");
+}
+
+/* ---------------- onboarding ---------------- */
+const STEPS = [
+  ["Kund", "Kunduppgifter"],
+  ["Fastighet", "Fastighet och plats"],
+  ["Borrning", "Borrning och berg"],
+  ["Pump", "Pump och installation"],
+  ["Granska", "Granska och skapa"],
+];
+
+function startOnboardingFor(customerId) {
+  S.form = { existing_customer_id: customerId };
+  S.step = 1;
+  go("ny");
+}
+
+function fInput(key, label, type = "text", ph = "", hint = "") {
+  const v = S.form[key] ?? "";
+  return `<div><label class="f" for="fld_${key}">${label}</label>
+    <input id="fld_${key}" type="${type}" placeholder="${esc(ph)}" value="${esc(v)}"
+      ${type === "number" ? 'step="any" inputmode="decimal"' : ""}
+      oninput="S.form['${key}']=this.value">${hint ? `<div class="hint">${esc(hint)}</div>` : ""}</div>`;
+}
+function fSelect(key, label, options) {
+  return `<div><label class="f" for="fld_${key}">${label}</label>
+    <select id="fld_${key}" onchange="S.form['${key}']=this.value">
+      ${options.map((o) => `<option${S.form[key] === o ? " selected" : ""}>${esc(o)}</option>`).join("")}
+    </select></div>`;
+}
+function fArea(key, label, ph) {
+  return `<div><label class="f" for="fld_${key}">${label}</label>
+    <textarea id="fld_${key}" placeholder="${esc(ph)}" oninput="S.form['${key}']=this.value">${esc(S.form[key] ?? "")}</textarea></div>`;
+}
+
+async function viewOnboarding() {
+  const s = S.step;
+  const existing = S.form.existing_customer_id;
+  let customerName = "";
+  if (existing) {
+    if (!S.data.customers) S.data.customers = await api("/customers");
+    customerName = S.data.customers.find((c) => c.id === existing)?.name || "befintlig kund";
+  }
+
+  const stepBodies = [
+    `<fieldset><legend>Kunduppgifter</legend>
+      ${
+        existing
+          ? `<p class="lead">Anläggningen läggs på <strong>${esc(customerName)}</strong>.
+             <button class="btn ghost sm" style="margin-left:8px" onclick="delete S.form.existing_customer_id;viewOnboarding()">Ny kund istället</button></p>`
+          : `<div class="fgrid">
+        ${fSelect("customer_type", "Kundtyp", ["Privat", "Företag", "Förening", "Kommun"])}
+        ${fInput("name", "Namn eller företag", "text", "Erik & Maja Lundqvist")}
+        ${fInput("phone", "Telefon", "tel", "070-000 00 00")}
+        ${fInput("email", "E-post", "email", "namn@example.se")}
+        ${fInput("org_no", "Person- eller org.nr", "text", "", "Används på borrprotokoll och faktura")}
+        ${fInput("invoice_address", "Fakturaadress", "text", "Gata, postnr, ort")}
+      </div>`
+      }</fieldset>`,
+    `<fieldset><legend>Fastighet och plats</legend>
+      <div class="fgrid">
+        ${fInput("property_designation", "Fastighetsbeteckning", "text", "Vässlan 3:14")}
+        ${fInput("municipality", "Kommun", "text", "Norrtälje")}
+        ${fInput("address", "Adress till borrplatsen", "text", "Vässlanvägen 12")}
+        ${fInput("coordinates", "Koordinater", "text", "N 6620123 E 674321", "Klistra in från kartan eller mobilens GPS")}
+        ${fSelect("permit_status", "Anmälan till kommunen", ["Inte påbörjad", "Inskickad", "Beviljad", "Krävs inte"])}
+      </div>
+      ${fArea("access_notes", "Åtkomst och förutsättningar", "Framkomlighet för rigg, lutning, elskåp, var slam får läggas.")}
+    </fieldset>`,
+    `<fieldset><legend>Borrning och berg</legend>
+      <div class="fgrid">
+        ${fSelect("facility_type", "Typ av anläggning", ["Bergborrad brunn", "Energibrunn", "Grävd brunn", "Filterbrunn"])}
+        ${fInput("drilled_at", "Borrdatum", "date")}
+        ${fInput("soil_depth_m", "Jorddjup (m)", "number", "6")}
+        ${fInput("casing_length_m", "Foderrör, längd (m)", "number", "6,5")}
+        ${fInput("total_depth_m", "Totalt borrdjup (m)", "number", "72")}
+        ${fInput("water_level_m", "Vattennivå från markyta (m)", "number", "14")}
+        ${fInput("capacity_lph", "Uppmätt kapacitet (l/h)", "number", "1400")}
+        ${fSelect("water_sample", "Vattenprov", ["Ej taget", "Skickat till labb", "Godkänt", "Anmärkning"])}
+      </div>
+      ${fArea("bedrock_notes", "Bergarter och vattenförande sprickor", "Morän 0-6 m, granit 6-72 m, spricka vid 47 m med god tillrinning.")}
+    </fieldset>`,
+    `<fieldset><legend>Pump och installation</legend>
+      <div class="fgrid">
+        ${fSelect("pump_status", "Pumpstatus", ["Ska installeras", "Installerad", "Kunden ordnar själv", "Ingen pump (energibrunn)"])}
+        ${fInput("pump_manufacturer", "Tillverkare", "text", "Grundfos", "Egen kolumn, så flottan kan filtreras vid fabriksfel")}
+        ${fInput("pump_model", "Modell", "text", "SQ 2-70")}
+        ${fInput("pump_serial", "Serienummer", "text", "GF-2026-00123")}
+        ${fInput("pump_depth_m", "Pumpens nivå (m)", "number", "45")}
+        ${fInput("pressure_tank", "Hydrofor eller tryckkärl", "text", "Wilo 60 l")}
+        ${fInput("pump_installed_at", "Driftsatt", "date")}
+        ${fInput("last_service_at", "Senaste service", "date", "", "Lämna tom om ingen service gjorts")}
+        ${fSelect("service_interval_months", "Serviceintervall", ["12", "24", "36", "0"])}
+      </div></fieldset>`,
+    `<fieldset><legend>Granska och skapa</legend>
+      <p class="lead" style="margin-bottom:14px">Servern skapar ${existing ? "en anläggning" : "ett kundkort, en anläggning"} och den första journalanteckningen med tidsstämpel.</p>
+      <table class="sumtable">
+        <tr><td>Kund</td><td>${esc(existing ? customerName : S.form.name || "—")}</td></tr>
+        <tr><td>Kontakt</td><td>${esc(S.form.phone || "—")} · ${esc(S.form.email || "—")}</td></tr>
+        <tr><td>Fastighet</td><td>${esc(S.form.property_designation || "—")}, ${esc(S.form.municipality || "—")}</td></tr>
+        <tr><td>Typ</td><td>${esc(S.form.facility_type || "Bergborrad brunn")}</td></tr>
+        <tr><td>Djup / vattennivå</td><td>${esc(S.form.total_depth_m || "—")} m / ${esc(S.form.water_level_m || "—")} m</td></tr>
+        <tr><td>Foderrör / jorddjup</td><td>${esc(S.form.casing_length_m || "—")} m / ${esc(S.form.soil_depth_m || "—")} m</td></tr>
+        <tr><td>Kapacitet</td><td>${esc(S.form.capacity_lph || "—")} l/h</td></tr>
+        <tr><td>Pump</td><td>${esc([S.form.pump_manufacturer, S.form.pump_model].filter(Boolean).join(" ") || "—")} · ${esc(S.form.pump_status || "—")}</td></tr>
+        <tr><td>Serienummer</td><td>${esc(S.form.pump_serial || "—")}</td></tr>
+      </table>
+      ${fArea("first_note", "Första journalanteckningen", "Vad gjordes vid borrningen, vad återstår.")}
+    </fieldset>`,
+  ];
+
+  mountShell(`
+  <div class="spread">
+    <div><div class="eyebrow">Onboarding · steg ${s + 1} av 5</div><h1>Ny brunn eller pump</h1></div>
+    <button class="btn ghost sm" onclick="S.form={};S.step=0;go('oversikt')">Avbryt</button>
+  </div>
+  <div class="steps">${STEPS.map(
+    (st, i) => `<button class="step ${i === s ? "on" : i < s ? "done" : ""}" onclick="S.step=${i};viewOnboarding()">
+      <span class="n">${i < s ? "✓" : i + 1}</span><span class="tx">${st[0]}</span></button>`
+  ).join("")}</div>
+  <div class="card"><div class="pad">${stepBodies[s]}
+    <div class="wfoot">
+      <button class="btn ghost" ${s === 0 ? "disabled" : ""} onclick="S.step=${Math.max(0, s - 1)};viewOnboarding()">← Föregående</button>
+      ${
+        s < 4
+          ? `<button class="btn pri" onclick="S.step=${s + 1};viewOnboarding()">Nästa: ${STEPS[s + 1][1]} →</button>`
+          : `<button class="btn pri" id="obsave">Skapa ${existing ? "anläggning" : "kund och anläggning"}</button>`
+      }
+    </div></div></div>`);
+  const save = $("#obsave");
+  if (save) save.onclick = submitOnboarding;
+}
+
+function numOrNull(v) {
+  if (v === undefined || v === null || String(v).trim() === "") return null;
+  const n = parseFloat(String(v).replace(",", "."));
+  return isNaN(n) ? null : n;
+}
+
+async function submitOnboarding() {
+  const f = S.form;
+  if (!f.existing_customer_id && !(f.name || "").trim()) {
+    toast("Kunden behöver ett namn", true);
+    S.step = 0;
+    return viewOnboarding();
+  }
+  const btn = $("#obsave");
+  btn.disabled = true;
+  const payload = {
+    existing_customer_id: f.existing_customer_id || null,
+    customer: {
+      name: f.name || "Ny kund",
+      customer_type: f.customer_type || "Privat",
+      org_no: f.org_no || "",
+      phone: f.phone || "",
+      email: f.email || "",
+      invoice_address: f.invoice_address || "",
+      property_designation: f.property_designation || "",
+      address: f.address || "",
+      municipality: f.municipality || "",
+    },
+    facility: {
+      facility_type: f.facility_type || "Bergborrad brunn",
+      drilled_at: f.drilled_at || "",
+      coordinates: f.coordinates || "",
+      access_notes: f.access_notes || "",
+      permit_status: f.permit_status || "",
+      soil_depth_m: numOrNull(f.soil_depth_m),
+      casing_length_m: numOrNull(f.casing_length_m),
+      total_depth_m: numOrNull(f.total_depth_m),
+      water_level_m: numOrNull(f.water_level_m),
+      capacity_lph: numOrNull(f.capacity_lph),
+      bedrock_notes: f.bedrock_notes || "",
+      water_sample: f.water_sample || "",
+      pump_manufacturer: (f.pump_manufacturer || "").trim(),
+      pump_model: (f.pump_model || "").trim(),
+      pump_serial: (f.pump_serial || "").trim(),
+      pump_depth_m: numOrNull(f.pump_depth_m),
+      pump_status: f.pump_status || "",
+      pressure_tank: f.pressure_tank || "",
+      pump_installed_at: f.pump_installed_at || "",
+      last_service_at: f.last_service_at || "",
+      service_interval_months: parseInt(f.service_interval_months || "12", 10),
+    },
+    first_note: f.first_note || "",
+  };
+  try {
+    const res = await api("/onboarding", { method: "POST", body: payload });
+    S.form = {};
+    S.step = 0;
+    S.data.customers = null;
+    toast(`${res.facility.facility_no} skapad`);
+    go("kund", res.customer.id);
+  } catch (e) {
+    toast(e.message, true);
+    btn.disabled = false;
+  }
+}
+
+
+/* ---------------- notiser på enheten ---------------- */
+const PUSH = {
+  supported: () =>
+    "serviceWorker" in navigator && "PushManager" in window && "Notification" in window,
+  isIos: () =>
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1),
+  installed: () =>
+    window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true,
+
+  async ready() {
+    if (!("serviceWorker" in navigator)) return null;
+    try {
+      return await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    } catch (e) {
+      console.warn("service worker kunde inte registreras", e);
+      return null;
+    }
+  },
+
+  async state() {
+    if (!PUSH.supported()) return "saknas";
+    if (Notification.permission === "denied") return "nekad";
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = reg && (await reg.pushManager.getSubscription());
+    return sub ? "på" : "av";
+  },
+
+  async enable() {
+    if (!PUSH.supported()) throw new Error("Enheten stöder inte notiser.");
+    if (PUSH.isIos() && !PUSH.installed())
+      throw new Error(
+        "På iPhone måste appen först läggas till på hemskärmen. Dela-knappen → Lägg till på hemskärmen."
+      );
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") throw new Error("Notiser nekades i enhetens inställningar.");
+
+    const reg = (await navigator.serviceWorker.getRegistration()) || (await PUSH.ready());
+    if (!reg) throw new Error("Service worker saknas.");
+    await navigator.serviceWorker.ready;
+
+    const { public_key } = await api("/notifications/push/key");
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: b64ToBytes(public_key),
+    });
+    await api("/notifications/push/subscribe", { method: "POST", body: sub.toJSON() });
+    return true;
+  },
+
+  async disable() {
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = reg && (await reg.pushManager.getSubscription());
+    if (sub) {
+      await api("/notifications/push/unsubscribe", { method: "POST", body: { endpoint: sub.endpoint } });
+      await sub.unsubscribe();
+    }
+  },
+};
+
+function b64ToBytes(base64) {
+  const padded = (base64 + "=".repeat((4 - (base64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(padded);
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+async function togglePush() {
+  const state = await PUSH.state();
+  try {
+    if (state === "på") {
+      await PUSH.disable();
+      toast("Notiser avstängda på den här enheten");
+    } else {
+      await PUSH.enable();
+      toast("Notiser påslagna på den här enheten");
+    }
+  } catch (e) {
+    toast(e.message, true);
+  }
+  if (S.route === "paminnelser") viewReminders();
+  else if (S.route === "admin") viewAdmin();
+}
+
+async function testPush() {
+  try {
+    await api("/notifications/push/test", { method: "POST" });
+    toast("Testnotis skickad");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function pushBanner() {
+  const state = await PUSH.state();
+  if (state === "saknas")
+    return `<div class="hint">Den här webbläsaren stöder inte notiser. E-post fungerar ändå.</div>`;
+  if (state === "nekad")
+    return `<div class="err">Notiser är blockerade för sidan. Tillåt dem i webbläsarens sidinställningar och ladda om.</div>`;
+  if (PUSH.isIos() && !PUSH.installed())
+    return `<div class="err">För notiser på iPhone: tryck Dela och välj <strong>Lägg till på hemskärmen</strong>. Öppna appen därifrån, då kan du slå på notiser. (Kräver iOS 16.4 eller senare.)</div>`;
+  return `<div class="row" style="margin-bottom:14px">
+    <span class="tag ${state === "på" ? "ok" : "n"}">Notiser ${state === "på" ? "på" : "av"} på denna enhet</span>
+    <button class="btn ghost sm" onclick="togglePush()">${state === "på" ? "Stäng av" : "Slå på notiser"}</button>
+    ${state === "på" ? `<button class="btn ghost sm" onclick="testPush()">Skicka testnotis</button>` : ""}
+  </div>`;
+}
+
+/* ---------------- påminnelser ---------------- */
+const KIND_LABEL = {
+  service: "Service",
+  vattenprov: "Vattenprov",
+  intyg: "Intyg",
+  uppfoljning: "Uppföljning",
+  egen: "Egen",
+};
+
+async function refreshBadge() {
+  try {
+    const sum = await api("/reminders/summary");
+    S.badge = sum.overdue || 0;
+    const el = document.querySelector(".nav .badge");
+    if (el) el.textContent = S.badge;
+  } catch (_) {}
+}
+
+function reminderRow(r) {
+  const left =
+    r.days_left === null
+      ? ""
+      : r.days_left < 0
+        ? `${Math.abs(r.days_left)} dagar sen`
+        : r.days_left === 0
+          ? "idag"
+          : `om ${r.days_left} dagar`;
+  return `<div class="filerow">
+    <div class="ftype" style="background:${r.overdue ? "#A6402F" : r.days_left <= 7 ? "#B3801F" : "var(--water-dark)"}">
+      ${esc(r.due_date.slice(8))}<br>${esc(r.due_date.slice(5, 7))}</div>
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:600">${esc(r.title)}</div>
+      <div class="fmeta">${esc(r.due_date)} · ${esc(left)}${r.customer_name ? " · " + esc(r.customer_name) : ""}
+        ${r.notified_channels ? " · meddelat via " + esc(r.notified_channels) : ""}</div>
+      ${r.body ? `<div class="tsub" style="margin-top:3px">${esc(r.body.slice(0, 160))}</div>` : ""}
+    </div>
+    <span class="tag n">${esc(KIND_LABEL[r.kind] || r.kind)}</span>
+    ${
+      S.user.role === "lasare"
+        ? ""
+        : `<div class="row" style="gap:6px">
+      ${r.status === "open" ? `<button class="btn ghost sm" onclick="completeReminder('${r.id}')">Klar</button>
+      <button class="btn ghost sm" onclick="snoozeReminder('${r.id}',7)">+7 d</button>` : `<button class="btn ghost sm" onclick="reopenReminder('${r.id}')">Öppna igen</button>`}
+      <button class="btn danger sm" onclick="deleteReminder('${r.id}')">Ta bort</button></div>`
+    }
+    ${r.customer_id ? `<button class="btn ghost sm" onclick="go('kund','${r.customer_id}')">Kund</button>` : ""}
+  </div>`;
+}
+
+async function viewReminders() {
+  mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
+  const status = S.filter.reminderStatus || "open";
+  const [items, sum, customers] = await Promise.all([
+    api(`/reminders?status=${status}`),
+    api("/reminders/summary"),
+    S.data.customers ? Promise.resolve(S.data.customers) : api("/customers"),
+  ]);
+  S.data.customers = customers;
+  S.badge = sum.overdue || 0;
+
+  const overdue = items.filter((r) => r.overdue);
+  const week = items.filter((r) => !r.overdue && r.days_left !== null && r.days_left <= 7);
+  const later = items.filter((r) => !r.overdue && (r.days_left === null || r.days_left > 7));
+  const group = (title, rows) =>
+    rows.length
+      ? `<div class="card" style="margin-bottom:16px"><div class="hd"><h2>${title}</h2><span class="tag n">${rows.length}</span></div>
+         <div class="pad" style="padding-top:2px">${rows.map(reminderRow).join("")}</div></div>`
+      : "";
+
+  $("#view").innerHTML = `
+  <div class="spread">
+    <div><div class="eyebrow">Bevakning</div><h1>Påminnelser</h1>
+      <p class="lead">Service, vattenprov, intyg och uppföljningar. Automatiska påminnelser skapas från
+      anläggningarnas datum, egna lägger du till själv.</p></div>
+    <div class="row">
+      <select style="width:auto" onchange="S.filter.reminderStatus=this.value;viewReminders()">
+        <option value="open"${status === "open" ? " selected" : ""}>Öppna</option>
+        <option value="done"${status === "done" ? " selected" : ""}>Kvitterade</option>
+      </select>
+      ${S.user.role === "lasare" ? "" : `<button class="btn ghost" onclick="runScan()">Kör genomsökning</button>`}
+    </div>
+  </div>
+  <div id="pushbanner"></div>
+  <div class="stats">
+    <div class="stat bad"><div class="v">${sum.overdue}</div><div class="l">Försenade</div></div>
+    <div class="stat warn"><div class="v">${sum.this_week}</div><div class="l">Inom en vecka</div></div>
+    <div class="stat"><div class="v">${sum.next_30_days}</div><div class="l">Inom 30 dagar</div></div>
+    <div class="stat"><div class="v">${sum.open}</div><div class="l">Öppna totalt</div></div>
+  </div>
+  ${
+    S.user.role === "lasare"
+      ? ""
+      : `<div class="card" style="margin-bottom:16px"><div class="hd"><h2>Ny påminnelse</h2></div><div class="pad">
+    <div class="fgrid">
+      <div><label class="f" for="rt">Rubrik</label><input id="rt" placeholder="Ring om hydroforbyte"></div>
+      <div><label class="f" for="rd">Datum</label><input id="rd" type="date"></div>
+      <div><label class="f" for="rc">Kund</label><select id="rc"><option value="">Ingen särskild kund</option>
+        ${customers.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select></div>
+      <div><label class="f" for="rn">Förvarning</label><select id="rn">
+        <option value="0">På dagen</option><option value="7" selected>7 dagar före</option>
+        <option value="14">14 dagar före</option><option value="30">30 dagar före</option></select></div>
+    </div>
+    <label class="f" for="rb">Anteckning</label><textarea id="rb" style="min-height:60px"></textarea>
+    <button class="btn pri sm" style="margin-top:12px" id="rsave">Spara påminnelse</button>
+  </div></div>`
+  }
+  ${group("Försenade", overdue)}
+  ${group("Inom en vecka", week)}
+  ${group(status === "done" ? "Kvitterade" : "Längre fram", later)}
+  ${items.length ? "" : `<div class="card"><div class="empty"><div class="big">Inga påminnelser här</div><p>Automatiska påminnelser dyker upp när en anläggning har datum för service, vattenprov eller intyg.</p></div></div>`}`;
+
+  const banner = $("#pushbanner");
+  if (banner) banner.innerHTML = await pushBanner();
+  const save = $("#rsave");
+  if (save) save.onclick = createReminder;
+}
+
+async function createReminder() {
+  const title = $("#rt").value.trim();
+  const due = $("#rd").value;
+  if (!title || !due) return toast("Rubrik och datum behövs", true);
+  try {
+    await api("/reminders", {
+      method: "POST",
+      body: {
+        title,
+        due_date: due,
+        body: $("#rb").value,
+        customer_id: $("#rc").value || null,
+        notify_days_before: parseInt($("#rn").value, 10),
+        kind: "egen",
+      },
+    });
+    toast("Påminnelse sparad");
+    viewReminders();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function completeReminder(id) {
+  await api(`/reminders/${id}`, { method: "PATCH", body: { done: true } });
+  toast("Kvitterad");
+  await afterReminderChange();
+}
+async function reopenReminder(id) {
+  await api(`/reminders/${id}`, { method: "PATCH", body: { done: false } });
+  await afterReminderChange();
+}
+async function snoozeReminder(id, days) {
+  await api(`/reminders/${id}`, { method: "PATCH", body: { snooze_days: days } });
+  toast(`Flyttad ${days} dagar framåt`);
+  await afterReminderChange();
+}
+async function deleteReminder(id) {
+  if (!confirm("Ta bort påminnelsen?")) return;
+  await api(`/reminders/${id}`, { method: "DELETE" });
+  await afterReminderChange();
+}
+async function afterReminderChange() {
+  if (S.route === "kund") {
+    S.data.reminders = await api(`/reminders?status=open&customer_id=${S.data.customer.id}`);
+    renderTab();
+    refreshBadge();
+  } else {
+    viewReminders();
+  }
+}
+async function runScan() {
+  const r = await api("/reminders/scan", { method: "POST" });
+  toast(r.created ? `${r.created} nya påminnelser skapades` : "Inget nytt att skapa");
+  viewReminders();
+}
+
+function tabReminders(c, items) {
+  return `
+  ${
+    items.length
+      ? items.map(reminderRow).join("")
+      : `<div class="empty"><div class="big">Inga öppna påminnelser</div>
+         <p>Sätt ett datum för service, vattenprov eller intyg på anläggningen, då skapas de automatiskt.</p></div>`
+  }
+  ${
+    S.user.role === "lasare"
+      ? ""
+      : `<div class="row" style="margin-top:14px">
+    <button class="btn ghost sm" onclick="go('paminnelser')">Alla påminnelser</button>
+    <button class="btn ghost sm" onclick="runScanFor('${c.id}')">Uppdatera automatiska</button></div>`
+  }`;
+}
+async function runScanFor(customerId) {
+  await api("/reminders/scan", { method: "POST" });
+  S.data.reminders = await api(`/reminders?status=open&customer_id=${customerId}`);
+  renderTab();
+  toast("Automatiska påminnelser uppdaterade");
+}
+
+/* ---------------- administration ---------------- */
+async function viewAdmin() {
+  const tab = S.tab && ["konton", "notiser", "backup", "logg"].includes(S.tab) ? S.tab : "konton";
+  const T = (id, label) =>
+    `<button class="${tab === id ? "on" : ""}" onclick="go('admin','${id}')">${label}</button>`;
+  mountShell(`
+    <div class="spread"><div><div class="eyebrow">Administration</div><h1>Inställningar</h1></div></div>
+    <div class="tabs">${T("konton", "Konton")}${T("notiser", "Notiser")}${T("backup", "Backup")}${T("logg", "Logg")}</div>
+    <div id="adminbody"><div class="skel"></div><div class="skel"></div></div>`);
+
+  if (tab === "konton") await adminUsers();
+  else if (tab === "notiser") await adminNotifications();
+  else if (tab === "backup") await adminBackup();
+  else await adminLog();
+}
+
+async function adminUsers() {
+  const users = await api("/users");
+  $("#adminbody").innerHTML = `
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Användare</h2></div>
+    <table><thead><tr><th>Användare</th><th>Namn</th><th>Roll</th><th>Tvåfaktor</th><th>Senast inloggad</th><th>Status</th></tr></thead>
+    <tbody>${users
+      .map(
+        (u) => `<tr>
+      <td data-l="Användare" class="mono">${esc(u.username)}</td>
+      <td data-l="Namn">${esc(u.full_name || "—")}</td>
+      <td data-l="Roll">${esc(u.role)}</td>
+      <td data-l="Tvåfaktor">${u.totp_enabled ? "Aktiv" : "Av"}</td>
+      <td data-l="Senast" class="tid">${dt(u.last_login)}</td>
+      <td data-l="Status">${u.is_active ? `<span class="tag ok">Aktivt</span>` : `<span class="tag action">Avstängt</span>`}</td>
+    </tr>`
+      )
+      .join("")}</tbody></table></div>
+  <div class="card"><div class="hd"><h2>Nytt konto</h2></div><div class="pad">
+    <div class="fgrid">
+      <div><label class="f" for="nu">Användarnamn</label><input id="nu" autocapitalize="none"></div>
+      <div><label class="f" for="nn">Namn</label><input id="nn"></div>
+      <div><label class="f" for="np">Lösenord</label><input id="np" type="password" autocomplete="new-password"></div>
+      <div><label class="f" for="nr">Roll</label><select id="nr">
+        <option value="tekniker">tekniker – läsa och skriva</option>
+        <option value="admin">admin – även konton och backup</option>
+        <option value="lasare">lasare – bara läsa</option></select></div>
+    </div>
+    <button class="btn pri sm" style="margin-top:14px" id="ncreate">Skapa konto</button>
+  </div></div>`;
+  $("#ncreate").onclick = async () => {
+    try {
+      await api("/users", {
+        method: "POST",
+        body: {
+          username: $("#nu").value.trim(),
+          full_name: $("#nn").value.trim(),
+          password: $("#np").value,
+          role: $("#nr").value,
+        },
+      });
+      toast("Kontot skapat");
+      adminUsers();
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+}
+
+async function adminNotifications() {
+  const [mail, devices] = await Promise.all([
+    api("/notifications/email"),
+    api("/notifications/push/status"),
+  ]);
+  $("#adminbody").innerHTML = `
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Notiser på denna enhet</h2></div><div class="pad">
+    <div id="pushbanner"></div>
+    <p class="hint" style="margin-top:0">Notiser är kopplade till enheten, inte till kontot. Varje telefon
+      och dator behöver slås på en gång. På iPhone krävs att appen ligger på hemskärmen.</p>
+    ${
+      devices.devices.length
+        ? `<div style="margin-top:12px">${devices.devices
+            .map(
+              (d) => `<div class="filerow"><div class="ftype other">ENHET</div>
+        <div style="flex:1;min-width:0"><div style="font-weight:500;font-size:13.5px">${esc((d.user_agent || "okänd enhet").slice(0, 70))}</div>
+        <div class="fmeta">tillagd ${dt(d.created_at, false)}${d.last_used_at ? " · senaste notis " + dt(d.last_used_at) : ""}</div></div></div>`
+            )
+            .join("")}</div>`
+        : `<p class="hint">Inga enheter registrerade för ditt konto än.</p>`
+    }
+  </div></div>
+
+  <div class="card"><div class="hd"><h2>E-post</h2>
+    <span class="tag ${mail.enabled ? "ok" : "n"}">${mail.enabled ? "Aktiv" : "Av"}</span></div><div class="pad">
+    <div class="fgrid">
+      <div><label class="f" for="mh">SMTP-server</label><input id="mh" value="${esc(mail.host || "")}" placeholder="smtp.leverantor.se"></div>
+      <div><label class="f" for="mp">Port</label><input id="mp" type="number" value="${esc(mail.port || 587)}"></div>
+      <div><label class="f" for="ms">Kryptering</label><select id="ms">
+        ${["starttls", "ssl", "none"].map((x) => `<option value="${x}"${mail.security === x ? " selected" : ""}>${x === "none" ? "ingen" : x.toUpperCase()}</option>`).join("")}</select></div>
+      <div><label class="f" for="mu">Användarnamn</label><input id="mu" value="${esc(mail.username || "")}" autocapitalize="none"></div>
+      <div><label class="f" for="mw">Lösenord</label><input id="mw" type="password" placeholder="${mail.password_set ? "sparat, lämna tomt för att behålla" : "anges en gång"}"></div>
+      <div><label class="f" for="mf">Avsändare</label><input id="mf" value="${esc(mail.sender || "")}" placeholder="borrjournal@dinfirma.se"></div>
+    </div>
+    <label class="f" for="mr">Mottagare av påminnelser</label>
+    <input id="mr" value="${esc((mail.recipients || []).join(", "))}" placeholder="mikael@dinfirma.se, anna@dinfirma.se">
+    <div class="hint">Kommaseparerat. Ett samlat mejl skickas per genomsökning, inte ett per påminnelse.</div>
+    <div class="row" style="margin-top:14px">
+      <label style="display:flex;gap:8px;align-items:center;font-size:14px;width:auto">
+        <input type="checkbox" id="me" ${mail.enabled ? "checked" : ""} style="width:auto"> Skicka påminnelser via e-post</label>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button class="btn pri sm" id="msave">Spara</button>
+      <button class="btn ghost sm" id="mtest">Skicka testmejl</button>
+    </div>
+  </div></div>`;
+
+  const banner = $("#pushbanner");
+  if (banner) banner.innerHTML = await pushBanner();
+
+  const collect = () => ({
+    enabled: $("#me").checked,
+    host: $("#mh").value.trim(),
+    port: parseInt($("#mp").value, 10) || 587,
+    security: $("#ms").value,
+    username: $("#mu").value.trim(),
+    password: $("#mw").value,
+    sender: $("#mf").value.trim(),
+    recipients: $("#mr").value,
+  });
+  $("#msave").onclick = async () => {
+    try {
+      await api("/notifications/email", { method: "PUT", body: collect() });
+      toast("E-postinställningar sparade");
+      adminNotifications();
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+  $("#mtest").onclick = async () => {
+    try {
+      await api("/notifications/email", { method: "PUT", body: collect() });
+      const r = await api("/notifications/email/test", { method: "POST", body: {} });
+      toast(`Testmejl skickat till ${r.sent_to.join(", ")}`);
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+}
+
+async function adminBackup() {
+  const data = await api("/backups");
+  const sch = data.schedule;
+  $("#adminbody").innerHTML = `
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Skapa backup</h2>
+    <span class="tag n">${data.engine === "pg_dump" ? "pg_dump" : "logisk JSON-dump"}</span></div><div class="pad">
+    <p class="lead" style="margin-top:0">Varje backup är en tar.gz med databasdump, alla uppladdade filer,
+      tumnaglar och ett manifest. ${
+        data.postgres && !data.pg_dump_available
+          ? `<strong>Obs:</strong> pg_dump saknas i containern, så en logisk JSON-dump används i stället.`
+          : ""
+      }</p>
+    <div class="row">
+      <button class="btn pri" id="bnow">Skapa backup nu</button>
+      <span class="hint" style="margin:0">Upptaget av backuper: ${bytes(data.usage.backup_bytes)} · ledigt på disk: ${bytes(data.usage.free_bytes)}</span>
+    </div>
+  </div></div>
+
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Schema</h2>
+    <span class="tag ${sch.enabled ? "ok" : "n"}">${sch.enabled ? "Aktivt" : "Av"}</span></div><div class="pad">
+    <div class="fgrid">
+      <div><label class="f" for="sh">Timme</label><input id="sh" type="number" min="0" max="23" value="${sch.hour}"></div>
+      <div><label class="f" for="sm">Minut</label><input id="sm" type="number" min="0" max="59" value="${sch.minute}"></div>
+      <div><label class="f" for="sk">Behåll antal dagar</label><input id="sk" type="number" min="1" value="${sch.keep_days}"></div>
+      <div><label class="f" for="sr">Genomsök påminnelser kl.</label><input id="sr" type="number" min="0" max="23" value="${sch.reminder_scan_hour}"></div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <label style="display:flex;gap:8px;align-items:center;font-size:14px;width:auto">
+        <input type="checkbox" id="se" ${sch.enabled ? "checked" : ""} style="width:auto"> Kör automatisk backup varje natt</label>
+    </div>
+    <div class="hint">De tre senaste backuperna behålls alltid, även om de är äldre än gränsen.</div>
+    <button class="btn pri sm" style="margin-top:14px" id="ssave">Spara schema</button>
+  </div></div>
+
+  <div class="card"><div class="hd"><h2>Backuper</h2><span class="tag n">${data.backups.length}</span></div>
+    <table><thead><tr><th>Skapad</th><th>Typ</th><th>Motor</th><th>Storlek</th><th>Status</th><th></th></tr></thead>
+    <tbody>${
+      data.backups.length
+        ? data.backups
+            .map(
+              (b) => `<tr>
+      <td data-l="Skapad" class="tid">${dt(b.created_at)}<div class="tsub">${esc(b.created_by)}</div></td>
+      <td data-l="Typ">${esc(b.trigger)}</td>
+      <td data-l="Motor" class="mono" style="font-size:12.5px">${esc(b.engine || "—")}</td>
+      <td data-l="Storlek" class="tid">${bytes(b.size_bytes)}</td>
+      <td data-l="Status">${b.status === "klar" ? `<span class="tag ok">Klar</span>` : `<span class="tag action">Fel</span>`}
+        ${b.status !== "klar" ? `<div class="tsub">${esc((b.detail || "").slice(0, 90))}</div>` : ""}</td>
+      <td data-l=""><div class="row" style="gap:6px">
+        ${b.exists ? `<button class="btn ghost sm" onclick="downloadBackup('${b.id}','${esc(b.filename)}')">Ladda ner</button>
+        <button class="btn ghost sm" onclick="showRestore('${b.id}')">Återställ</button>` : ""}
+        <button class="btn danger sm" onclick="deleteBackup('${b.id}')">Ta bort</button></div></td></tr>`
+            )
+            .join("")
+        : ""
+    }</tbody></table>
+    ${data.backups.length ? "" : `<div class="empty"><div class="big">Inga backuper än</div><p>Skapa en nu, eller vänta på nattens körning.</p></div>`}
+  </div>
+  <div id="restorebox"></div>`;
+
+  $("#bnow").onclick = async (e) => {
+    e.target.disabled = true;
+    e.target.textContent = "Skapar backup…";
+    try {
+      const r = await api("/backups", { method: "POST" });
+      toast(`Backup klar, ${bytes(r.size_bytes)}`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+    adminBackup();
+  };
+  $("#ssave").onclick = async () => {
+    try {
+      await api("/backups/schedule", {
+        method: "PUT",
+        body: {
+          enabled: $("#se").checked,
+          hour: parseInt($("#sh").value, 10),
+          minute: parseInt($("#sm").value, 10),
+          keep_days: parseInt($("#sk").value, 10),
+          reminder_scan_hour: parseInt($("#sr").value, 10),
+        },
+      });
+      toast("Schemat sparat");
+      adminBackup();
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+}
+
+async function downloadBackup(id, filename) {
+  const res = await fetch(`/api/backups/${id}/download`, {
+    headers: { Authorization: `Bearer ${S.token}` },
+  });
+  if (!res.ok) return toast("Nedladdningen misslyckades", true);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(await res.blob());
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast("Backup nedladdad");
+}
+
+async function deleteBackup(id) {
+  if (!confirm("Ta bort backupen permanent?")) return;
+  await api(`/backups/${id}`, { method: "DELETE" });
+  toast("Backupen borttagen");
+  adminBackup();
+}
+
+async function showRestore(id) {
+  const g = await api(`/backups/${id}/restore-guide`);
+  $("#restorebox").innerHTML = `
+  <div class="card" style="margin-top:18px;border-color:#E0BAB2">
+    <div class="hd" style="background:#FBEEEC"><h2>Återställ ${esc(g.filename)}</h2></div>
+    <div class="pad">
+      <div class="err" style="margin-top:0">${esc(g.warning)}</div>
+      <p class="lead">Återställning görs från terminalen med avsikt. En webbknapp som skriver över
+        databasen är för lätt att trycka på av misstag, och appen kan inte läsa in en dump
+        i den databas den själv använder utan att först kopplas ner.</p>
+      <ol class="mono" style="font-size:12.5px;line-height:1.9;background:#F8FAFA;border:1px solid var(--line);border-radius:3px;padding:14px 14px 14px 32px">
+        ${g.steps.map((x) => `<li>${esc(x)}</li>`).join("")}</ol>
+      <div class="row">
+        <button class="btn ghost sm" onclick="copySteps(${JSON.stringify(JSON.stringify(g.steps)).replace(/"/g, "&quot;")})">Kopiera kommandon</button>
+        <button class="btn ghost sm" onclick="document.getElementById('restorebox').innerHTML=''">Stäng</button>
+      </div>
+    </div></div>`;
+  $("#restorebox").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function copySteps(json) {
+  const steps = typeof json === "string" ? JSON.parse(json) : json;
+  navigator.clipboard
+    .writeText(steps.join("\n"))
+    .then(() => toast("Kommandona kopierade"))
+    .catch(() => toast("Kunde inte kopiera, markera texten i stället", true));
+}
+
+async function adminLog() {
+  const audit = await api("/audit?limit=100");
+  $("#adminbody").innerHTML = `
+  <div class="card"><div class="hd"><h2>Händelselogg</h2></div>
+    <table><thead><tr><th>Tid</th><th>Användare</th><th>Händelse</th><th>Objekt</th><th>IP</th></tr></thead>
+    <tbody>${audit
+      .map(
+        (a) => `<tr><td data-l="Tid" class="tid">${dt(a.at)}</td><td data-l="Användare">${esc(a.actor)}</td>
+      <td data-l="Händelse" class="mono" style="font-size:12.5px">${esc(a.action)}</td>
+      <td data-l="Objekt" class="tid">${esc(a.object_type)} ${esc(a.detail || "")}</td>
+      <td data-l="IP" class="tid">${esc(a.ip_address || "—")}</td></tr>`
+      )
+      .join("")}</tbody></table></div>`;
+}
+
+/* ---------------- render ---------------- */
+function render() {
+  if (!S.token || !S.user) return viewLogin();
+  const views = {
+    oversikt: viewDashboard,
+    kunder: viewCustomers,
+    kund: viewCustomer,
+    pumpar: viewPumps,
+    anlaggningar: viewFacilities,
+    journal: viewJournalAll,
+    paminnelser: viewReminders,
+    ny: viewOnboarding,
+    admin: viewAdmin,
+  };
+  const fn = views[S.route] || viewDashboard;
+  Promise.resolve(fn()).catch((e) => {
+    if (e.message !== "401") {
+      mountShell(`<div class="err">${esc(e.message)}</div>
+        <button class="btn ghost sm" onclick="render()">Försök igen</button>`);
+    }
+  });
+}
+
+applyHash();
+
+if (S.token) {
+  PUSH.ready();
+  refreshBadge();
+}

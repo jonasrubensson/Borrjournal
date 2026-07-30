@@ -1,0 +1,21 @@
+{
+  "name": "Borrjournal",
+  "short_name": "Borrjournal",
+  "description": "Kund- och anläggningsregister för vattenborrning",
+  "start_url": "/#/oversikt",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0E1F2A",
+  "theme_color": "#0E1F2A",
+  "lang": "sv-SE",
+  "icons": [
+    { "src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/static/icons/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Påminnelser", "url": "/#/paminnelser" },
+    { "name": "Ny anläggning", "url": "/#/ny" }
+  ]
+}
