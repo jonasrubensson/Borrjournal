@@ -1,9 +1,9 @@
 # Variant utan Postgres: en enda container, databasen är en fil i volymen.
+#
 #   docker compose -f docker-compose.sqlite.yml up -d --build
 #
-# Rimligt för ett företag med några användare. Backup fungerar likadant, men
-# använder logisk JSON-dump i stället för pg_dump. Byt inte hit om du redan
-# kör Postgres med data i - migrera i så fall via en JSON-backup.
+# Rimligt för ett företag med några användare. Backupen fungerar likadant.
+
 services:
   app:
     build: ./backend
@@ -21,14 +21,8 @@ services:
     volumes:
       - files:/data
       - ./frontend:/app/frontend:ro
-    networks: [proxy]
     ports:
-      - "${APP_BIND:-127.0.0.1:8000}:8000"
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8000}:8000"
 
 volumes:
   files:
-
-networks:
-  proxy:
-    external: true
-    name: proxy

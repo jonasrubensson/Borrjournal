@@ -42,36 +42,38 @@ eget konto under **Konton** och stänga av admin-kontot.
 Vill du testa med demodata i en tom databas: sätt `SEED_DEMO=true` innan första starten.
 Sju kunder läggs in, varav tre delar pumpmodell så att flottfiltret blir meningsfullt att prova.
 
-### Bakom Nginx Proxy Manager
+### Reverse proxy framför
 
-Appen terminerar ingen HTTPS själv, det gör NPM. Två sätt att koppla ihop dem:
+Appen lyssnar på port 8000 och terminerar ingen HTTPS själv. Sätt vilken proxy du vill framför.
+Ingen nätverkskonfiguration i compose, ingenting att förbereda.
 
-**Delat Docker-nätverk (rekommenderas).** Skapa nätverket en gång, lägg NPM på det, och kommentera
-bort `ports`-blocket i `docker-compose.yml`. Då är appen inte nåbar från värden alls.
+Port och lyssnaradress sätts i `.env`:
+
+| Variabel | Standard | Betydelse |
+|---|---|---|
+| `APP_PORT` | `8000` | Porten på värden. Ändra om 8000 är upptagen. |
+| `APP_BIND` | `0.0.0.0` | Vilken adress porten binds till. `127.0.0.1` gör appen nåbar bara lokalt. |
+
+Kör proxyn i Docker behöver den nå värdens IP, låt då `APP_BIND` stå kvar på `0.0.0.0`. Kör den
+direkt på värden är `APP_BIND=127.0.0.1` säkrare, då kan ingen nå appen förbi proxyn.
+Efter ändring: `docker compose up -d`.
+
+Vill du hellre nå appen på containernamnet, koppla in proxyn i appens nätverk efter uppstart:
 
 ```bash
-docker network create proxy
+docker network ls | grep borrjournal          # heter normalt borrjournal_default
+docker network connect borrjournal_default <din-proxy-container>
 ```
 
-I NPM: **Proxy Hosts → Add Proxy Host**
+Då svarar appen på `http://borrjournal-app:8000`.
 
-| Fält | Värde |
-|---|---|
-| Domain Names | din domän |
-| Scheme | `http` |
-| Forward Hostname | `borrjournal-app` |
-| Forward Port | `8000` |
-| Block Common Exploits | på |
-| Websockets Support | behövs inte, appen använder inga |
-| SSL | begär Let's Encrypt-certifikat, slå på **Force SSL** och **HTTP/2** |
+#### Om proxyn är Nginx Proxy Manager
 
-**Utan delat nätverk.** Låt `APP_BIND` stå kvar och peka NPM på värdens Docker-brygga
-(`172.17.0.1`) eller LAN-adress, port 8000.
+Proxy Hosts → Add Proxy Host: scheme `http`, forward hostname värdens IP (eller
+`borrjournal-app`), port `8000`, Block Common Exploits på. SSL-fliken: Let's Encrypt, Force SSL
+och HTTP/2.
 
-#### Advanced-fliken i NPM
-
-Klistra in det här. Den första raden är den viktiga: nginx stryper annars uppladdningar långt
-under 25 MB, och felet syns bara som en avbruten uppladdning.
+Advanced-fliken, den viktiga raden först:
 
 ```nginx
 client_max_body_size 30M;
@@ -83,90 +85,14 @@ add_header X-Frame-Options "DENY" always;
 add_header Referrer-Policy "same-origin" always;
 ```
 
-Håll `client_max_body_size` något högre än `MAX_UPLOAD_MB` i `.env`, så att det är appen som
-avvisar för stora filer med ett begripligt meddelande i stället för nginx med ett 413.
+Utan `client_max_body_size` stryper nginx uppladdningar långt under 25 MB, och felet syns bara som
+att uppladdningen dör mitt i. Håll den något över `MAX_UPLOAD_MB` i `.env`, så är det appen som
+avvisar för stora filer med ett läsbart meddelande.
 
-**HTTPS är inte valfritt om du vill ha notiser.** Service workers och webbpush fungerar bara över
-HTTPS (undantag: `localhost` vid utveckling). Ordna certifikatet i NPM innan du testar notiser på
-telefonen.
+**Stäng port 8000 utifrån i brandväggen.** Annars går den att nå direkt, förbi HTTPS.
 
-### Backup och återställning
-
-Backup styrs från **Inställningar → Backup** i gränssnittet, som admin. Där kan du:
-
-* skapa en backup direkt och ladda ner den till din dator,
-* slå på nattlig automatisk backup med valfri tid och hur många dagar som ska sparas,
-* se storlek, status och vilken motor som användes.
-
-Varje backup är en `tar.gz` med databasdump, alla uppladdade filer, tumnaglar och ett
-`manifest.json`. De tre senaste behålls alltid, även om de är äldre än gränsen.
-
-Dumpen är en logisk JSON-dump. Den innehåller allt och läses tillbaka med `python -m app.restore`.
-Appimagen installerar medvetet inga extra paket, eftersom varje externt paketrepo är något som kan
-fälla bygget en tisdagsmorgon. Vill du ha en native `pg_dump`-fil vid sidan om, som kan läsas av
-vem som helst med `pg_restore` utan appen, kör den från db-containern som redan har rätt version:
-
-```bash
-docker compose exec -T db pg_dump -U borrjournal -Fc borrjournal > db-$(date +%F).dump
-```
-
-Ligger `pg_dump` ändå i PATH använder appen den automatiskt, och backupvyn visar vilken motor som
-användes.
-
-**Återställning görs från terminalen, inte i webben.** Det är ett medvetet val: en knapp som skriver
-över hela databasen är för lätt att trycka på av misstag, och appen kan inte läsa in en dump i den
-databas den själv har öppen. Klicka **Återställ** på en backup så visas de exakta kommandona för
-just den filen, med en kopiera-knapp. I korthet:
-
-```bash
-docker compose stop app
-docker compose cp app:/data/backups/borrjournal-....tar.gz ./
-tar -xzf borrjournal-....tar.gz
-cat db.dump | docker compose exec -T db pg_restore -U borrjournal -d borrjournal --clean --if-exists
-docker compose cp files/. app:/data/files/
-docker compose start app
-```
-
-Återläsning av båda formaten är testad mot en tom databas, inte bara dokumenterad.
-
-## Påminnelser
-
-Fyra typer skapas automatiskt från anläggningens datum, en gång per dygn och vid **Kör
-genomsökning**:
-
-| Typ | Beräknas från | Förvarning |
-|---|---|---|
-| Service | senaste service + serviceintervall | 30 dagar |
-| Vattenprov | provdatum + giltighetstid (36 mån som standard) | 30 dagar |
-| Intyg | utgångsdatum på anläggningen | 45 dagar |
-| Uppföljning | datumfältet i journalrutan | på dagen |
-
-Egna påminnelser lägger du till i påminnelsevyn, med eller utan koppling till en kund. Automatiska
-påminnelser dubbleras inte: varje kombination av typ, anläggning och datum har en nyckel, så en ny
-genomsökning skapar inget som redan finns. Kvittera med **Klar** eller skjut fram med **+7 d**.
-
-Utskicket är ett samlat meddelande per körning, inte ett per rad. Både e-post och push går ut
-samtidigt, och raden märks med vilka kanaler som användes.
-
-## Notiser på telefonen
-
-Appen är en PWA. Lägg till den på hemskärmen och notiser fungerar även när webbläsaren är stängd.
-
-* **Android och Chrome/Edge på dator:** fungerar direkt, slå på notiser i påminnelsevyn.
-* **iPhone och iPad:** kräver iOS 16.4 eller senare, och att appen läggs till på hemskärmen först
-  (Dela → Lägg till på hemskärmen). Webbpush fungerar inte i Safari-fliken, bara i den installerade
-  appen. Gränssnittet upptäcker detta och visar instruktionen i stället för en knapp som inte
-  fungerar.
-* **HTTPS krävs** för både service worker och push. Kör därför `--profile proxy` med Caddy, eller
-  motsvarande, innan du testar notiser på telefonen. `localhost` fungerar för utveckling.
-
-Nycklarna för push (VAPID) genereras av servern första gången någon efterfrågar dem. Den privata
-nyckeln lämnar aldrig servern och returneras inte av API:et.
-
-E-post konfigureras under **Inställningar → Notiser**: server, port, kryptering, inloggning,
-avsändare och mottagare, med en knapp för testmejl. SMTP-lösenordet returneras aldrig av API:et,
-men det lagras i databasen, så en databasdump innehåller det. Vill du undvika det, peka mot en
-intern relay som inte kräver inloggning.
+**HTTPS krävs för notiser.** Service workers och webbpush fungerar bara över HTTPS, med undantag
+för `localhost`. Fixa certifikatet innan du testar notiser på telefonen.
 
 ## Jobb i närheten
 

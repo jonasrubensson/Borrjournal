@@ -1,3 +1,12 @@
+# Borrjournal. Två containrar, inga förberedelser.
+#
+#   cp .env.example .env      (fyll i hemligheterna)
+#   docker compose up -d --build
+#
+# Appen lyssnar på APP_PORT från .env (8000 om inget anges).
+# Sätt en reverse proxy framför den för HTTPS.
+# Databasen publiceras inte alls och är bara nåbar från appen.
+
 services:
   db:
     image: postgres:16-alpine
@@ -13,7 +22,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    networks: [internal]
 
   app:
     build: ./backend
@@ -31,27 +39,16 @@ services:
       BOOTSTRAP_ADMIN: ${BOOTSTRAP_ADMIN:-admin}
       BOOTSTRAP_PASSWORD: ${BOOTSTRAP_PASSWORD:?sätt BOOTSTRAP_PASSWORD i .env}
       SEED_DEMO: ${SEED_DEMO:-false}
-      # Backuper hamnar under /data/backups, dvs. i samma volym som filerna.
-      # Montera gärna en extern sökväg dit om du vill ha dem utanför Docker.
     volumes:
+      # Uppladdade filer, tumnaglar och backuper
       - files:/data
       - ./frontend:/app/frontend:ro
-    networks: [internal, proxy]
-    # Bind bara mot loopback eller ett internt nätkort. HTTPS terminerar i
-    # Nginx Proxy Manager, appen ska aldrig ligga öppen mot internet.
     ports:
-      - "${APP_BIND:-127.0.0.1:8000}:8000"
+      # Port och lyssnaradress sätts i .env. Standard: 8000 på alla gränssnitt.
+      # Sätt APP_BIND=127.0.0.1 om proxyn kör direkt på värden.
+      # Stäng porten utifrån i brandväggen, annars går den att nå förbi HTTPS.
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8000}:8000"
 
 volumes:
   db-data:
   files:
-
-networks:
-  internal:
-    internal: true
-  # Delat nätverk med Nginx Proxy Manager. Skapa det en gång:
-  #   docker network create proxy
-  # Då kan NPM peka på hostname "borrjournal-app" port 8000 utan att gå via värdens IP.
-  proxy:
-    external: true
-    name: proxy
