@@ -16,7 +16,7 @@ import shutil
 import tarfile
 import tempfile
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,8 +46,8 @@ def _pg_parts() -> dict:
     return {
         "host": u.hostname or "localhost",
         "port": str(u.port or 5432),
-        "user": u.username or "",
-        "password": u.password or "",
+        "user": unquote(u.username or ""),
+        "password": unquote(u.password or ""),
         "db": (u.path or "/").lstrip("/"),
     }
 
