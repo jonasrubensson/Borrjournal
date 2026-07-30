@@ -205,6 +205,9 @@ function shell(inner) {
           <input id="gq" type="search" placeholder="Sök kund, brunn, pumpmodell, serienr, journal" autocomplete="off">
           <div id="gres"></div>
         </div>
+        <button class="btn ghost sm" onclick="go('nara')" title="Jobb i närheten" aria-label="Jobb i närheten">
+          <svg width="15" height="15" viewBox="0 0 20 20" fill="none"><path d="M10 18s6-5.3 6-10a6 6 0 1 0-12 0c0 4.7 6 10 6 10z" stroke="currentColor" stroke-width="1.5"/><circle cx="10" cy="8" r="2.2" stroke="currentColor" stroke-width="1.5"/></svg>
+          <span class="hidemob">Nära</span></button>
         <button class="btn pri sm" onclick="go('ny')">+ Ny</button>
         <div class="who"><span class="av">${esc(initials)}</span><span>${esc(u.full_name || u.username || "")}</span></div>
       </div>
@@ -953,7 +956,13 @@ async function viewOnboarding() {
         ${fInput("property_designation", "Fastighetsbeteckning", "text", "Vässlan 3:14")}
         ${fInput("municipality", "Kommun", "text", "Norrtälje")}
         ${fInput("address", "Adress till borrplatsen", "text", "Vässlanvägen 12")}
-        ${fInput("coordinates", "Koordinater", "text", "N 6620123 E 674321", "Klistra in från kartan eller mobilens GPS")}
+        <div><label class="f" for="fld_coordinates">Koordinater</label>
+          <input id="fld_coordinates" type="text" placeholder="59.7231, 18.9412 eller N 6620123 E 674321"
+            value="${esc(S.form.coordinates ?? "")}" oninput="S.form['coordinates']=this.value;checkCoord(this.value)">
+          <div class="row" style="margin-top:6px">
+            <button class="btn ghost sm" type="button" onclick="fillPosition()">Hämta min position</button>
+            <span class="hint" id="coordhint" style="margin:0">Decimalgrader eller SWEREF 99 TM, båda fungerar.</span>
+          </div></div>
         ${fSelect("permit_status", "Anmälan till kommunen", ["Inte påbörjad", "Inskickad", "Beviljad", "Krävs inte"])}
       </div>
       ${fArea("access_notes", "Åtkomst och förutsättningar", "Framkomlighet för rigg, lutning, elskåp, var slam får läggas.")}
@@ -1022,6 +1031,46 @@ async function viewOnboarding() {
   if (save) save.onclick = submitOnboarding;
 }
 
+let coordTimer;
+function checkCoord(value) {
+  clearTimeout(coordTimer);
+  coordTimer = setTimeout(async () => {
+    const hint = $("#coordhint");
+    if (!hint) return;
+    if (!value.trim()) {
+      hint.textContent = "Decimalgrader eller SWEREF 99 TM, båda fungerar.";
+      delete S.form.latitude;
+      delete S.form.longitude;
+      return;
+    }
+    const r = await api(`/coordinates/parse?q=${encodeURIComponent(value)}`);
+    if (r.ok) {
+      S.form.latitude = r.latitude;
+      S.form.longitude = r.longitude;
+      hint.innerHTML = `Tolkat som <strong>${r.latitude}, ${r.longitude}</strong>`;
+    } else {
+      delete S.form.latitude;
+      delete S.form.longitude;
+      hint.innerHTML = `<span style="color:var(--alert)">Kunde inte tolka koordinaten ännu</span>`;
+    }
+  }, 400);
+}
+
+async function fillPosition() {
+  const hint = $("#coordhint");
+  hint.textContent = "Hämtar position…";
+  try {
+    const pos = await GEO.get();
+    S.form.coordinates = `${pos.lat.toFixed(6)}, ${pos.lon.toFixed(6)}`;
+    S.form.latitude = pos.lat;
+    S.form.longitude = pos.lon;
+    $("#fld_coordinates").value = S.form.coordinates;
+    hint.textContent = `Position hämtad, noggrannhet ±${Math.round(pos.acc)} m.`;
+  } catch (e) {
+    hint.innerHTML = `<span style="color:var(--alert)">${esc(e.message)}</span>`;
+  }
+}
+
 function numOrNull(v) {
   if (v === undefined || v === null || String(v).trim() === "") return null;
   const n = parseFloat(String(v).replace(",", "."));
@@ -1054,6 +1103,8 @@ async function submitOnboarding() {
       facility_type: f.facility_type || "Bergborrad brunn",
       drilled_at: f.drilled_at || "",
       coordinates: f.coordinates || "",
+      latitude: f.latitude ?? null,
+      longitude: f.longitude ?? null,
       access_notes: f.access_notes || "",
       permit_status: f.permit_status || "",
       soil_depth_m: numOrNull(f.soil_depth_m),
@@ -1393,6 +1444,189 @@ async function runScanFor(customerId) {
   toast("Automatiska påminnelser uppdaterade");
 }
 
+
+/* ---------------- jobb i närheten ---------------- */
+const GEO = {
+  supported: () => "geolocation" in navigator,
+  get: () =>
+    new Promise((resolve, reject) => {
+      if (!GEO.supported()) return reject(new Error("Enheten har ingen platstjänst."));
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude, acc: pos.coords.accuracy }),
+        (err) => {
+          const texts = {
+            1: "Platsåtkomst nekad. Tillåt plats för sidan i webbläsarens inställningar.",
+            2: "Positionen kunde inte bestämmas. Prova igen utomhus.",
+            3: "Tog för lång tid att hitta positionen.",
+          };
+          reject(new Error(texts[err.code] || "Kunde inte hämta positionen."));
+        },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+      );
+    }),
+};
+
+function mapLink(lat, lon) {
+  return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}`;
+}
+
+function routeLink(origin, stops) {
+  const dest = stops[stops.length - 1];
+  const waypoints = stops.slice(0, -1).map((s) => `${s.latitude},${s.longitude}`).join("|");
+  let url = `https://www.google.com/maps/dir/?api=1&destination=${dest.latitude},${dest.longitude}`;
+  if (origin) url += `&origin=${origin.latitude || origin.lat},${origin.longitude || origin.lon}`;
+  if (waypoints) url += `&waypoints=${encodeURIComponent(waypoints)}`;
+  return url;
+}
+
+function nearbyRow(h, selectable = true) {
+  const prio = h.priority === 3 ? "action" : h.priority === 2 ? "soon" : "n";
+  return `<div class="filerow">
+    ${
+      selectable
+        ? `<input type="checkbox" class="stop" style="width:auto;flex:0 0 auto" data-lat="${h.latitude}" data-lon="${h.longitude}"
+             ${h.priority > 0 ? "checked" : ""} aria-label="Ta med ${esc(h.customer_name)} i rundan">`
+        : ""
+    }
+    <div class="ftype" style="background:${h.priority === 3 ? "#A6402F" : h.priority === 2 ? "#B3801F" : "var(--stone)"}">
+      ${h.distance_km < 10 ? h.distance_km.toFixed(1) : Math.round(h.distance_km)}<br>km</div>
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:600">${esc(h.customer_name)}</div>
+      <div class="fmeta">${esc(h.facility_no)} · ${esc(h.bearing)} · ${esc(h.property_designation || "")} ${esc(h.municipality || "")}</div>
+      <div class="tsub" style="margin-top:2px"><span class="tag ${prio}" style="margin-right:6px">${esc(h.reason)}</span></div>
+    </div>
+    <div class="row" style="gap:6px">
+      ${h.phone ? `<a class="btn ghost sm" href="tel:${esc(h.phone)}">Ring</a>` : ""}
+      <a class="btn ghost sm" href="${mapLink(h.latitude, h.longitude)}" target="_blank" rel="noopener">Karta</a>
+      <button class="btn ghost sm" onclick="go('kund','${h.customer_id}')">Öppna</button>
+    </div>
+  </div>`;
+}
+
+async function viewNearby() {
+  const radius = S.filter.radius || 25;
+  const onlyJobs = S.filter.onlyJobs !== false;
+  mountShell(`
+  <div class="spread">
+    <div><div class="eyebrow">Planering</div><h1>Jobb i närheten</h1>
+      <p class="lead">Hämta din position, eller klistra in en koordinat. Anläggningar som behöver
+      något sorteras först, därefter efter avstånd – en försenad service två mil bort är oftast
+      mer värd en avstickare än en fungerande brunn på samma gata.</p></div>
+  </div>
+  <div class="card" style="margin-bottom:16px"><div class="pad">
+    <div class="row">
+      <button class="btn pri" id="gps">Använd min position</button>
+      <span class="hint" style="margin:0">eller</span>
+      <input id="coord" placeholder="59.7231, 18.9412 eller N 6620123 E 674321" style="flex:1;min-width:220px">
+      <button class="btn ghost" id="usecoord">Sök här</button>
+    </div>
+    <div class="fgrid" style="margin-top:10px">
+      <div><label class="f" for="rad">Radie</label>
+        <select id="rad" onchange="S.filter.radius=parseFloat(this.value);runNearby()">
+          ${[5, 10, 25, 50, 100].map((r) => `<option value="${r}"${radius === r ? " selected" : ""}>${r} km</option>`).join("")}
+        </select></div>
+      <div><label class="f" for="oj">Visa</label>
+        <select id="oj" onchange="S.filter.onlyJobs=this.value==='1';runNearby()">
+          <option value="1"${onlyJobs ? " selected" : ""}>Bara sådant som behöver något</option>
+          <option value="0"${!onlyJobs ? " selected" : ""}>Alla anläggningar</option>
+        </select></div>
+    </div>
+    <div id="geohint" class="hint"></div>
+  </div></div>
+  <div id="nearres"></div>`);
+
+  $("#gps").onclick = async () => {
+    const btn = $("#gps");
+    btn.disabled = true;
+    btn.textContent = "Hämtar position…";
+    try {
+      const pos = await GEO.get();
+      S.origin = { latitude: pos.lat, longitude: pos.lon };
+      $("#geohint").textContent = `Position hämtad, noggrannhet ±${Math.round(pos.acc)} m.`;
+      await runNearby();
+    } catch (e) {
+      $("#geohint").innerHTML = `<span style="color:var(--alert)">${esc(e.message)}</span>`;
+    }
+    btn.disabled = false;
+    btn.textContent = "Använd min position";
+  };
+  $("#usecoord").onclick = async () => {
+    const q = $("#coord").value.trim();
+    if (!q) return;
+    const r = await api(`/coordinates/parse?q=${encodeURIComponent(q)}`);
+    if (!r.ok) return ($("#geohint").innerHTML = `<span style="color:var(--alert)">Kunde inte tolka koordinaten.</span>`);
+    S.origin = { latitude: r.latitude, longitude: r.longitude };
+    $("#geohint").textContent = `Tolkat som ${r.latitude}, ${r.longitude}.`;
+    await runNearby();
+  };
+
+  if (S.origin) await runNearby();
+  else
+    $("#nearres").innerHTML = `<div class="card"><div class="empty">
+      <div class="big">Ingen position vald</div>
+      <p>Tryck på Använd min position, eller klistra in en koordinat från borrprotokollet.</p></div></div>`;
+}
+
+async function runNearby() {
+  if (!S.origin) return;
+  const box = $("#nearres");
+  if (box) box.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
+  const radius = S.filter.radius || 25;
+  const onlyJobs = S.filter.onlyJobs !== false;
+  const r = await api(
+    `/nearby?lat=${S.origin.latitude}&lon=${S.origin.longitude}&radius_km=${radius}&only_jobs=${onlyJobs}`
+  );
+  S.data.nearby = r.results;
+  box.innerHTML = `
+  <div class="card"><div class="hd"><h2>${r.results.length} inom ${radius} km</h2>
+    <span class="tag n">${r.with_coordinates} anläggningar har koordinater</span>
+    ${r.results.length ? `<button class="btn sm" style="margin-left:auto" onclick="openRoute()">Öppna rundan i kartan</button>` : ""}</div>
+    <div class="pad" style="padding-top:2px">
+      ${
+        r.results.length
+          ? r.results.map((h) => nearbyRow(h)).join("") +
+            `<p class="hint" style="margin-top:12px">Bocka ur det du inte ska åka till, tryck sedan
+             Öppna rundan i kartan. Stoppen läggs in i ordning med din position som start.</p>`
+          : `<div class="empty"><div class="big">Inget hittat inom ${radius} km</div>
+             <p>Öka radien, eller visa alla anläggningar i stället för bara sådana som behöver något.</p></div>`
+      }
+    </div></div>`;
+}
+
+function openRoute() {
+  const stops = [...document.querySelectorAll(".stop:checked")].map((el) => ({
+    latitude: el.dataset.lat,
+    longitude: el.dataset.lon,
+  }));
+  if (!stops.length) return toast("Bocka i minst ett stopp", true);
+  if (stops.length > 10) return toast("Kartan klarar högst 10 stopp åt gången", true);
+  window.open(routeLink(S.origin, stops), "_blank", "noopener");
+}
+
+async function nearbyCard(facility) {
+  if (!facility) return "";
+  const r = await api(`/facilities/${facility.id}/nearby?radius_km=30&only_jobs=true&limit=6`);
+  if (r.missing_coordinates)
+    return `<div class="card" style="margin-top:18px"><div class="hd"><h2>Jobb i närheten</h2></div>
+      <div class="pad"><p class="hint" style="margin:0">${esc(r.hint)}</p></div></div>`;
+  if (!r.results.length) return "";
+  return `<div class="card" style="margin-top:18px">
+    <div class="hd"><h2>Slå ihop med resan</h2><span class="tag n">${r.results.length} inom 30 km</span></div>
+    <div class="pad" style="padding-top:2px">
+      ${r.results.map((h) => nearbyRow(h, false)).join("")}
+      <div class="row" style="margin-top:12px">
+        <button class="btn ghost sm" onclick="planFrom('${facility.id}')">Planera runda härifrån</button>
+      </div></div></div>`;
+}
+
+function planFrom(facilityId) {
+  const f = S.data.customer.facilities.find((x) => x.id === facilityId);
+  if (!f || f.latitude === null) return toast("Anläggningen saknar koordinater", true);
+  S.origin = { latitude: f.latitude, longitude: f.longitude };
+  S.filter.radius = 30;
+  go("nara");
+}
+
 /* ---------------- administration ---------------- */
 async function viewAdmin() {
   const tab = S.tab && ["konton", "notiser", "backup", "logg"].includes(S.tab) ? S.tab : "konton";
@@ -1701,6 +1935,7 @@ function render() {
     anlaggningar: viewFacilities,
     journal: viewJournalAll,
     paminnelser: viewReminders,
+    nara: viewNearby,
     ny: viewOnboarding,
     admin: viewAdmin,
   };

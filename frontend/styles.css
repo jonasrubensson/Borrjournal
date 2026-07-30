@@ -223,3 +223,6 @@ legend{font-family:var(--cond);font-size:15px;font-weight:700;text-transform:upp
   .nav .badge{display:inline-block;position:absolute;transform:translate(14px,-6px)}
   .nav a{position:relative}
 }
+
+@media (max-width:640px){ .hidemob{display:none} }
+.filerow input[type=checkbox]{margin:0 2px 0 0;transform:scale(1.25)}
