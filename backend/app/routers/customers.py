@@ -12,6 +12,7 @@ from ..schemas import (
     facility_out,
 )
 from ..security import current_user, log_action, require_write
+from ..services.geo import parse_coordinates
 
 router = APIRouter(prefix="/api", tags=["kunder"])
 
@@ -25,6 +26,16 @@ async def next_no(db: AsyncSession, model, column, prefix: str, start: int) -> s
         if not taken:
             return no
         candidate += 1
+
+
+def apply_coordinates(data: dict) -> dict:
+    """Fyller lat/lon från fritextfältet om montören inte angett dem direkt.
+    Klarar decimalgrader, SWEREF 99 TM och grader med minuter."""
+    if data.get("latitude") is None or data.get("longitude") is None:
+        parsed = parse_coordinates(data.get("coordinates", "") or "")
+        if parsed:
+            data["latitude"], data["longitude"] = parsed
+    return data
 
 
 async def get_customer(db: AsyncSession, customer_id: str) -> Customer:
@@ -128,7 +139,7 @@ async def create_facility(
     f = Facility(
         facility_no=await next_no(db, Facility, Facility.facility_no, "B", 2000),
         customer_id=customer_id,
-        **payload.model_dump(),
+        **apply_coordinates(payload.model_dump()),
     )
     db.add(f)
     await db.commit()
@@ -153,6 +164,8 @@ async def update_facility(
     if f is None:
         raise HTTPException(status_code=404, detail="Anläggningen finns inte")
     allowed = set(FacilityIn.model_fields.keys())
+    if "coordinates" in payload and "latitude" not in payload:
+        payload = apply_coordinates({**payload, "latitude": None, "longitude": None})
     for key, value in payload.items():
         if key in allowed:
             setattr(f, key, value)
@@ -267,7 +280,7 @@ async def onboarding(
     facility = Facility(
         facility_no=await next_no(db, Facility, Facility.facility_no, "B", 2000),
         customer_id=customer.id,
-        **payload.facility.model_dump(),
+        **apply_coordinates(payload.facility.model_dump()),
     )
     db.add(facility)
     await db.flush()
