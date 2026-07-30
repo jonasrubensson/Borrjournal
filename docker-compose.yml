@@ -31,7 +31,12 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql+asyncpg://borrjournal:${POSTGRES_PASSWORD}@db:5432/borrjournal
+      # Delarna var för sig, inte en färdig URL. Då spelar det ingen roll om
+      # lösenordet innehåller /, + eller @, som annars förstör anslutningssträngen.
+      POSTGRES_HOST: db
+      POSTGRES_DB: borrjournal
+      POSTGRES_USER: borrjournal
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       SECRET_KEY: ${SECRET_KEY:?sätt SECRET_KEY i .env}
       DATA_DIR: /data
       TOKEN_EXPIRE_HOURS: ${TOKEN_EXPIRE_HOURS:-12}

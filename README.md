@@ -12,25 +12,15 @@ lösenord och ska aldrig följa med en fil du skickar vidare. Skapa den så här
 ```bash
 cd borrjournal
 cp .env.example .env
-
-# generera hemligheter och skriv in dem i .env
-echo "SECRET_KEY=$(openssl rand -base64 36)"
-echo "POSTGRES_PASSWORD=$(openssl rand -base64 24)"
-echo "BOOTSTRAP_PASSWORD=$(openssl rand -base64 18)"
-
-docker compose up -d --build
-```
-
-Eller i ett svep, om du vill slippa klistra:
-
-```bash
-cp .env.example .env
-sed -i "s|^SECRET_KEY=.*|SECRET_KEY=$(openssl rand -base64 36)|;\
-s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -base64 24)|;\
-s|^BOOTSTRAP_PASSWORD=.*|BOOTSTRAP_PASSWORD=$(openssl rand -base64 18)|" .env
+sed -i "s|^SECRET_KEY=.*|SECRET_KEY=$(openssl rand -hex 32)|;\
+s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 24)|;\
+s|^BOOTSTRAP_PASSWORD=.*|BOOTSTRAP_PASSWORD=$(openssl rand -hex 12)|" .env
 grep BOOTSTRAP_PASSWORD .env    # detta är ditt första inloggningslösenord
 docker compose up -d --build
 ```
+
+Hex, inte base64. Base64 ger tecken som `/` och `+` som ställer till det i skalkommandon.
+Appen klarar dem numera i lösenordet, men det finns ingen anledning att bjuda in problemet.
 
 Compose vägrar starta om `POSTGRES_PASSWORD`, `SECRET_KEY` eller `BOOTSTRAP_PASSWORD` är tomma,
 så du får ett tydligt fel i stället för en osäker installation.
@@ -259,6 +249,43 @@ uvicorn app.main:app --reload
 ```
 
 Standarddatabasen är då SQLite i `backend/borrjournal.db`, ingen Postgres behövs.
+
+## Om något går fel vid start
+
+### `password authentication failed for user "borrjournal"`
+
+`POSTGRES_PASSWORD` läses **bara första gången databasen skapas**. Startade du stacken en gång
+innan `.env` var ifylld, ligger det gamla lösenordet kvar i volymen `db-data` och matchar inte
+det nya. Två vägar:
+
+**Har du ingen data ännu, börja om rent:**
+
+```bash
+docker compose down
+docker volume rm borrjournal_db-data
+docker compose up -d
+```
+
+**Har du data du vill behålla, ändra lösenordet i databasen i stället:**
+
+```bash
+docker compose exec db psql -U borrjournal -c \
+  "ALTER USER borrjournal PASSWORD 'lösenordet-som-står-i-din-env';"
+docker compose restart app
+```
+
+Volymnamnet börjar med katalogens namn. Heter mappen något annat än `borrjournal`,
+kolla med `docker volume ls`.
+
+### Appen startar men svarar inte
+
+```bash
+docker compose logs app --tail 40
+docker compose ps
+```
+
+`depends_on` väntar på att databasen ska bli frisk, så appen startar normalt tio till tjugo
+sekunder efter databasen vid första uppstarten.
 
 ## Att veta om driften
 
