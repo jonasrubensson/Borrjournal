@@ -1,0 +1,34 @@
+# Variant utan Postgres: en enda container, databasen är en fil i volymen.
+#   docker compose -f docker-compose.sqlite.yml up -d --build
+#
+# Rimligt för ett företag med några användare. Backup fungerar likadant, men
+# använder logisk JSON-dump i stället för pg_dump. Byt inte hit om du redan
+# kör Postgres med data i - migrera i så fall via en JSON-backup.
+services:
+  app:
+    build: ./backend
+    container_name: borrjournal-app
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////data/borrjournal.db
+      SECRET_KEY: ${SECRET_KEY:?sätt SECRET_KEY i .env}
+      DATA_DIR: /data
+      TOKEN_EXPIRE_HOURS: ${TOKEN_EXPIRE_HOURS:-12}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+      BOOTSTRAP_ADMIN: ${BOOTSTRAP_ADMIN:-admin}
+      BOOTSTRAP_PASSWORD: ${BOOTSTRAP_PASSWORD:?sätt BOOTSTRAP_PASSWORD i .env}
+      SEED_DEMO: ${SEED_DEMO:-false}
+    volumes:
+      - files:/data
+      - ./frontend:/app/frontend:ro
+    networks: [proxy]
+    ports:
+      - "${APP_BIND:-127.0.0.1:8000}:8000"
+
+volumes:
+  files:
+
+networks:
+  proxy:
+    external: true
+    name: proxy

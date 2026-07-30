@@ -99,8 +99,19 @@ Backup styrs från **Inställningar → Backup** i gränssnittet, som admin. Dä
 * se storlek, status och vilken motor som användes.
 
 Varje backup är en `tar.gz` med databasdump, alla uppladdade filer, tumnaglar och ett
-`manifest.json`. Motorn är `pg_dump` när appen kör mot Postgres, annars en logisk JSON-dump.
-De tre senaste behålls alltid, även om de är äldre än gränsen.
+`manifest.json`. De tre senaste behålls alltid, även om de är äldre än gränsen.
+
+Dumpen är en logisk JSON-dump. Den innehåller allt och läses tillbaka med `python -m app.restore`.
+Appimagen installerar medvetet inga extra paket, eftersom varje externt paketrepo är något som kan
+fälla bygget en tisdagsmorgon. Vill du ha en native `pg_dump`-fil vid sidan om, som kan läsas av
+vem som helst med `pg_restore` utan appen, kör den från db-containern som redan har rätt version:
+
+```bash
+docker compose exec -T db pg_dump -U borrjournal -Fc borrjournal > db-$(date +%F).dump
+```
+
+Ligger `pg_dump` ändå i PATH använder appen den automatiskt, och backupvyn visar vilken motor som
+användes.
 
 **Återställning görs från terminalen, inte i webben.** Det är ett medvetet val: en knapp som skriver
 över hela databasen är för lätt att trycka på av misstag, och appen kan inte läsa in en dump i den
@@ -156,6 +167,70 @@ E-post konfigureras under **Inställningar → Notiser**: server, port, krypteri
 avsändare och mottagare, med en knapp för testmejl. SMTP-lösenordet returneras aldrig av API:et,
 men det lagras i databasen, så en databasdump innehåller det. Vill du undvika det, peka mot en
 intern relay som inte kräver inloggning.
+
+## Jobb i närheten
+
+Två situationer, samma underlag:
+
+* **Du står någonstans.** Tryck på plats-ikonen i toppfältet, sedan *Använd min position*.
+  Anläggningar inom vald radie listas med avstånd, riktning och varför de dyker upp.
+* **Du planerar en resa.** Öppna kunden du ska till. Längst ned visas *Slå ihop med resan* med
+  det som ligger inom tre mil från den anläggningen.
+
+Sorteringen sätter angelägenhet före avstånd. En försenad service två mil bort hamnar före en
+fungerande brunn på samma gata, eftersom det är den avstickaren som faktiskt är värd något.
+Bocka i stoppen och tryck *Öppna rundan i kartan*, så byggs en Google Maps-rutt med din position
+som start och stoppen som delmål (högst tio, det är kartans gräns).
+
+### Koordinater
+
+Anläggningar lagrar WGS84 som decimaltal, men inmatningsfältet tolkar det du klistrar in:
+
+| Du skriver | Tolkas som |
+|---|---|
+| `59.7231, 18.9412` | decimalgrader |
+| `59,7231 18,9412` | decimalgrader med svenskt decimaltecken |
+| `N 6620123 E 674321` | SWEREF 99 TM, räknas om |
+| `E 674321 N 6620123` | samma, oavsett ordning |
+| `59°43.386'N 18°56.472'E` | grader och minuter |
+
+Tolkningen visas direkt under fältet medan du skriver, så du ser att den blev rätt innan du
+sparar. Ute vid borrhålet finns knappen *Hämta min position*, som tar koordinaten från telefonens
+GPS.
+
+Omvandlingen SWEREF 99 TM ↔ WGS84 är Gauss-Krügers formler för GRS 80. Den är verifierad på två
+sätt: rundgång fram och tillbaka avviker mindre än en hundradels millimeter, och en punkt på
+centralmeridianen (15°E) ger exakt E = 500000, vilket den ska per definition. Den är däremot inte
+kontrollerad mot Lantmäteriets officiella testpunkter.
+
+**Det här kan inte göras:** appen kan inte meddela dig av sig själv när du råkar köra förbi ett
+jobb. Webbläsare tillåter inte att en webbapp läser positionen i bakgrunden, av goda skäl. Det
+kräver en riktig app på telefonen. Det appen kan är att svara direkt när du frågar, och det gör
+den på ett par sekunder.
+
+## Postgres eller SQLite?
+
+Standarduppsättningen använder Postgres. Det finns också en variant med bara en container:
+
+```bash
+docker compose -f docker-compose.sqlite.yml up -d --build
+```
+
+| | Postgres | SQLite |
+|---|---|---|
+| Containrar | två | en |
+| Backupmotor | JSON, eller pg_dump från db-containern | JSON |
+| Samtidiga skrivningar | obegränsat | serialiseras, WAL är påslaget |
+| Extern åtkomst för rapportverktyg | ja | nej, filen ligger i volymen |
+| Rimligt vid | vilken storlek som helst | ett företag med en handfull användare |
+
+För en borrfirma med några montörer räcker SQLite gott. Välj Postgres om du vill kunna koppla
+externa verktyg mot databasen, eller om registret ska växa till fler samtidiga användare.
+Byt inte databas för att komma runt ett byggfel: pg_dump är bara ett klientverktyg för backupen
+och påverkar inte hur appen lagrar data.
+
+Har du redan data i Postgres och vill byta: ta en backup, packa upp den, och läs in `db.json`
+med `python -m app.restore` mot den nya databasen.
 
 ## Arkitektur
 
@@ -225,6 +300,9 @@ för att den sortens fråga ska vara exakt och snabb.
 | GET/PUT | `/api/backups/schedule` | Nattlig backup: tid och gallring |
 | GET/PUT | `/api/notifications/email` | SMTP-inställningar, lösenordet returneras aldrig |
 | POST | `/api/notifications/push/subscribe` | Registrera enhet för notiser |
+| GET | `/api/nearby` | Jobb nära en position eller en tolkad koordinat |
+| GET | `/api/facilities/{id}/nearby` | Vad som kan slås ihop med resan dit |
+| GET | `/api/coordinates/parse` | Tolkar inklistrad koordinat, för direktrespons i formuläret |
 | GET | `/api/audit` | Händelselogg, endast admin |
 
 Interaktiv dokumentation finns på `/docs` när appen kör.
@@ -242,6 +320,8 @@ lita på att ingen redigerat historiken.
 * Bildfliken använder `capture="environment"`, så kameran öppnas direkt.
 * Bilder skalas till 640 px tumnaglar vid uppladdning, så listor går snabbt på mobildata.
 * Telefonnummer och e-post är klickbara för att ringa och mejla direkt från kundkortet.
+* Positionsknappen använder telefonens GPS, både för att hitta jobb i närheten och för att sätta
+  koordinaten på en ny anläggning ute i fält.
 
 ## Utveckling utan Docker
 
