@@ -6,14 +6,34 @@ på telefon som på dator.
 
 ## Komma igång
 
+Det finns ingen `.env` i arkivet, bara `.env.example`. Det är med avsikt: den innehåller
+lösenord och ska aldrig följa med en fil du skickar vidare. Skapa den så här:
+
 ```bash
+cd borrjournal
 cp .env.example .env
-openssl rand -base64 36        # klistra in som SECRET_KEY
-openssl rand -base64 24        # klistra in som POSTGRES_PASSWORD
-# sätt även BOOTSTRAP_PASSWORD (första adminlösenordet)
+
+# generera hemligheter och skriv in dem i .env
+echo "SECRET_KEY=$(openssl rand -base64 36)"
+echo "POSTGRES_PASSWORD=$(openssl rand -base64 24)"
+echo "BOOTSTRAP_PASSWORD=$(openssl rand -base64 18)"
 
 docker compose up -d --build
 ```
+
+Eller i ett svep, om du vill slippa klistra:
+
+```bash
+cp .env.example .env
+sed -i "s|^SECRET_KEY=.*|SECRET_KEY=$(openssl rand -base64 36)|;\
+s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -base64 24)|;\
+s|^BOOTSTRAP_PASSWORD=.*|BOOTSTRAP_PASSWORD=$(openssl rand -base64 18)|" .env
+grep BOOTSTRAP_PASSWORD .env    # detta är ditt första inloggningslösenord
+docker compose up -d --build
+```
+
+Compose vägrar starta om `POSTGRES_PASSWORD`, `SECRET_KEY` eller `BOOTSTRAP_PASSWORD` är tomma,
+så du får ett tydligt fel i stället för en osäker installation.
 
 Öppna `http://localhost:8000` och logga in med `admin` och det lösenord du satte i
 `BOOTSTRAP_PASSWORD`. Byta lösenord gör du via `POST /api/me/password` eller genom att skapa ett
@@ -22,15 +42,53 @@ eget konto under **Konton** och stänga av admin-kontot.
 Vill du testa med demodata i en tom databas: sätt `SEED_DEMO=true` innan första starten.
 Sju kunder läggs in, varav tre delar pumpmodell så att flottfiltret blir meningsfullt att prova.
 
-### Med HTTPS
+### Bakom Nginx Proxy Manager
+
+Appen terminerar ingen HTTPS själv, det gör NPM. Två sätt att koppla ihop dem:
+
+**Delat Docker-nätverk (rekommenderas).** Skapa nätverket en gång, lägg NPM på det, och kommentera
+bort `ports`-blocket i `docker-compose.yml`. Då är appen inte nåbar från värden alls.
 
 ```bash
-# sätt DOMAIN i .env och peka DNS mot servern
-docker compose --profile proxy up -d
+docker network create proxy
 ```
 
-Caddy hämtar certifikat automatiskt. Appen publiceras bara på `127.0.0.1:8000`, så inget annat än
-Caddy kommer åt den utifrån.
+I NPM: **Proxy Hosts → Add Proxy Host**
+
+| Fält | Värde |
+|---|---|
+| Domain Names | din domän |
+| Scheme | `http` |
+| Forward Hostname | `borrjournal-app` |
+| Forward Port | `8000` |
+| Block Common Exploits | på |
+| Websockets Support | behövs inte, appen använder inga |
+| SSL | begär Let's Encrypt-certifikat, slå på **Force SSL** och **HTTP/2** |
+
+**Utan delat nätverk.** Låt `APP_BIND` stå kvar och peka NPM på värdens Docker-brygga
+(`172.17.0.1`) eller LAN-adress, port 8000.
+
+#### Advanced-fliken i NPM
+
+Klistra in det här. Den första raden är den viktiga: nginx stryper annars uppladdningar långt
+under 25 MB, och felet syns bara som en avbruten uppladdning.
+
+```nginx
+client_max_body_size 30M;
+proxy_read_timeout 300s;
+
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+add_header X-Content-Type-Options "nosniff" always;
+add_header X-Frame-Options "DENY" always;
+add_header Referrer-Policy "same-origin" always;
+```
+
+Håll `client_max_body_size` något högre än `MAX_UPLOAD_MB` i `.env`, så att det är appen som
+avvisar för stora filer med ett begripligt meddelande i stället för nginx med ett 413.
+
+**HTTPS är inte valfritt om du vill ha notiser.** Service workers och webbpush fungerar bara över
+HTTPS (undantag: `localhost` vid utveckling). Ordna certifikatet i NPM innan du testar notiser på
+telefonen.
 
 ### Backup och återställning
 
@@ -102,9 +160,9 @@ intern relay som inte kräver inloggning.
 ## Arkitektur
 
 ```
-Caddy (443) → app (FastAPI + uvicorn) → Postgres
-                    ↓
-              /data/files, /data/thumbs   (volym "files")
+Nginx Proxy Manager (443) → app (FastAPI + uvicorn) → Postgres
+                                  ↓
+                     /data/files, /data/thumbs, /data/backups   (volym "files")
 ```
 
 | Del | Val | Varför |
@@ -113,6 +171,7 @@ Caddy (443) → app (FastAPI + uvicorn) → Postgres
 | Databas | Postgres 16 | Riktig relationsdatabas, `pg_dump` för backup |
 | Filer | Volym på disk, metadata i databasen | Filer i databasen gör dumpar tunga och långsamma |
 | Frontend | Vanilla JS, tre filer | Ingen build-kedja att underhålla om två år |
+| HTTPS | Extern reverse proxy | Du har redan Nginx Proxy Manager, appen ska inte duplicera det |
 | Autentisering | JWT + bcrypt, valfri TOTP | Samma mönster som dokumentationsplattformen |
 | Notiser | Webbpush (VAPID) + SMTP | Inga tredjepartstjänster, inget konto att skapa |
 | Schemaläggning | asyncio-loop i appen | Inget Celery, ingen extra container att hålla vid liv |

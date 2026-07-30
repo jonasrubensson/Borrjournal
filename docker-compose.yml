@@ -17,6 +17,7 @@ services:
 
   app:
     build: ./backend
+    container_name: borrjournal-app
     restart: unless-stopped
     depends_on:
       db:
@@ -35,34 +36,22 @@ services:
     volumes:
       - files:/data
       - ./frontend:/app/frontend:ro
-    networks: [internal, web]
-    # Publiceras bara lokalt. Caddy nedan terminerar HTTPS.
+    networks: [internal, proxy]
+    # Bind bara mot loopback eller ett internt nätkort. HTTPS terminerar i
+    # Nginx Proxy Manager, appen ska aldrig ligga öppen mot internet.
     ports:
-      - "127.0.0.1:8000:8000"
-
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    profiles: ["proxy"]
-    depends_on: [app]
-    ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      DOMAIN: ${DOMAIN:-borrjournal.local}
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
-    networks: [web]
+      - "${APP_BIND:-127.0.0.1:8000}:8000"
 
 volumes:
   db-data:
   files:
-  caddy-data:
-  caddy-config:
 
 networks:
   internal:
     internal: true
-  web:
+  # Delat nätverk med Nginx Proxy Manager. Skapa det en gång:
+  #   docker network create proxy
+  # Då kan NPM peka på hostname "borrjournal-app" port 8000 utan att gå via värdens IP.
+  proxy:
+    external: true
+    name: proxy
