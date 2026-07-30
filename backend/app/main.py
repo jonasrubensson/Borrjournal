@@ -12,7 +12,17 @@ from . import scheduler
 from .config import settings
 from .db import SessionLocal, init_db
 from .models import User
-from .routers import auth, backups, customers, files, journal, reminders, search, settings as settings_router
+from .routers import (
+    auth,
+    backups,
+    customers,
+    files,
+    journal,
+    nearby,
+    reminders,
+    search,
+)
+from .routers import settings as settings_router
 from .security import hash_password
 
 FRONTEND_DIR = os.getenv("FRONTEND_DIR", "/app/frontend")
@@ -69,6 +79,7 @@ app.include_router(search.router)
 app.include_router(reminders.router)
 app.include_router(backups.router)
 app.include_router(settings_router.router)
+app.include_router(nearby.router)
 
 
 @app.get("/api/health")

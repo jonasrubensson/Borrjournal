@@ -38,6 +38,8 @@ class FacilityIn(BaseModel):
     status: str = "ok"
     drilled_at: str = ""
     coordinates: str = ""
+    latitude: float | None = None
+    longitude: float | None = None
     access_notes: str = ""
     permit_status: str = ""
     soil_depth_m: float | None = None
@@ -131,6 +133,8 @@ def facility_out(f: Facility, with_customer: bool = False) -> dict:
         "status_manual": f.status,
         "drilled_at": f.drilled_at,
         "coordinates": f.coordinates,
+        "latitude": f.latitude,
+        "longitude": f.longitude,
         "access_notes": f.access_notes,
         "permit_status": f.permit_status,
         "soil_depth_m": f.soil_depth_m,

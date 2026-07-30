@@ -11,6 +11,7 @@ DEMO = [
         email="erik.lundqvist@example.se", property_designation="Vässlan 3:14",
         municipality="Norrtälje", address="Vässlanvägen 12",
         facilities=[dict(
+            latitude=59.7541, longitude=18.3672,
             facility_type="Bergborrad brunn", drilled_at="2021-05-04", soil_depth_m=6,
             casing_length_m=6.5, total_depth_m=72, water_level_m=14, capacity_lph=1400,
             bedrock_notes="Morän 0-6 m, granit 6-72 m. Vattenförande spricka vid 41 m.",
@@ -29,6 +30,7 @@ DEMO = [
         property_designation="Skogsbacken 1:3", municipality="Norrtälje",
         facilities=[
             dict(
+            latitude=60.0512, longitude=18.6011,
                 facility_type="Bergborrad brunn", drilled_at="2019-09-10", soil_depth_m=11,
                 casing_length_m=12, total_depth_m=118, water_level_m=22, capacity_lph=3200,
                 pump_manufacturer="Grundfos", pump_model="SP 3A-25", pump_serial="GF-2019-11204",
@@ -52,6 +54,7 @@ DEMO = [
         email="karin.ahlgren@example.se", property_designation="Ekhaga 2:7",
         municipality="Norrtälje",
         facilities=[dict(
+            latitude=59.9284, longitude=18.4831,
             facility_type="Bergborrad brunn", drilled_at="2023-06-14", soil_depth_m=4,
             casing_length_m=6, total_depth_m=64, water_level_m=9, capacity_lph=600,
             bedrock_notes="Svag tillrinning, sprickzon saknas under 50 m.",
@@ -69,6 +72,7 @@ DEMO = [
         phone="0176-500 12", email="styrelsen@gronvik.example",
         property_designation="Grönvik 1:1", municipality="Norrtälje",
         facilities=[dict(
+            latitude=59.9761, longitude=18.8022,
             facility_type="Bergborrad brunn", drilled_at="2024-06-03", soil_depth_m=8,
             casing_length_m=9, total_depth_m=96, water_level_m=17, capacity_lph=2100,
             pump_manufacturer="Grundfos", pump_model="SP 5A-12", pump_serial="GF-2024-55301",
@@ -82,6 +86,7 @@ DEMO = [
         email="hedman@example.se", property_designation="Norrgården 4:2",
         municipality="Norrtälje",
         facilities=[dict(
+            latitude=59.6413, longitude=18.6157,
             facility_type="Bergborrad brunn", drilled_at="2026-07-09", soil_depth_m=5,
             casing_length_m=6, total_depth_m=81, water_level_m=12, capacity_lph=1800,
             bedrock_notes="Vattenförande spricka vid 47 m, god tillrinning.",
@@ -94,6 +99,7 @@ DEMO = [
         email="a.wikner@example.se", property_designation="Sjöhagen 1:9",
         municipality="Uppsala",
         facilities=[dict(
+            latitude=59.8586, longitude=17.6389,
             facility_type="Bergborrad brunn", drilled_at="2022-04-19", soil_depth_m=7,
             casing_length_m=8, total_depth_m=88, water_level_m=16, capacity_lph=1500,
             pump_manufacturer="Grundfos", pump_model="SQ 2-70", pump_serial="GF-2022-90117",
@@ -107,6 +113,7 @@ DEMO = [
         phone="0176-712 20", email="info@fjardenscamping.example",
         property_designation="Fjärden 2:41", municipality="Norrtälje",
         facilities=[dict(
+            latitude=59.7702, longitude=18.4295,
             facility_type="Bergborrad brunn", drilled_at="2022-03-08", soil_depth_m=10,
             casing_length_m=11, total_depth_m=104, water_level_m=19, capacity_lph=4200,
             pump_manufacturer="Grundfos", pump_model="SQ 2-70", pump_serial="GF-2022-90455",

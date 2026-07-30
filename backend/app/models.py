@@ -75,8 +75,10 @@ class Facility(Base):
     status: Mapped[str] = mapped_column(String(20), default="ok")  # ok | soon | action
     drilled_at: Mapped[str] = mapped_column(String(10), default="")
 
-    # Plats
+    # Plats. Fritexten behålls som montören skrev den, lat/lon är det systemet räknar med.
     coordinates: Mapped[str] = mapped_column(String(80), default="")
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     access_notes: Mapped[str] = mapped_column(Text, default="")
     permit_status: Mapped[str] = mapped_column(String(40), default="")
 
