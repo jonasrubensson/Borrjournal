@@ -1,0 +1,68 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: borrjournal
+      POSTGRES_USER: borrjournal
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?sätt POSTGRES_PASSWORD i .env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U borrjournal -d borrjournal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+
+  app:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://borrjournal:${POSTGRES_PASSWORD}@db:5432/borrjournal
+      SECRET_KEY: ${SECRET_KEY:?sätt SECRET_KEY i .env}
+      DATA_DIR: /data
+      TOKEN_EXPIRE_HOURS: ${TOKEN_EXPIRE_HOURS:-12}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+      BOOTSTRAP_ADMIN: ${BOOTSTRAP_ADMIN:-admin}
+      BOOTSTRAP_PASSWORD: ${BOOTSTRAP_PASSWORD:?sätt BOOTSTRAP_PASSWORD i .env}
+      SEED_DEMO: ${SEED_DEMO:-false}
+      # Backuper hamnar under /data/backups, dvs. i samma volym som filerna.
+      # Montera gärna en extern sökväg dit om du vill ha dem utanför Docker.
+    volumes:
+      - files:/data
+      - ./frontend:/app/frontend:ro
+    networks: [internal, web]
+    # Publiceras bara lokalt. Caddy nedan terminerar HTTPS.
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    profiles: ["proxy"]
+    depends_on: [app]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-borrjournal.local}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [web]
+
+volumes:
+  db-data:
+  files:
+  caddy-data:
+  caddy-config:
+
+networks:
+  internal:
+    internal: true
+  web:
