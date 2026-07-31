@@ -38,6 +38,13 @@ function bytes(n) {
   return n < 1024 * 1024 ? `${Math.round(n / 1024)} kB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/* Varje vy tar ett nummer när den startar. Hinner användaren klicka vidare
+   medan vyn hämtar data, har numret gått vidare och den gamla vyn låter bli
+   att skriva till skärmen. Utan detta kan en långsam vy skriva över den nya. */
+let renderSeq = 0;
+const claim = () => ++renderSeq;
+const current = (token) => token === renderSeq;
+
 let toastTimer;
 function toast(msg, bad = false) {
   const t = $("#toast");
@@ -116,27 +123,26 @@ let loginNeedsTotp = false;
 function viewLogin(error = "") {
   root().innerHTML = `
   <div class="login">
-    <div class="box">
+    <form class="box" id="loginform" autocomplete="on">
       <div class="bn">Borrjournal</div><span class="bs">KUND &amp; ANLÄGGNING</span>
       ${error ? `<div class="err">${esc(error)}</div>` : ""}
       <label class="f" for="u">Användarnamn</label>
-      <input id="u" autocomplete="username" autocapitalize="none">
+      <input id="u" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false">
       <label class="f" for="p">Lösenord</label>
-      <input id="p" type="password" autocomplete="current-password">
+      <input id="p" name="password" type="password" autocomplete="current-password">
       ${
         loginNeedsTotp
           ? `<label class="f" for="t">Engångskod</label>
-             <input id="t" inputmode="numeric" autocomplete="one-time-code" maxlength="6">`
+             <input id="t" name="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6">`
           : ""
       }
-      <button class="btn pri" id="lg">Logga in</button>
-    </div>
+      <button class="btn pri" id="lg" type="submit">Logga in</button>
+    </form>
   </div>`;
-  const submit = () => doLogin();
-  $("#lg").onclick = submit;
-  ["u", "p", "t"].forEach((id) => {
-    const el = $("#" + id);
-    if (el) el.onkeydown = (e) => e.key === "Enter" && submit();
+  // Riktig form: Enter fungerar, och lösenordshanterare beter sig som de ska.
+  $("#loginform").addEventListener("submit", (e) => {
+    e.preventDefault();
+    doLogin();
   });
   ($("#t") || $("#u")).focus();
 }
@@ -328,6 +334,7 @@ function profile(f) {
 
 /* ---------------- vyer ---------------- */
 async function viewDashboard() {
+  const token = claim();
   mountShell(`<div class="skel" style="width:40%"></div><div class="skel"></div><div class="skel"></div>`);
   const d = await api("/dashboard");
   const attention = d.attention.length
@@ -342,6 +349,7 @@ async function viewDashboard() {
         .join("")
     : `<div class="empty"><div class="big">Inget att planera in</div><p>Alla anläggningar ligger inom sitt serviceintervall.</p></div>`;
 
+  if (!current(token)) return;
   $("#view").innerHTML = `
   <div class="spread">
     <div><div class="eyebrow">${dt(new Date().toISOString(), false)}</div><h1>Översikt</h1>
@@ -374,11 +382,13 @@ async function viewDashboard() {
 }
 
 async function viewCustomers() {
+  const token = claim();
   mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
   const rows = await api("/customers");
   S.data.customers = rows;
   const f = S.filter.customerStatus || "";
   const shown = f ? rows.filter((c) => c.status === f) : rows;
+  if (!current(token)) return;
   $("#view").innerHTML = `
   <div class="spread">
     <div><div class="eyebrow">Register</div><h1>Kunder</h1><p class="lead">${shown.length} av ${rows.length} visas.</p></div>
@@ -410,8 +420,10 @@ async function viewCustomers() {
 }
 
 async function viewPumps() {
+  const token = claim();
   mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
   const [pumps, facets] = await Promise.all([api("/pumps"), api("/facets")]);
+  if (!current(token)) return;
   $("#view").innerHTML = `
   <div class="spread">
     <div><div class="eyebrow">Flotta</div><h1>Pumpar och modeller</h1>
@@ -446,6 +458,7 @@ function openModel(manufacturer, model) {
 }
 
 async function viewFacilities() {
+  const token = claim();
   mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
   const facets = await api("/facets");
   const f = S.filter;
@@ -457,6 +470,7 @@ async function viewFacilities() {
   const active = [f.pump_manufacturer, f.pump_model, f.facility_type, f.status && STATUS[f.status]].filter(Boolean);
 
   const opt = (value, label, current) => `<option value="${esc(value)}"${current === value ? " selected" : ""}>${esc(label)}</option>`;
+  if (!current(token)) return;
   $("#view").innerHTML = `
   <div class="spread">
     <div><div class="eyebrow">Flotta</div><h1>Anläggningar</h1>
@@ -523,10 +537,12 @@ async function exportCsv() {
 }
 
 async function viewJournalAll() {
+  const token = claim();
   mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
   const [rows, facets] = await Promise.all([api("/journal"), api("/facets")]);
   const t = S.filter.entryType || "";
   const shown = t ? rows.filter((j) => j.entry_type === t) : rows;
+  if (!current(token)) return;
   $("#view").innerHTML = `
   <div class="spread">
     <div><div class="eyebrow">Alla kunder</div><h1>Journal</h1>
@@ -560,6 +576,7 @@ function journalEntryHtml(j, showCustomer = false) {
 
 /* ---------------- kundvy ---------------- */
 async function viewCustomer() {
+  const token = claim();
   mountShell(`<div class="skel" style="width:35%"></div><div class="skel"></div><div class="skel"></div>`);
   const id = S.id;
   const [c, journal, files, reminders] = await Promise.all([
@@ -581,6 +598,7 @@ async function viewCustomer() {
       n !== undefined ? `<span class="c">${n}</span>` : ""
     }</button>`;
 
+  if (!current(token)) return;
   $("#view").innerHTML = `
   <button class="back" onclick="go('kunder')">← Alla kunder</button>
   <div class="chead">
@@ -620,6 +638,22 @@ async function viewCustomer() {
     }
   </div>`;
   renderTab();
+
+  // "Slå ihop med resan" hämtas efter att kundkortet visats, så sidan inte
+  // får vänta på den. Infogas bara om användaren står kvar på samma kund,
+  // annars skriver ett sent svar över den vy man just bytt till.
+  const trip = c.facilities.find((f) => f.latitude != null && f.longitude != null) || c.facilities[0];
+  if (trip) {
+    try {
+      const html = await nearbyCard(trip);
+      const view = $("#view");
+      if (html && view && current(token) && S.route === "kund" && S.id === c.id) {
+        view.insertAdjacentHTML("beforeend", html);
+      }
+    } catch (err) {
+      console.warn("kunde inte hämta jobb i närheten:", err.message);
+    }
+  }
 }
 
 function renderTab() {
@@ -1297,6 +1331,7 @@ function reminderRow(r) {
 }
 
 async function viewReminders() {
+  const token = claim();
   mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
   const status = S.filter.reminderStatus || "open";
   const [items, sum, customers] = await Promise.all([
@@ -1316,6 +1351,7 @@ async function viewReminders() {
          <div class="pad" style="padding-top:2px">${rows.map(reminderRow).join("")}</div></div>`
       : "";
 
+  if (!current(token)) return;
   $("#view").innerHTML = `
   <div class="spread">
     <div><div class="eyebrow">Bevakning</div><h1>Påminnelser</h1>
@@ -1504,6 +1540,7 @@ function nearbyRow(h, selectable = true) {
 }
 
 async function viewNearby() {
+  const token = claim();
   const radius = S.filter.radius || 25;
   const onlyJobs = S.filter.onlyJobs !== false;
   mountShell(`
@@ -1568,6 +1605,7 @@ async function viewNearby() {
 }
 
 async function runNearby() {
+  const token = claim();
   if (!S.origin) return;
   const box = $("#nearres");
   if (box) box.innerHTML = `<div class="skel"></div><div class="skel"></div>`;
@@ -1577,6 +1615,7 @@ async function runNearby() {
     `/nearby?lat=${S.origin.latitude}&lon=${S.origin.longitude}&radius_km=${radius}&only_jobs=${onlyJobs}`
   );
   S.data.nearby = r.results;
+  if (!current(token) || !$("#nearres")) return;
   box.innerHTML = `
   <div class="card"><div class="hd"><h2>${r.results.length} inom ${radius} km</h2>
     <span class="tag n">${r.with_coordinates} anläggningar har koordinater</span>
@@ -1629,6 +1668,7 @@ function planFrom(facilityId) {
 
 /* ---------------- administration ---------------- */
 async function viewAdmin() {
+  const token = claim();
   const tab = S.tab && ["konton", "notiser", "backup", "logg"].includes(S.tab) ? S.tab : "konton";
   const T = (id, label) =>
     `<button class="${tab === id ? "on" : ""}" onclick="go('admin','${id}')">${label}</button>`;
@@ -1644,7 +1684,9 @@ async function viewAdmin() {
 }
 
 async function adminUsers() {
+  const token = claim();
   const users = await api("/users");
+  if (!current(token) || !$("#adminbody")) return;
   $("#adminbody").innerHTML = `
   <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Användare</h2></div>
     <table><thead><tr><th>Användare</th><th>Namn</th><th>Roll</th><th>Tvåfaktor</th><th>Senast inloggad</th><th>Status</th></tr></thead>
@@ -1692,10 +1734,12 @@ async function adminUsers() {
 }
 
 async function adminNotifications() {
+  const token = claim();
   const [mail, devices] = await Promise.all([
     api("/notifications/email"),
     api("/notifications/push/status"),
   ]);
+  if (!current(token) || !$("#adminbody")) return;
   $("#adminbody").innerHTML = `
   <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Notiser på denna enhet</h2></div><div class="pad">
     <div id="pushbanner"></div>
@@ -1772,8 +1816,10 @@ async function adminNotifications() {
 }
 
 async function adminBackup() {
+  const token = claim();
   const data = await api("/backups");
   const sch = data.schedule;
+  if (!current(token) || !$("#adminbody")) return;
   $("#adminbody").innerHTML = `
   <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Skapa backup</h2>
     <span class="tag n">${data.engine === "pg_dump" ? "pg_dump" : "logisk JSON-dump"}</span></div><div class="pad">
@@ -1910,7 +1956,9 @@ function copySteps(json) {
 }
 
 async function adminLog() {
+  const token = claim();
   const audit = await api("/audit?limit=100");
+  if (!current(token) || !$("#adminbody")) return;
   $("#adminbody").innerHTML = `
   <div class="card"><div class="hd"><h2>Händelselogg</h2></div>
     <table><thead><tr><th>Tid</th><th>Användare</th><th>Händelse</th><th>Objekt</th><th>IP</th></tr></thead>
@@ -1926,6 +1974,7 @@ async function adminLog() {
 
 /* ---------------- render ---------------- */
 function render() {
+  const mine = claim();
   if (!S.token || !S.user) return viewLogin();
   const views = {
     oversikt: viewDashboard,
@@ -1941,10 +1990,10 @@ function render() {
   };
   const fn = views[S.route] || viewDashboard;
   Promise.resolve(fn()).catch((e) => {
-    if (e.message !== "401") {
-      mountShell(`<div class="err">${esc(e.message)}</div>
-        <button class="btn ghost sm" onclick="render()">Försök igen</button>`);
-    }
+    // Hann användaren byta vy hör felet till en vy som inte visas längre.
+    if (mine !== renderSeq || e.message === "401") return;
+    mountShell(`<div class="err">${esc(e.message)}</div>
+      <button class="btn ghost sm" onclick="render()">Försök igen</button>`);
   });
 }
 

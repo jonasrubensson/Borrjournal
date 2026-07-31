@@ -2,9 +2,10 @@
   --ink:#0E1F2A; --ink-2:#33505E; --stone:#6B7A80; --line:#D3DBDC;
   --paper:#EFF2F1; --panel:#FFFFFF; --water:#1F7A8C; --water-dark:#155F6E;
   --brass:#B3801F; --alert:#A6402F; --ok:#2E7D5B;
-  --sans:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
-  --cond:"IBM Plex Sans Condensed","IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
-  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  /* Enbart systemtypsnitt. Inget att hämta, inget som kan hänga sig. */
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --cond:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
   --r:3px; --nav:224px;
 }
 *{box-sizing:border-box}
