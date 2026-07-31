@@ -227,3 +227,16 @@ legend{font-family:var(--cond);font-size:15px;font-weight:700;text-transform:upp
 
 @media (max-width:640px){ .hidemob{display:none} }
 .filerow input[type=checkbox]{margin:0 2px 0 0;transform:scale(1.25)}
+
+/* förhandsvisning av filer */
+.previewbtn{display:block;width:100%;padding:0;border:none;background:none;cursor:zoom-in}
+.thumb .noprev{height:118px;display:grid;place-items:center;background:#EDF1F1;
+  border-bottom:1px solid var(--line)}
+.thumb .noprev span{font-family:var(--mono);font-size:11px;letter-spacing:.12em;color:#fff;
+  padding:5px 9px;border-radius:2px}
+.thumb .noprev.pdf span{background:#8C3A2E}
+.thumb .noprev.doc span{background:#2B5580}
+.thumb .noprev.img span{background:var(--water-dark)}
+.thumb .noprev.other span{background:var(--stone)}
+.linkbtn{background:none;border:none;padding:0;color:#A6402F;font-family:var(--mono);
+  font-size:10.5px;cursor:pointer;text-decoration:underline}

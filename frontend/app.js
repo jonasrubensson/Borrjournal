@@ -1,6 +1,9 @@
 /* Borrjournal - webbgränssnitt. Ingen build-kedja, medvetet: en fil att läsa och ändra i. */
 "use strict";
 
+// Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
+const UI_VERSION = "1.3.0";
+
 const S = {
   token: localStorage.getItem("bj_token") || null,
   user: JSON.parse(localStorage.getItem("bj_user") || "null"),
@@ -717,10 +720,17 @@ function renderTab() {
 }
 
 function tabJournal(c, journal) {
-  const readOnly = S.user.role === "lasare";
+  const readOnly = S.user.role === "lasare" || !c.facilities.length;
   const facilityOptions = c.facilities
     .map((f) => `<option value="${f.id}">${esc(f.facility_no)} · ${esc(f.facility_type)}</option>`)
     .join("");
+  if (!c.facilities.length && S.user.role !== "lasare") {
+    return `<div class="empty"><div class="big">Ingen anläggning ännu</div>
+      <p>Journalen hör alltid till en brunn eller pump. Lägg till en anläggning först,
+      så går det att skriva anteckningar.</p>
+      <button class="btn pri sm" style="margin-top:10px" onclick="startOnboardingFor('${c.id}')">
+        Lägg till anläggning</button></div>`;
+  }
   return `
   ${
     readOnly
@@ -737,7 +747,13 @@ function tabJournal(c, journal) {
           .map((t) => `<option>${t}</option>`)
           .join("")}</select></div>
       <div><label class="f" for="jfac">Gäller anläggning</label>
-        <select id="jfac"><option value="">Kunden generellt</option>${facilityOptions}</select></div>
+        <select id="jfac">${facilityOptions}</select>
+        ${
+          c.facilities.length
+            ? ""
+            : `<div class="hint" style="color:var(--alert)">Kunden har ingen anläggning än.
+               Lägg till en under fliken Anläggning först.</div>`
+        }</div>
     </div>
     <label class="f" for="jttl">Rubrik</label>
     <input id="jttl" placeholder="T.ex. Filterbyte och tryckkontroll">
@@ -765,7 +781,7 @@ async function saveJournal() {
       method: "POST",
       body: {
         entry_type: $("#jtyp").value,
-        facility_id: $("#jfac").value || null,
+        facility_id: $("#jfac").value,
         title: $("#jttl").value,
         body: $("#jtxt").value,
         followup_date: $("#jfup").value || "",
@@ -808,36 +824,35 @@ function tabFiles(c, files) {
     <div class="progress" id="prog" hidden><i style="width:0"></i></div>
   </div>`
   }
-  <div style="margin-top:16px">${
+  <div class="imgs" style="margin-top:16px">${
     files.length
-      ? files
-          .map(
-            (f) => `<div class="filerow">
-      <div class="ftype ${fileIcon(f)}">${fileLabel(f)}</div>
-      <div style="flex:1;min-width:0">
-        <div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.filename)}</div>
-        <div class="fmeta">${bytes(f.size_bytes)} · ${dt(f.uploaded_at, false)} · ${esc(f.uploaded_by)}</div></div>
-      <button class="btn ghost sm" onclick="openFile('${f.id}')">Öppna</button>
-      ${readOnly ? "" : `<button class="btn danger sm" onclick="deleteFile('${f.id}')">Ta bort</button>`}
-    </div>`
-          )
-          .join("")
-      : `<div class="empty"><div class="big">Inga dokument</div><p>Ladda upp borrprotokoll, intyg och offerter här.</p></div>`
-  }</div>`;
+      ? files.map((f) => docCard(f, readOnly)).join("")
+      : ""
+  }</div>
+  ${files.length ? "" : `<div class="empty"><div class="big">Inga dokument</div><p>Ladda upp borrprotokoll, intyg och offerter här.</p></div>`}`;
+}
+
+function docCard(f, readOnly) {
+  const typ = fileIcon(f);
+  const preview = f.has_thumb
+    ? `<img src="/api/files/${f.id}/thumb" alt="${esc(f.filename)}" loading="lazy">`
+    : `<div class="noprev ${typ}"><span>${fileLabel(f)}</span></div>`;
+  return `<div class="thumb">
+    <button class="previewbtn" onclick="openFile('${f.id}')" title="Öppna ${esc(f.filename)}">${preview}</button>
+    <div class="cap">
+      <span style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+        title="${esc(f.filename)}">${esc(f.caption || f.filename)}</span>
+      <span class="m">${bytes(f.size_bytes)} · ${dt(f.uploaded_at, false)}${
+        readOnly ? "" : ` · <button onclick="deleteFile('${f.id}')" class="linkbtn">ta bort</button>`
+      }</span>
+    </div></div>`;
 }
 
 function tabImages(c, imgs) {
   const readOnly = S.user.role === "lasare";
   return `
   <div class="imgs">
-    ${imgs
-      .map(
-        (f) => `<div class="thumb">
-      <img src="/api/files/${f.id}/thumb" alt="${esc(f.caption || f.filename)}" loading="lazy" onclick="openFile('${f.id}')" style="cursor:zoom-in">
-      <div class="cap">${esc(f.caption || f.filename)}<span class="m">${dt(f.uploaded_at, false)}${readOnly ? "" : ` · <button onclick="deleteFile('${f.id}')" style="background:none;border:none;padding:0;color:#A6402F;font-family:var(--mono);font-size:10.5px;cursor:pointer">ta bort</button>`}</span></div>
-    </div>`
-      )
-      .join("")}
+    ${imgs.map((f) => docCard(f, readOnly)).join("")}
     ${
       readOnly
         ? ""
@@ -921,6 +936,81 @@ async function setStatus(facilityId, status) {
 }
 
 
+
+/* ---------------- tvåfaktor ---------------- */
+async function totpStart() {
+  const box = $("#totpbox");
+  try {
+    const r = await api("/me/totp/start", { method: "POST" });
+    box.innerHTML = `
+    <p class="lead" style="margin-top:0">Skanna koden med din autentiseringsapp och skriv in
+      de sex siffrorna för att bekräfta. Hoppar du över bekräftelsen slås ingenting på.</p>
+    <div class="row" style="align-items:flex-start;gap:20px">
+      <img src="/api/me/totp/qr?t=${Date.now()}" alt="QR-kod för tvåfaktor" width="180" height="180"
+        style="border:1px solid var(--line);border-radius:3px;background:#fff;padding:6px">
+      <div style="flex:1;min-width:200px">
+        <label class="f">Kan du inte skanna? Skriv in nyckeln</label>
+        <code style="display:block;font-family:var(--mono);font-size:13px;word-break:break-all;
+          background:#F6F8F8;border:1px solid var(--line);padding:8px;border-radius:3px">${esc(r.secret)}</code>
+        <label class="f" for="totp_code">Engångskod</label>
+        <input id="totp_code" inputmode="numeric" maxlength="6" placeholder="123456" style="max-width:160px">
+        <div class="row" style="margin-top:12px">
+          <button class="btn pri sm" onclick="totpConfirm()">Bekräfta</button>
+          <button class="btn ghost sm" onclick="adminNotifications()">Avbryt</button>
+        </div>
+      </div>
+    </div>`;
+    const el = $("#totp_code");
+    el.focus();
+    el.onkeydown = (e) => e.key === "Enter" && totpConfirm();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function totpConfirm() {
+  try {
+    await api("/me/totp/confirm", { method: "POST", body: { code: val("totp_code") } });
+    toast("Tvåfaktor påslagen. Nästa inloggning kräver engångskod.");
+    adminNotifications();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function totpDisable() {
+  if (!confirm("Stänga av tvåfaktor? Kontot skyddas då bara av lösenordet.")) return;
+  try {
+    await api("/me/totp/disable", { method: "POST", body: { password: val("totp_pw") } });
+    toast("Tvåfaktor avstängd");
+    adminNotifications();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/* ---------------- adressuppslag ---------------- */
+async function lookupAddress() {
+  const hint = $("#coordhint");
+  const address = [S.form.address, S.form.property_designation].filter(Boolean).join(", ");
+  if (!address) return toast("Fyll i adress eller fastighetsbeteckning först", true);
+  hint.textContent = "Slår upp adressen…";
+  try {
+    const r = await api(
+      `/geocode?q=${encodeURIComponent(address)}&municipality=${encodeURIComponent(S.form.municipality || "")}`
+    );
+    S.form.latitude = r.latitude;
+    S.form.longitude = r.longitude;
+    S.form.coordinates = `${r.latitude}, ${r.longitude}`;
+    const field = $("#fld_coordinates");
+    if (field) field.value = S.form.coordinates;
+    hint.innerHTML = `Hittade <strong>${esc(r.label.split(",").slice(0, 3).join(", "))}</strong>.
+      Kontrollera att det stämmer, adressuppslag träffar sällan exakt på borrhålet.`;
+  } catch (e) {
+    hint.innerHTML = `<span style="color:var(--alert)">${esc(e.message)}</span>`;
+  }
+}
+
 /* ---------------- redigera och ta bort ---------------- */
 function fld(id, label, value, type = "text", extra = "") {
   return `<div><label class="f" for="${id}">${label}</label>
@@ -963,7 +1053,13 @@ function editFacility(facilityId) {
         ${fld("e_depth", "Totalt djup (m)", f.total_depth_m, "number")}
         ${fld("e_water", "Vattennivå (m)", f.water_level_m, "number")}
         ${fld("e_cap", "Kapacitet (l/h)", f.capacity_lph, "number")}
-        ${fld("e_coord", "Koordinater", f.coordinates, "text", 'placeholder="59.72, 18.94 eller N 6620123 E 674321"')}
+        <div><label class="f" for="e_coord">Koordinater</label>
+          <input id="e_coord" value="${esc(f.coordinates || "")}"
+            placeholder="59.72, 18.94 eller N 6620123 E 674321">
+          <div class="row" style="margin-top:6px">
+            <button class="btn ghost sm" type="button" onclick="lookupForFacility()">Hämta från kundens adress</button>
+            <span class="hint" id="e_coordhint" style="margin:0"></span>
+          </div></div>
       </div></fieldset>
 
       <fieldset style="margin-top:14px"><legend>Pump</legend><div class="fgrid">
@@ -998,6 +1094,23 @@ function editFacility(facilityId) {
       </div>
     </div></div>`;
   scrollTill(box);
+}
+
+async function lookupForFacility() {
+  const c = S.data.customer;
+  const hint = $("#e_coordhint");
+  const address = [c.address, c.property_designation].filter(Boolean).join(", ");
+  if (!address) return toast("Kunden saknar adress och fastighetsbeteckning", true);
+  hint.textContent = "Slår upp…";
+  try {
+    const r = await api(
+      `/geocode?q=${encodeURIComponent(address)}&municipality=${encodeURIComponent(c.municipality || "")}`
+    );
+    $("#e_coord").value = `${r.latitude}, ${r.longitude}`;
+    hint.innerHTML = `Hittade ${esc(r.label.split(",").slice(0, 3).join(", "))}`;
+  } catch (e) {
+    hint.innerHTML = `<span style="color:var(--alert)">${esc(e.message)}</span>`;
+  }
 }
 
 async function saveFacility(facilityId) {
@@ -1307,6 +1420,7 @@ async function viewOnboarding() {
           <input id="fld_coordinates" type="text" placeholder="59.7231, 18.9412 eller N 6620123 E 674321"
             value="${esc(S.form.coordinates ?? "")}" oninput="S.form['coordinates']=this.value;checkCoord(this.value)">
           <div class="row" style="margin-top:6px">
+            <button class="btn ghost sm" type="button" onclick="lookupAddress()">Hämta från adressen</button>
             <button class="btn ghost sm" type="button" onclick="fillPosition()">Hämta min position</button>
             <span class="hint" id="coordhint" style="margin:0">Decimalgrader eller SWEREF 99 TM, båda fungerar.</span>
           </div></div>
@@ -1697,8 +1811,16 @@ async function viewReminders() {
     <div class="fgrid">
       <div><label class="f" for="rt">Rubrik</label><input id="rt" placeholder="Ring om hydroforbyte"></div>
       <div><label class="f" for="rd">Datum</label><input id="rd" type="date"></div>
-      <div><label class="f" for="rc">Kund</label><select id="rc"><option value="">Ingen särskild kund</option>
-        ${customers.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select></div>
+      <div><label class="f" for="rc">Gäller anläggning</label><select id="rc">
+        <option value="">Ingen särskild anläggning</option>
+        ${customers
+          .flatMap((c) =>
+            c.facilities.map(
+              (f) =>
+                `<option value="${f.id}">${esc(c.name)} · ${esc(f.facility_no)} ${esc(f.facility_type)}</option>`
+            )
+          )
+          .join("")}</select></div>
       <div><label class="f" for="rn">Förvarning</label><select id="rn">
         <option value="0">På dagen</option><option value="7" selected>7 dagar före</option>
         <option value="14">14 dagar före</option><option value="30">30 dagar före</option></select></div>
@@ -1729,7 +1851,7 @@ async function createReminder() {
         title,
         due_date: due,
         body: $("#rb").value,
-        customer_id: $("#rc").value || null,
+        facility_id: $("#rc").value || null,
         notify_days_before: parseInt($("#rn").value, 10),
         kind: "egen",
       },
@@ -2068,9 +2190,10 @@ async function adminUsers() {
 
 async function adminNotifications() {
   const token = claim();
-  const [mail, devices] = await Promise.all([
+  const [mail, devices, me] = await Promise.all([
     api("/notifications/email"),
     api("/notifications/push/status"),
+    api("/me"),
   ]);
   if (!current(token) || !$("#adminbody")) return;
   $("#adminbody").innerHTML = `
@@ -2090,6 +2213,21 @@ async function adminNotifications() {
         : `<p class="hint">Inga enheter registrerade för ditt konto än.</p>`
     }
   </div></div>
+
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Tvåfaktor för ditt konto</h2>
+    <span class="tag ${me.totp_enabled ? "ok" : "n"}">${me.totp_enabled ? "Påslagen" : "Av"}</span></div>
+    <div class="pad" id="totpbox">
+    ${
+      me.totp_enabled
+        ? `<p class="lead" style="margin-top:0">Engångskod krävs vid inloggning. Tappar du telefonen
+             kan en annan administratör nollställa tvåfaktor på ditt konto.</p>
+           <div class="row"><input id="totp_pw" type="password" placeholder="Ditt lösenord" style="max-width:240px">
+           <button class="btn danger sm" onclick="totpDisable()">Stäng av</button></div>`
+        : `<p class="lead" style="margin-top:0">Skydda kontot med en engångskod från en app som
+             Google Authenticator, Aegis eller 1Password. Utan detta räcker lösenordet.</p>
+           <button class="btn pri sm" onclick="totpStart()">Slå på tvåfaktor</button>`
+    }
+    </div></div>
 
   <div class="card"><div class="hd"><h2>E-post</h2>
     <span class="tag ${mail.enabled ? "ok" : "n"}">${mail.enabled ? "Aktiv" : "Av"}</span></div><div class="pad">
@@ -2331,6 +2469,27 @@ function render() {
 }
 
 applyHash();
+
+// Varnar om gränssnittet är nyare än servern. Frontend-katalogen är monterad live
+// i containern medan backend bakas in i imagen, så en uppdatering utan --build
+// ger nytt gränssnitt mot gammalt API. Symptomet blir annars "Method not allowed".
+(async () => {
+  try {
+    const r = await fetch("/api/version");
+    const { version } = await r.json();
+    if (version !== UI_VERSION) {
+      const bar = document.createElement("div");
+      bar.style.cssText =
+        "position:fixed;left:0;right:0;top:0;z-index:300;background:#B3801F;color:#fff;" +
+        "padding:8px 14px;font:13px/1.4 system-ui,sans-serif;text-align:center";
+      bar.innerHTML =
+        `Servern kör version ${version} men gränssnittet är ${UI_VERSION}. ` +
+        `Kör <code style="background:rgba(0,0,0,.2);padding:1px 5px;border-radius:2px">docker compose up -d --build</code> ` +
+        `så att backend uppdateras också.`;
+      document.body.appendChild(bar);
+    }
+  } catch (_) {}
+})();
 
 if (S.token) {
   PUSH.ready();
