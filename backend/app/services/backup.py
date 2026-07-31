@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import settings
 from ..db import Base
 from ..models import BackupRecord
+from ..schemas import iso_utc
 
 BACKUP_DIR = os.path.join(settings.data_dir, "backups")
 FILE_DIR = os.path.join(settings.data_dir, "files")
@@ -78,7 +79,7 @@ async def _dump_json(db: AsyncSession, target: str) -> tuple[str, dict]:
             item = {}
             for key, value in dict(row).items():
                 if isinstance(value, datetime):
-                    item[key] = value.isoformat()
+                    item[key] = iso_utc(value)
                 else:
                     item[key] = value
             serialised.append(item)

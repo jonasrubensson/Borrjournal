@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,6 +77,11 @@ async def generate_auto(db: AsyncSession) -> int:
                     body=body,
                     due_date=due,
                     notify_days_before=LEAD_DAYS.get(kind, 14),
+                    remind_at=datetime.combine(
+                        date.fromisoformat(due) - timedelta(days=LEAD_DAYS.get(kind, 14)),
+                        time(5, 0),
+                        tzinfo=timezone.utc,
+                    ),
                     auto_key=key,
                     created_by="system",
                 )
@@ -89,23 +94,51 @@ async def generate_auto(db: AsyncSession) -> int:
     return created
 
 
+def berakna_remind_at(r: Reminder) -> datetime | None:
+    """Tidpunkt att meddela. Är den inte satt räknas den ut ur förfallodag och förvarning."""
+    if r.remind_at is not None:
+        return r.remind_at if r.remind_at.tzinfo else r.remind_at.replace(tzinfo=timezone.utc)
+    try:
+        forfaller = date.fromisoformat(r.due_date)
+    except (ValueError, TypeError):
+        return None
+    dag = forfaller - timedelta(days=r.notify_days_before or 0)
+    # Klockan 07:00 svensk tid, alltså 05:00 UTC vintertid. Räcker för en morgonrutin.
+    return datetime.combine(dag, time(5, 0), tzinfo=timezone.utc)
+
+
+async def backfill_remind_at(db: AsyncSession) -> int:
+    """Fyller i tidpunkt på rader som skapades innan fältet fanns."""
+    rows = (
+        await db.execute(
+            select(Reminder).where(Reminder.remind_at.is_(None), Reminder.status == "open")
+        )
+    ).scalars().all()
+    antal = 0
+    for r in rows:
+        tid = berakna_remind_at(r)
+        if tid:
+            r.remind_at = tid
+            antal += 1
+    if antal:
+        await db.commit()
+    return antal
+
+
 async def due_now(db: AsyncSession) -> list[Reminder]:
-    """Öppna påminnelser inom sitt förvarningsfönster som ännu inte meddelats."""
-    today = date.today()
+    """Öppna påminnelser vars tidpunkt passerats och som ännu inte meddelats."""
+    nu = datetime.now(timezone.utc)
     rows = (
         await db.execute(
             select(Reminder).where(Reminder.status == "open", Reminder.notified_at.is_(None))
         )
     ).scalars().all()
-    ready = []
+    klara = []
     for r in rows:
-        try:
-            due = date.fromisoformat(r.due_date)
-        except (ValueError, TypeError):
-            continue
-        if due - timedelta(days=r.notify_days_before or 0) <= today:
-            ready.append(r)
-    return sorted(ready, key=lambda r: r.due_date)
+        tid = berakna_remind_at(r)
+        if tid is not None and tid <= nu:
+            klara.append(r)
+    return sorted(klara, key=lambda r: (r.due_date, r.due_time))
 
 
 async def notify_due(db: AsyncSession, force: bool = False) -> dict:
@@ -122,7 +155,8 @@ async def notify_due(db: AsyncSession, force: bool = False) -> dict:
                 await db.execute(select(Customer.name).where(Customer.id == r.customer_id))
             ).scalar_one_or_none()
             customer = f" ({c})" if c else ""
-        lines.append(f"- {r.due_date}  {r.title}{customer}")
+        nar = f"{r.due_date} {r.due_time}".strip()
+        lines.append(f"- {nar}  {r.title}{customer}")
 
     subject = (
         f"Borrjournal: {len(items)} påminnelse"
