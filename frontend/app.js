@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "1.4.0";
+const UI_VERSION = "2.1.0";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
@@ -76,6 +76,10 @@ async function api(path, options = {}) {
     try {
       detail = (await res.json()).detail || detail;
     } catch (_) {}
+    if (res.status === 403 && detail === "totp_setup_required") {
+      forceTotpSetup();
+      throw new Error("401");
+    }
     const err = new Error(detail);
     err.status = res.status;
     throw err;
@@ -97,6 +101,7 @@ function logout(msg) {
 const ROUTES = [
   ["oversikt", "Översikt", "M3 10 L10 3 L17 10 M5 8 v9 h10 V8"],
   ["kunder", "Kunder", "M10 9 a3 3 0 1 0 0-6 a3 3 0 0 0 0 6 M3 17 c0-4 3-6 7-6 s7 2 7 6"],
+  ["besok", "Besök", "M10 17 s6-5.3 6-10a6 6 0 1 0-12 0c0 4.7 6 10 6 10z M10 5 v4 M8 7 h4"],
   ["paminnelser", "Påminnelser", "M10 3 a5 5 0 0 0-5 5 c0 4-2 5-2 5 h14 s-2-1-2-5 a5 5 0 0 0-5-5 M8 16 a2 2 0 0 0 4 0"],
   ["journal", "Journal", "M5 3 h10 v14 H5z M8 7 h6 M8 10 h6 M8 13 h4"],
   ["pumpar", "Pumpar", "M6 3 h8 v5 h-8z M10 8 v9 M6 17 h8"],
@@ -162,6 +167,7 @@ async function doLogin() {
     localStorage.setItem("bj_token", res.token);
     localStorage.setItem("bj_user", JSON.stringify(res.user));
     loginNeedsTotp = false;
+    if (res.totp_setup_required) return forceTotpSetup();
     go("oversikt");
     toast(`Inloggad som ${res.user.full_name || res.user.username}`);
   } catch (e) {
@@ -184,7 +190,10 @@ function shell(inner) {
     .slice(0, 2)
     .toUpperCase();
   const navHtml = ROUTES.map(([r, label, d]) => {
-    const on = S.route === r || (r === "kunder" && S.route === "kund") || (r === "pumpar" && S.route === "anlaggningar");
+    const on =
+      S.route === r ||
+      (r === "kunder" && S.route === "kund") ||
+      (r === "pumpar" && S.route === "anlaggningar");
     const badge = r === "paminnelser" && S.badge ? `<span class="cnt badge">${S.badge}</span>` : "";
     return `<a href="#/${r}" class="${on ? "on" : ""}">
       <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="${d}" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
@@ -205,7 +214,8 @@ function shell(inner) {
       <nav class="nav">${navHtml}
         ${u.role === "admin" ? `<a href="#/admin/konton" class="${S.route === "admin" ? "on" : ""}"><svg width="18" height="18" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M10 2v3M10 15v3M2 10h3M15 10h3" stroke="currentColor" stroke-width="1.5"/></svg><span>Konton</span></a>` : ""}
       </nav>
-      <div class="foot">${esc(u.full_name || u.username || "")}<br>${esc(u.role || "")}<br>
+      <div class="foot">
+        <button onclick="go('konto')" style="text-align:left">${esc(u.full_name || u.username || "")}<br>${esc(u.role || "")}</button><br>
         <button onclick="logout()">Logga ut</button></div>
     </aside>
     <div class="main">
@@ -219,7 +229,9 @@ function shell(inner) {
           <svg width="15" height="15" viewBox="0 0 20 20" fill="none"><path d="M10 18s6-5.3 6-10a6 6 0 1 0-12 0c0 4.7 6 10 6 10z" stroke="currentColor" stroke-width="1.5"/><circle cx="10" cy="8" r="2.2" stroke="currentColor" stroke-width="1.5"/></svg>
           <span class="hidemob">Nära</span></button>
         <button class="btn pri sm" onclick="go('ny')">+ Ny</button>
-        <div class="who"><span class="av">${esc(initials)}</span><span>${esc(u.full_name || u.username || "")}</span></div>
+        <button class="who" onclick="go('konto')" title="Mitt konto"
+          style="background:none;border:none;padding:6px 4px;cursor:pointer">
+          <span class="av">${esc(initials)}</span><span>${esc(u.full_name || u.username || "")}</span></button>
       </div>
       <main class="view" id="view">${inner}</main>
     </div>
@@ -306,6 +318,63 @@ async function globalSearch() {
   box.innerHTML = groups.length
     ? `<div class="results">${groups.join("")}</div>`
     : `<div class="results"><div class="grp">Inga träffar</div></div>`;
+}
+
+
+/* ---------------- bilder bakom inloggning ----------------
+   En <img src="..."> skickar ingen Authorization-header, så bilder från API:et
+   blir 401 och visas som brutna. Lösningen är att hämta dem med token och lägga
+   in resultatet som en blob-URL. Alternativet, token i frågesträngen, hade
+   hamnat i webbserverloggar och referrers. */
+const BLOBBAR = new Set();
+
+function slappBlobbar() {
+  for (const url of BLOBBAR) URL.revokeObjectURL(url);
+  BLOBBAR.clear();
+}
+
+async function laddaBild(el) {
+  const path = el.dataset.authSrc;
+  if (!path || el.dataset.laddad) return;
+  el.dataset.laddad = "1";
+  try {
+    const res = await fetch(path, { headers: { Authorization: `Bearer ${S.token}` } });
+    if (!res.ok) throw new Error(String(res.status));
+    const url = URL.createObjectURL(await res.blob());
+    BLOBBAR.add(url);
+    el.src = url;
+    el.classList.remove("laddar");
+  } catch (e) {
+    el.classList.remove("laddar");
+    el.classList.add("trasig");
+    el.removeAttribute("src");
+    el.alt = "Kunde inte visa bilden";
+  }
+}
+
+/* Laddar bara det som syns, så en kund med femtio foton inte drar hem allt på en gång. */
+let bildObservator = null;
+function hydreraBilder(root = document) {
+  const bilder = root.querySelectorAll("img[data-auth-src]:not([data-laddad])");
+  if (!bilder.length) return;
+  if (!("IntersectionObserver" in window)) {
+    bilder.forEach(laddaBild);
+    return;
+  }
+  if (!bildObservator) {
+    bildObservator = new IntersectionObserver(
+      (poster) => {
+        for (const p of poster) {
+          if (p.isIntersecting) {
+            laddaBild(p.target);
+            bildObservator.unobserve(p.target);
+          }
+        }
+      },
+      { rootMargin: "200px" }
+    );
+  }
+  bilder.forEach((b) => bildObservator.observe(b));
 }
 
 /* ---------------- brunnsprofil ---------------- */
@@ -688,7 +757,8 @@ async function viewCustomer() {
         </div></div></div>`
         : ""
     }
-  </div>`;
+  </div>
+  <div id="sharebox"></div>`;
   renderTab();
 
   // "Slå ihop med resan" hämtas efter att kundkortet visats, så sidan inte
@@ -712,12 +782,14 @@ function renderTab() {
   const c = S.data.customer;
   const body = $("#tabbody");
   if (!body) return;
+  slappBlobbar();
   if (S.tab === "journal") body.innerHTML = tabJournal(c, S.data.journal);
   else if (S.tab === "paminnelser") body.innerHTML = tabReminders(c, S.data.reminders);
   else if (S.tab === "dokument") body.innerHTML = tabFiles(c, S.data.files.filter((f) => f.kind === "dokument"));
   else if (S.tab === "bilder") body.innerHTML = tabImages(c, S.data.files.filter((f) => f.kind === "bild"));
   else body.innerHTML = tabFacilities(c);
   wireUploads();
+  hydreraBilder(body);
 }
 
 function tabJournal(c, journal) {
@@ -729,7 +801,7 @@ function tabJournal(c, journal) {
     return `<div class="empty"><div class="big">Ingen anläggning ännu</div>
       <p>Journalen hör alltid till en brunn eller pump. Lägg till en anläggning först,
       så går det att skriva anteckningar.</p>
-      <button class="btn pri sm" style="margin-top:10px" onclick="startOnboardingFor('${c.id}')">
+      <button class="btn pri sm" style="margin-top:10px" onclick="startFacilityFor('${c.id}')">
         Lägg till anläggning</button></div>`;
   }
   return `
@@ -836,7 +908,7 @@ function tabFiles(c, files) {
 function docCard(f, readOnly) {
   const typ = fileIcon(f);
   const preview = f.has_thumb
-    ? `<img src="/api/files/${f.id}/thumb" alt="${esc(f.filename)}" loading="lazy">`
+    ? `<img class="laddar" data-auth-src="/api/files/${f.id}/thumb" alt="${esc(f.filename)}">`
     : `<div class="noprev ${typ}"><span>${fileLabel(f)}</span></div>`;
   return `<div class="thumb">
     <button class="previewbtn" onclick="openFile('${f.id}')" title="Öppna ${esc(f.filename)}">${preview}</button>
@@ -911,6 +983,8 @@ function tabFacilities(c) {
       <button class="btn ghost sm" onclick="markService('${f.id}')">Service idag</button>
       <button class="btn ghost sm" onclick="setStatus('${f.id}','${f.status_manual === "action" ? "ok" : "action"}')">
         ${f.status_manual === "action" ? "Rensa flagga" : "Flagga åtgärd"}</button>
+      <button class="btn ghost sm" onclick="facilityBriefing('${f.id}')">Grannbrunnar</button>
+      <button class="btn ghost sm" onclick="shareDialog({facility_id:'${f.id}'})">Dela</button>
       <button class="btn danger sm" onclick="removeFacility('${f.id}','${esc(f.facility_no)}')">Ta bort</button>
     </div>
     <div id="fedit-${f.id}"></div>`
@@ -920,7 +994,7 @@ function tabFacilities(c) {
       .join("") +
     (S.user.role === "lasare"
       ? ""
-      : `<button class="btn ghost sm" onclick="startOnboardingFor('${c.id}')">+ Lägg till anläggning på denna kund</button>`)
+      : `<button class="btn ghost sm" onclick="startFacilityFor('${c.id}')">+ Lägg till anläggning på denna kund</button>`)
   );
 }
 
@@ -938,6 +1012,567 @@ async function setStatus(facilityId, status) {
 
 
 
+
+
+
+/* ---------------- platsbesök ---------------- */
+const BESOK_STATUS = {
+  planerat: ["Inbokat", "n"],
+  genomfort: ["Besökt", "n"],
+  offert: ["Offert lämnad", "soon"],
+  vunnen: ["Blev kund", "ok"],
+  forlorad: ["Blev inget", "action"],
+};
+
+async function viewVisits() {
+  const token = claim();
+  mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
+  const filter = S.filter.visitStatus || "aktiva";
+  const visits = await api(`/visits?status=${filter}`);
+  if (!current(token)) return;
+
+  $("#view").innerHTML = `
+  <div class="spread">
+    <div><div class="eyebrow">Innan det finns en kund</div><h1>Platsbesök</h1>
+      <p class="lead">Här ligger de du varit ute hos eller ska åka till, utan att de behöver läggas
+      upp som kunder. Blir det affär skapas kunden av besöket med ett klick, och det som redan är
+      ifyllt följer med.</p></div>
+    <div class="row">
+      <select style="width:auto" onchange="S.filter.visitStatus=this.value;viewVisits()">
+        ${[["aktiva", "Pågående"], ["", "Alla"], ["vunnen", "Blev kund"], ["forlorad", "Blev inget"]]
+          .map(([v, l]) => `<option value="${v}"${filter === v ? " selected" : ""}>${l}</option>`)
+          .join("")}
+      </select>
+      ${S.user.role === "lasare" ? "" : `<button class="btn pri" onclick="newVisit()">+ Nytt besök</button>`}
+    </div>
+  </div>
+  <div id="visitform"></div>
+  <div class="card">
+    <table><thead><tr><th>Nr</th><th>Kontakt</th><th>Fastighet</th><th>Planerat</th>
+      <th>Ärende</th><th>Status</th></tr></thead>
+    <tbody>${visits
+      .map((v) => {
+        const [text, klass] = BESOK_STATUS[v.status] || [v.status, "n"];
+        return `<tr class="clickable" onclick="go('besok','${v.id}')">
+        <td data-l="Nr" class="tid">${esc(v.visit_no)}</td>
+        <td data-l="Kontakt"><span class="tname">${esc(v.contact_name || "—")}</span>
+          <div class="tsub">${esc(v.phone || "")}</div></td>
+        <td data-l="Fastighet">${esc(v.property_designation || v.address || "—")}
+          <div class="tsub">${esc(v.municipality || "")}</div></td>
+        <td data-l="Planerat" class="tid">${esc(v.planned_at || "—")}</td>
+        <td data-l="Ärende">${esc((v.errand || "").slice(0, 40))}</td>
+        <td data-l="Status"><span class="tag ${klass}">${esc(text)}</span></td></tr>`;
+      })
+      .join("")}</tbody></table>
+    ${visits.length ? "" : `<div class="empty"><div class="big">Inga besök här</div>
+      <p>Lägg upp ett besök när någon hör av sig, så har du underlaget med dig när du åker.</p></div>`}
+  </div>`;
+}
+
+function newVisit() {
+  const box = $("#visitform");
+  if (box.innerHTML) return (box.innerHTML = "");
+  box.innerHTML = `
+  <div class="card" style="margin-bottom:16px;border-color:#C9DFE3">
+    <div class="hd" style="background:#F4F9FA"><h2>Nytt platsbesök</h2></div>
+    <div class="pad">
+      <p class="hint" style="margin-top:0">Fyll i så lite eller mycket du vill. Det enda som krävs
+        är något att känna igen platsen på.</p>
+      <div class="fgrid">
+        ${fld("v_name", "Kontaktperson", "")}
+        ${fld("v_phone", "Telefon", "", "tel")}
+        ${fld("v_prop", "Fastighetsbeteckning", "")}
+        ${fld("v_addr", "Adress", "")}
+        ${fld("v_mun", "Kommun", "")}
+        ${fld("v_date", "Planerat besök", "", "date")}
+      </div>
+      <label class="f" for="v_errand">Ärende</label>
+      <input id="v_errand" placeholder="Vill borra för vatten, dålig kapacitet i gamla brunnen">
+      <div class="row" style="margin-top:14px">
+        <button class="btn pri sm" onclick="saveNewVisit()">Spara besök</button>
+        <button class="btn ghost sm" onclick="document.getElementById('visitform').innerHTML=''">Avbryt</button>
+      </div>
+    </div></div>`;
+}
+
+async function saveNewVisit() {
+  const body = {
+    contact_name: val("v_name").trim(),
+    phone: val("v_phone"),
+    property_designation: val("v_prop").trim(),
+    address: val("v_addr"),
+    municipality: val("v_mun"),
+    planned_at: val("v_date"),
+    errand: val("v_errand"),
+  };
+  if (!body.contact_name && !body.property_designation && !body.address)
+    return toast("Ange kontaktperson, fastighet eller adress", true);
+  try {
+    const v = await api("/visits", { method: "POST", body });
+    toast(`${v.visit_no} skapat`);
+    go("besok", v.id);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function viewVisit() {
+  const token = claim();
+  mountShell(`<div class="skel" style="width:35%"></div><div class="skel"></div>`);
+  const v = await api(`/visits/${S.id}`);
+  if (!current(token)) return;
+  S.data.visit = v;
+  const [text, klass] = BESOK_STATUS[v.status] || [v.status, "n"];
+  const laser = S.user.role === "lasare";
+
+  $("#view").innerHTML = `
+  <button class="back" onclick="go('besok')">← Alla besök</button>
+  <div class="chead">
+    <div class="spread" style="margin-bottom:0">
+      <div><div class="eyebrow">${esc(v.visit_no)} · upplagt ${dt(v.created_at, false)} av ${esc(v.created_by)}</div>
+        <h1>${esc(v.contact_name || v.property_designation || v.address || "Platsbesök")}</h1>
+        <p class="lead">${esc(v.property_designation || "")}${v.municipality ? ", " + esc(v.municipality) : ""}</p></div>
+      <div class="row"><span class="tag ${klass}">${esc(text)}</span>
+        ${
+          laser
+            ? ""
+            : v.customer_id
+              ? `<button class="btn sm" onclick="go('kund','${v.customer_id}')">Öppna kunden</button>`
+              : `<button class="btn pri sm" onclick="convertVisit()">Blev kund</button>`
+        }
+      </div>
+    </div>
+    <div class="facts">
+      <div class="fact"><div class="k">Telefon</div><div class="v"><a href="tel:${esc(v.phone)}">${esc(v.phone || "—")}</a></div></div>
+      <div class="fact"><div class="k">E-post</div><div class="v">${esc(v.email || "—")}</div></div>
+      <div class="fact"><div class="k">Adress</div><div class="v">${esc(v.address || "—")}</div></div>
+      <div class="fact"><div class="k">Planerat</div><div class="v mono">${esc(v.planned_at || "—")}</div></div>
+      <div class="fact"><div class="k">Koordinat</div><div class="v mono" style="font-size:12.5px">${
+        v.latitude ? `${v.latitude}, ${v.longitude}` : "—"
+      }</div></div>
+      ${v.quote_amount ? `<div class="fact"><div class="k">Offert</div><div class="v mono">${v.quote_amount.toLocaleString("sv-SE")} kr</div></div>` : ""}
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div>
+      <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Inför besöket</h2>
+        <span class="tag n">SGU</span></div>
+        <div class="pad" id="briefing"><div class="skel"></div><div class="skel"></div></div></div>
+
+      ${
+        laser
+          ? ""
+          : `<div class="card"><div class="hd"><h2>Anteckningar och status</h2></div><div class="pad">
+        <label class="f" for="v_errand2">Ärende</label>
+        <input id="v_errand2" value="${esc(v.errand || "")}">
+        <label class="f" for="v_notes">Anteckningar från platsen</label>
+        <textarea id="v_notes" placeholder="Åtkomst för riggen, var kunden vill ha hålet, vad som sades.">${esc(v.notes || "")}</textarea>
+        <div class="fgrid">
+          <div><label class="f" for="v_status">Status</label><select id="v_status">
+            ${Object.entries(BESOK_STATUS)
+              .map(([k, [l]]) => `<option value="${k}"${v.status === k ? " selected" : ""}>${l}</option>`)
+              .join("")}</select></div>
+          ${fld("v_quote", "Offertsumma (kr)", v.quote_amount ?? "", "number")}
+          ${fld("v_coord", "Koordinat", v.coordinates || "")}
+          ${fld("v_mail", "E-post", v.email || "", "email")}
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn ghost sm" onclick="visitPosition()">Hämta min position</button>
+          <button class="btn ghost sm" onclick="visitGeocode()">Hämta från adressen</button>
+          <span class="hint" id="v_coordhint" style="margin:0"></span>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <button class="btn pri sm" onclick="saveVisit()">Spara</button>
+          <button class="btn ghost sm" onclick="shareDialog({visit_id:'${v.id}'})">Dela med extern borrare</button>
+          <button class="btn danger sm" style="margin-left:auto" onclick="removeVisit()">Ta bort</button>
+        </div>
+      </div></div>`
+      }
+    </div>
+    <div id="visitside"></div>
+  </div>
+  <div id="sharebox"></div>`;
+
+  loadBriefing({ visit_id: v.id });
+}
+
+async function saveVisit() {
+  const body = {
+    errand: val("v_errand2"),
+    notes: val("v_notes"),
+    status: val("v_status"),
+    email: val("v_mail"),
+    coordinates: val("v_coord"),
+    quote_amount: numVal("v_quote"),
+  };
+  try {
+    await api(`/visits/${S.data.visit.id}`, { method: "PATCH", body });
+    toast("Besöket sparat");
+    viewVisit();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function visitPosition() {
+  const hint = $("#v_coordhint");
+  hint.textContent = "Hämtar position…";
+  try {
+    const pos = await GEO.get();
+    $("#v_coord").value = `${pos.lat.toFixed(6)}, ${pos.lon.toFixed(6)}`;
+    hint.textContent = `Hämtad, ±${Math.round(pos.acc)} m. Spara för att uppdatera underlaget.`;
+  } catch (e) {
+    hint.innerHTML = `<span style="color:var(--alert)">${esc(e.message)}</span>`;
+  }
+}
+
+async function visitGeocode() {
+  const v = S.data.visit;
+  const hint = $("#v_coordhint");
+  const adress = [v.address, v.property_designation].filter(Boolean).join(", ");
+  if (!adress) return toast("Besöket saknar adress och fastighet", true);
+  hint.textContent = "Slår upp…";
+  try {
+    const r = await api(
+      `/geocode?q=${encodeURIComponent(adress)}&municipality=${encodeURIComponent(v.municipality || "")}`
+    );
+    $("#v_coord").value = `${r.latitude}, ${r.longitude}`;
+    hint.innerHTML = `Hittade ${esc(r.label.split(",").slice(0, 3).join(", "))}. Spara för att uppdatera underlaget.`;
+  } catch (e) {
+    hint.innerHTML = `<span style="color:var(--alert)">${esc(e.message)}</span>`;
+  }
+}
+
+async function removeVisit() {
+  const v = S.data.visit;
+  if (!confirm(`Ta bort ${v.visit_no}? Det går inte att ångra.`)) return;
+  await api(`/visits/${v.id}`, { method: "DELETE" });
+  toast("Besöket borttaget");
+  go("besok");
+}
+
+async function convertVisit() {
+  const v = S.data.visit;
+  const namn = prompt(
+    "Vad ska kunden heta i registret?",
+    v.contact_name || v.property_designation || ""
+  );
+  if (namn === null) return;
+  try {
+    const r = await api(`/visits/${v.id}/convert`, {
+      method: "POST",
+      body: { name: namn.trim(), create_facility: true },
+    });
+    toast(`${r.customer.customer_no} skapad från ${v.visit_no}`);
+    S.data.customers = null;
+    go("kund", r.customer.id);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/* ---------------- underlag från SGU ---------------- */
+function spann(s, enhet) {
+  if (!s) return "—";
+  return s.min === s.max
+    ? `${s.median} ${enhet}`
+    : `${s.min}–${s.max} ${enhet} <span class="muted">(median ${s.median})</span>`;
+}
+
+async function loadBriefing(params) {
+  const box = $("#briefing");
+  if (!box) return;
+  const qs = new URLSearchParams({ ...params, radius_m: S.filter.sguRadius || 1000 });
+  let b;
+  try {
+    b = await api(`/sgu/briefing?${qs}`);
+  } catch (e) {
+    box.innerHTML = `<p class="hint" style="margin:0">${esc(e.message)}</p>
+      ${
+        e.message.includes("koordinat")
+          ? ""
+          : `<p class="hint">Har ni inte hämtat SGU-data än gör en administratör det under
+             Inställningar → SGU.</p>`
+      }`;
+    return;
+  }
+
+  if (!b.antal) {
+    box.innerHTML = `<p class="lead" style="margin-top:0">Inga registrerade brunnar inom
+      ${b.radius_m} m. Antingen är trakten oborrad, eller så saknas den i Brunnsarkivet.</p>
+      ${radieVal()}`;
+    return;
+  }
+
+  const svag = b.svag_kapacitet_andel;
+  box.innerHTML = `
+  <p class="lead" style="margin-top:0">
+    <strong>${b.antal} grannbrunnar</strong> inom ${b.radius_m} m,
+    varav ${b.antal_vattenbrunnar} vattenbrunnar och ${b.antal_energibrunnar} energibrunnar.</p>
+
+  <div class="facts" style="border-top:none;padding-top:4px;grid-template-columns:1fr 1fr">
+    <div class="fact"><div class="k">Berg på</div><div class="v">${spann(b.jorddjup, "m")}</div></div>
+    <div class="fact"><div class="k">Borrdjup, vatten</div><div class="v">${spann(b.borrdjup_vatten, "m")}</div></div>
+    <div class="fact"><div class="k">Kapacitet</div><div class="v">${spann(b.kapacitet, "l/h")}</div></div>
+    <div class="fact"><div class="k">Grundvattennivå</div><div class="v">${spann(b.grundvattenniva, "m")}</div></div>
+    ${
+      b.borrdjup_energi
+        ? `<div class="fact"><div class="k">Borrdjup, energi</div><div class="v">${spann(b.borrdjup_energi, "m")}</div></div>`
+        : ""
+    }
+    ${
+      svag !== null
+        ? `<div class="fact"><div class="k">Under 600 l/h</div>
+           <div class="v">${svag} % av grannarna ${svag >= 30 ? "⚠" : ""}</div></div>`
+        : ""
+    }
+  </div>
+
+  ${
+    b.jorddjup && b.borrdjup_vatten
+      ? `<p class="lead" style="margin-top:14px;padding:12px;background:#F4F9FA;border-radius:3px">
+         Att räkna med: <strong>foderrör kring ${Math.ceil(b.jorddjup.median) + 2} m</strong>
+         (grannarnas jorddjup ${b.jorddjup.min}–${b.jorddjup.max} m plus marginal ner i berg),
+         och <strong>borrdjup omkring ${Math.round(b.borrdjup_vatten.median)} m</strong>.
+         ${svag >= 30 ? "Var beredd på svag kapacitet, flera grannar ligger under 600 l/h." : ""}</p>`
+      : ""
+  }
+
+  <details style="margin-top:12px">
+    <summary style="cursor:pointer;font-family:var(--cond);text-transform:uppercase;
+      letter-spacing:.05em;font-weight:600">Närmaste brunnarna</summary>
+    <table style="margin-top:10px"><thead><tr><th>Avstånd</th><th>Borrad</th><th>Djup</th>
+      <th>Berg</th><th>Kapacitet</th><th>Typ</th></tr></thead>
+      <tbody>${b.narmaste
+        .map(
+          (w) => `<tr><td data-l="Avstånd" class="tid">${w.avstand_m} m</td>
+        <td data-l="Borrad" class="tid">${esc(w.borrdatum || "—")}</td>
+        <td data-l="Djup" class="tid">${w.totaldjup ?? "—"} m</td>
+        <td data-l="Berg" class="tid">${w.djup_till_berg ?? "—"} m</td>
+        <td data-l="Kapacitet" class="tid">${w.vattenmangd ?? "—"} l/h</td>
+        <td data-l="Typ">${esc(w.anvandning_text)}</td></tr>`
+        )
+        .join("")}</tbody></table>
+  </details>
+
+  ${radieVal()}
+  <p class="hint" style="margin-top:12px">${esc(b.vattenkvalitet)}</p>
+  <p class="hint">Källa: ${esc(b.kalla)}. Lägesnoggrannheten varierar, många brunnar är satta på
+    fastighetens mittpunkt snarare än på hålet.</p>`;
+}
+
+function radieVal() {
+  const r = S.filter.sguRadius || 1000;
+  return `<div class="row" style="margin-top:12px">
+    <span class="hint" style="margin:0">Radie:</span>
+    ${[500, 1000, 2000, 5000]
+      .map(
+        (x) =>
+          `<button class="btn ghost sm" style="${x === r ? "border-color:var(--water);color:var(--water-dark)" : ""}"
+        onclick="setRadie(${x})">${x >= 1000 ? x / 1000 + " km" : x + " m"}</button>`
+      )
+      .join("")}
+  </div>`;
+}
+
+function setRadie(m) {
+  S.filter.sguRadius = m;
+  if (S.route === "besok" && S.id) loadBriefing({ visit_id: S.id });
+  else if (S.data.customer) {
+    const f = S.data.customer.facilities.find((x) => x.latitude != null);
+    if (f) loadBriefing({ facility_id: f.id });
+  }
+}
+
+/* ---------------- dela med extern borrare ---------------- */
+async function shareDialog(target) {
+  const box = $("#sharebox");
+  if (!box) return;
+  const { fields } = await api("/share/fields");
+  box.innerHTML = `
+  <div class="card" style="margin-top:18px;border-color:#C9DFE3">
+    <div class="hd" style="background:#F4F9FA"><h2>Dela med extern borrare</h2></div>
+    <div class="pad">
+      <p class="lead" style="margin-top:0">Skickas som e-post från din egen server. Inget öppnas
+        utåt, och bara det du kryssar i följer med. Utskicket loggas i journalen.</p>
+      <div class="fgrid">
+        ${fld("sh_to", "Mottagare", "", "email", 'placeholder="borrare@firma.se"')}
+        ${fld("sh_sub", "Ämne", "", "text", 'placeholder="Lämna tomt för automatiskt ämne"')}
+      </div>
+      <label class="f">Vad ska följa med</label>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:6px">
+        ${fields
+          .map(
+            (f) => `<label style="display:flex;gap:8px;align-items:flex-start;font-size:14px">
+          <input type="checkbox" class="sharefield" value="${f.key}" style="width:auto;margin-top:3px"
+            ${["plats", "atkomst", "borrning"].includes(f.key) ? "checked" : ""}>
+          <span>${esc(f.label)}</span></label>`
+          )
+          .join("")}
+      </div>
+      <label class="f" for="sh_msg">Meddelande</label>
+      <textarea id="sh_msg" placeholder="Hej, kan du ta det här jobbet vecka 34?"></textarea>
+      <div class="row" style="margin-top:14px">
+        <button class="btn pri sm" onclick="sendShare(${JSON.stringify(JSON.stringify(target)).replace(/"/g, "&quot;")})">Skicka</button>
+        <button class="btn ghost sm" onclick="document.getElementById('sharebox').innerHTML=''">Avbryt</button>
+      </div>
+    </div></div>`;
+  scrollTill(box);
+}
+
+async function sendShare(targetJson) {
+  const target = typeof targetJson === "string" ? JSON.parse(targetJson) : targetJson;
+  const fields = [...document.querySelectorAll(".sharefield:checked")].map((c) => c.value);
+  try {
+    const r = await api("/share", {
+      method: "POST",
+      body: {
+        ...target,
+        recipient: val("sh_to"),
+        subject: val("sh_sub"),
+        message: val("sh_msg"),
+        fields,
+      },
+    });
+    toast(`Skickat till ${r.recipient}`);
+    $("#sharebox").innerHTML = "";
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/* ---------------- mitt konto ---------------- */
+const ROLL_TEXT = {
+  admin: "Administratör – kan allt, inklusive konton och backup",
+  tekniker: "Tekniker – kan läsa och skriva kunder, journal och filer",
+  lasare: "Läsare – kan bara läsa",
+};
+
+async function viewAccount() {
+  const token = claim();
+  mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
+  const [me, devices] = await Promise.all([api("/me"), api("/notifications/push/status")]);
+  if (!current(token)) return;
+  S.user = { ...S.user, ...me };
+  localStorage.setItem("bj_user", JSON.stringify(S.user));
+
+  $("#view").innerHTML = `
+  <div class="spread">
+    <div><div class="eyebrow">Inloggad som ${esc(me.username)}</div>
+      <h1>${esc(me.full_name || me.username)}</h1>
+      <p class="lead">${esc(ROLL_TEXT[me.role] || me.role)}</p></div>
+    <button class="btn ghost" onclick="logout()">Logga ut</button>
+  </div>
+
+  <div class="grid2">
+    <div>
+      <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Tvåfaktor</h2>
+        <span class="tag ${me.totp_enabled ? "ok" : me.totp_required ? "action" : "n"}">
+          ${me.totp_enabled ? "Påslagen" : me.totp_required ? "Krävs, ej påslagen" : "Av"}</span></div>
+        <div class="pad" id="totpbox">${totpBoxHtml(me)}</div></div>
+
+      <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Byt lösenord</h2></div>
+        <div class="pad">
+          <div class="fgrid">
+            <div><label class="f" for="pw_old">Nuvarande lösenord</label>
+              <input id="pw_old" type="password" autocomplete="current-password"></div>
+            <div><label class="f" for="pw_new">Nytt lösenord</label>
+              <input id="pw_new" type="password" autocomplete="new-password"></div>
+            <div><label class="f" for="pw_new2">Upprepa nytt</label>
+              <input id="pw_new2" type="password" autocomplete="new-password"></div>
+          </div>
+          <div class="hint">Minst 10 tecken. En fras med tre ord är både lättare att minnas och
+            svårare att gissa än ett kort krångligt lösenord.</div>
+          <button class="btn pri sm" style="margin-top:14px" onclick="changePassword()">Byt lösenord</button>
+        </div></div>
+    </div>
+
+    <div>
+      <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Textstorlek</h2></div>
+        <div class="pad">
+          <p class="lead" style="margin-top:0">Gäller den här enheten och sparas.</p>
+          ${sizePicker()}
+        </div></div>
+
+      <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Lägg till på hemskärmen</h2></div>
+        <div class="pad" id="installbox">${installHtml()}</div></div>
+
+      <div class="card"><div class="hd"><h2>Notiser</h2></div><div class="pad">
+        <div id="pushbanner"></div>
+        <p class="hint">Notiser hör till enheten, inte kontot. Varje telefon och dator slås på en gång.</p>
+        ${
+          devices.devices.length
+            ? devices.devices
+                .map(
+                  (d) => `<div class="filerow"><div class="ftype other">ENHET</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:500;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((d.user_agent || "okänd enhet").slice(0, 70))}</div>
+            <div class="fmeta">tillagd ${dt(d.created_at, false)}${d.last_used_at ? " · senaste notis " + dt(d.last_used_at) : ""}</div></div></div>`
+                )
+                .join("")
+            : `<p class="hint">Inga enheter registrerade än.</p>`
+        }
+      </div></div>
+    </div>
+  </div>`;
+
+  const banner = $("#pushbanner");
+  if (banner) banner.innerHTML = await pushBanner();
+}
+
+function totpBoxHtml(me) {
+  if (me.totp_enabled)
+    return `<p class="lead" style="margin-top:0">Engångskod krävs vid inloggning.
+      ${
+        me.totp_required
+          ? "Tvåfaktor är obligatorisk för ditt konto och kan inte stängas av."
+          : "Tappar du telefonen kan en administratör nollställa den åt dig."
+      }</p>
+      ${
+        me.totp_required
+          ? ""
+          : `<div class="row"><input id="totp_pw" type="password" placeholder="Ditt lösenord" style="max-width:240px">
+             <button class="btn danger sm" onclick="totpDisable()">Stäng av</button></div>`
+      }`;
+  return `<p class="lead" style="margin-top:0">Skydda kontot med en engångskod från Google
+      Authenticator, Aegis, 1Password eller liknande. Utan den räcker lösenordet för att komma in
+      i hela kundregistret.</p>
+    <button class="btn pri sm" onclick="totpStart()">Slå på tvåfaktor</button>`;
+}
+
+async function changePassword() {
+  const gammalt = val("pw_old");
+  const nytt = val("pw_new");
+  if (nytt !== val("pw_new2")) return toast("De nya lösenorden är inte lika", true);
+  if (nytt.length < 10) return toast("Nytt lösenord måste vara minst 10 tecken", true);
+  try {
+    await api("/me/password", {
+      method: "POST",
+      body: { current_password: gammalt, new_password: nytt },
+    });
+    toast("Lösenordet bytt");
+    viewAccount();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/* Tvingad uppsättning: servern nekar allt annat tills tvåfaktor är på plats. */
+async function forceTotpSetup() {
+  root().innerHTML = `
+  <div class="login">
+    <div class="box" style="max-width:520px">
+      <div class="bn">Tvåfaktor krävs</div>
+      <span class="bs">INNAN DU KAN FORTSÄTTA</span>
+      <p class="lead">Din administratör har gjort tvåfaktor obligatorisk. Skanna koden med
+        Google Authenticator, Aegis, 1Password eller liknande och bekräfta med sex siffror.</p>
+      <div id="totpbox"></div>
+      <button class="btn ghost sm" style="margin-top:14px" onclick="logout()">Logga ut i stället</button>
+    </div>
+  </div>`;
+  await totpStart(true);
+}
 
 /* ---------------- textstorlek ---------------- */
 const SIZES = [
@@ -968,7 +1603,7 @@ function sizePicker() {
 
 function setSize(name) {
   applySize(name);
-  if (S.route === "admin") viewAdmin();
+  if (S.route === "konto") viewAccount();
   toast(`Textstorlek: ${(SIZES.find(([k]) => k === name) || [])[1]}`);
 }
 
@@ -1051,7 +1686,7 @@ async function doInstall() {
 }
 
 /* ---------------- tvåfaktor ---------------- */
-async function totpStart() {
+async function totpStart(tvingad = false) {
   const box = $("#totpbox");
   try {
     const r = await api("/me/totp/start", { method: "POST" });
@@ -1059,8 +1694,8 @@ async function totpStart() {
     <p class="lead" style="margin-top:0">Skanna koden med din autentiseringsapp och skriv in
       de sex siffrorna för att bekräfta. Hoppar du över bekräftelsen slås ingenting på.</p>
     <div class="row" style="align-items:flex-start;gap:20px">
-      <img src="/api/me/totp/qr?t=${Date.now()}" alt="QR-kod för tvåfaktor" width="180" height="180"
-        style="border:1px solid var(--line);border-radius:3px;background:#fff;padding:6px">
+      <img class="laddar qr" data-auth-src="/api/me/totp/qr?t=${Date.now()}"
+        alt="QR-kod för tvåfaktor" width="180" height="180">
       <div style="flex:1;min-width:200px">
         <label class="f">Kan du inte skanna? Skriv in nyckeln</label>
         <code style="display:block;font-family:var(--mono);font-size:13px;word-break:break-all;
@@ -1068,11 +1703,12 @@ async function totpStart() {
         <label class="f" for="totp_code">Engångskod</label>
         <input id="totp_code" inputmode="numeric" maxlength="6" placeholder="123456" style="max-width:160px">
         <div class="row" style="margin-top:12px">
-          <button class="btn pri sm" onclick="totpConfirm()">Bekräfta</button>
-          <button class="btn ghost sm" onclick="adminNotifications()">Avbryt</button>
+          <button class="btn pri sm" onclick="totpConfirm(${tvingad})">Bekräfta</button>
+          ${tvingad ? "" : `<button class="btn ghost sm" onclick="viewAccount()">Avbryt</button>`}
         </div>
       </div>
     </div>`;
+    hydreraBilder(box);
     const el = $("#totp_code");
     el.focus();
     el.onkeydown = (e) => e.key === "Enter" && totpConfirm();
@@ -1081,11 +1717,12 @@ async function totpStart() {
   }
 }
 
-async function totpConfirm() {
+async function totpConfirm(tvingad = false) {
   try {
     await api("/me/totp/confirm", { method: "POST", body: { code: val("totp_code") } });
     toast("Tvåfaktor påslagen. Nästa inloggning kräver engångskod.");
-    adminNotifications();
+    if (tvingad) go("oversikt");
+    else viewAccount();
   } catch (e) {
     toast(e.message, true);
   }
@@ -1096,7 +1733,7 @@ async function totpDisable() {
   try {
     await api("/me/totp/disable", { method: "POST", body: { password: val("totp_pw") } });
     toast("Tvåfaktor avstängd");
-    adminNotifications();
+    viewAccount();
   } catch (e) {
     toast(e.message, true);
   }
@@ -1331,6 +1968,21 @@ async function removeFacility(facilityId, label) {
   }
 }
 
+function facilityBriefing(facilityId) {
+  const box = document.getElementById("fedit-" + facilityId);
+  if (!box) return;
+  if (box.dataset.mode === "sgu") {
+    box.innerHTML = "";
+    box.dataset.mode = "";
+    return;
+  }
+  box.dataset.mode = "sgu";
+  box.innerHTML = `<div class="card" style="margin-top:14px">
+    <div class="hd"><h2>Grannbrunnar enligt SGU</h2><span class="tag n">SGU</span></div>
+    <div class="pad" id="briefing"><div class="skel"></div><div class="skel"></div></div></div>`;
+  loadBriefing({ facility_id: facilityId });
+}
+
 function editCustomer() {
   const c = S.data.customer;
   const box = document.getElementById("cedit");
@@ -1467,7 +2119,7 @@ async function deleteFile(id) {
   toast("Filen borttagen");
 }
 
-/* ---------------- onboarding ---------------- */
+/* ---------------- registrera ny anläggning ---------------- */
 const STEPS = [
   ["Kund", "Kunduppgifter"],
   ["Fastighet", "Fastighet och plats"],
@@ -1476,7 +2128,7 @@ const STEPS = [
   ["Granska", "Granska och skapa"],
 ];
 
-function startOnboardingFor(customerId) {
+function startFacilityFor(customerId) {
   S.form = { existing_customer_id: customerId };
   S.step = 1;
   go("ny");
@@ -1500,7 +2152,7 @@ function fArea(key, label, ph) {
     <textarea id="fld_${key}" placeholder="${esc(ph)}" oninput="S.form['${key}']=this.value">${esc(S.form[key] ?? "")}</textarea></div>`;
 }
 
-async function viewOnboarding() {
+async function viewNewFacility() {
   const s = S.step;
   const existing = S.form.existing_customer_id;
   let customerName = "";
@@ -1514,7 +2166,7 @@ async function viewOnboarding() {
       ${
         existing
           ? `<p class="lead">Anläggningen läggs på <strong>${esc(customerName)}</strong>.
-             <button class="btn ghost sm" style="margin-left:8px" onclick="delete S.form.existing_customer_id;viewOnboarding()">Ny kund istället</button></p>`
+             <button class="btn ghost sm" style="margin-left:8px" onclick="delete S.form.existing_customer_id;viewNewFacility()">Ny kund istället</button></p>`
           : `<div class="fgrid">
         ${fSelect("customer_type", "Kundtyp", ["Privat", "Företag", "Förening", "Kommun"])}
         ${fInput("name", "Namn eller företag", "text", "Erik & Maja Lundqvist")}
@@ -1585,24 +2237,24 @@ async function viewOnboarding() {
 
   mountShell(`
   <div class="spread">
-    <div><div class="eyebrow">Onboarding · steg ${s + 1} av 5</div><h1>Ny brunn eller pump</h1></div>
+    <div><div class="eyebrow">Registrering · steg ${s + 1} av 5</div><h1>Ny brunn eller pump</h1></div>
     <button class="btn ghost sm" onclick="S.form={};S.step=0;go('oversikt')">Avbryt</button>
   </div>
   <div class="steps">${STEPS.map(
-    (st, i) => `<button class="step ${i === s ? "on" : i < s ? "done" : ""}" onclick="S.step=${i};viewOnboarding()">
+    (st, i) => `<button class="step ${i === s ? "on" : i < s ? "done" : ""}" onclick="S.step=${i};viewNewFacility()">
       <span class="n">${i < s ? "✓" : i + 1}</span><span class="tx">${st[0]}</span></button>`
   ).join("")}</div>
   <div class="card"><div class="pad">${stepBodies[s]}
     <div class="wfoot">
-      <button class="btn ghost" ${s === 0 ? "disabled" : ""} onclick="S.step=${Math.max(0, s - 1)};viewOnboarding()">← Föregående</button>
+      <button class="btn ghost" ${s === 0 ? "disabled" : ""} onclick="S.step=${Math.max(0, s - 1)};viewNewFacility()">← Föregående</button>
       ${
         s < 4
-          ? `<button class="btn pri" onclick="S.step=${s + 1};viewOnboarding()">Nästa: ${STEPS[s + 1][1]} →</button>`
+          ? `<button class="btn pri" onclick="S.step=${s + 1};viewNewFacility()">Nästa: ${STEPS[s + 1][1]} →</button>`
           : `<button class="btn pri" id="obsave">Skapa ${existing ? "anläggning" : "kund och anläggning"}</button>`
       }
     </div></div></div>`);
   const save = $("#obsave");
-  if (save) save.onclick = submitOnboarding;
+  if (save) save.onclick = submitNewFacility;
 }
 
 let coordTimer;
@@ -1651,12 +2303,12 @@ function numOrNull(v) {
   return isNaN(n) ? null : n;
 }
 
-async function submitOnboarding() {
+async function submitNewFacility() {
   const f = S.form;
   if (!f.existing_customer_id && !(f.name || "").trim()) {
     toast("Kunden behöver ett namn", true);
     S.step = 0;
-    return viewOnboarding();
+    return viewNewFacility();
   }
   const btn = $("#obsave");
   btn.disabled = true;
@@ -1701,7 +2353,7 @@ async function submitOnboarding() {
     first_note: f.first_note || "",
   };
   try {
-    const res = await api("/onboarding", { method: "POST", body: payload });
+    const res = await api("/new-facility", { method: "POST", body: payload });
     S.form = {};
     S.step = 0;
     S.data.customers = null;
@@ -1860,8 +2512,15 @@ function reminderRow(r) {
       ${esc(r.due_date.slice(8))}<br>${esc(r.due_date.slice(5, 7))}</div>
     <div style="flex:1;min-width:0">
       <div style="font-weight:600">${esc(r.title)}</div>
-      <div class="fmeta">${esc(r.due_date)} · ${esc(left)}${r.customer_name ? " · " + esc(r.customer_name) : ""}
-        ${r.notified_channels ? " · meddelat via " + esc(r.notified_channels) : ""}</div>
+      <div class="fmeta">${esc(r.due_date)}${r.due_time ? " " + esc(r.due_time) : ""} · ${esc(left)}${
+        r.customer_name ? " · " + esc(r.customer_name) : ""
+      }${
+        r.remind_at && !r.notified_at
+          ? " · påminner " + dt(r.remind_at)
+          : r.notified_channels
+            ? " · meddelat via " + esc(r.notified_channels)
+            : ""
+      }</div>
       ${r.body ? `<div class="tsub" style="margin-top:3px">${esc(r.body.slice(0, 160))}</div>` : ""}
     </div>
     <span class="tag n">${esc(KIND_LABEL[r.kind] || r.kind)}</span>
@@ -1869,8 +2528,13 @@ function reminderRow(r) {
       S.user.role === "lasare"
         ? ""
         : `<div class="row" style="gap:6px">
-      ${r.status === "open" ? `<button class="btn ghost sm" onclick="completeReminder('${r.id}')">Klar</button>
-      <button class="btn ghost sm" onclick="snoozeReminder('${r.id}',7)">+7 d</button>` : `<button class="btn ghost sm" onclick="reopenReminder('${r.id}')">Öppna igen</button>`}
+      ${
+        r.status === "open"
+          ? `<button class="btn ghost sm" onclick="completeReminder('${r.id}')">Klar</button>
+             <button class="btn ghost sm" onclick="omplanera('${r.id}')">Ändra tid</button>
+             <button class="btn ghost sm" onclick="snoozeReminder('${r.id}',7)">+7 d</button>`
+          : `<button class="btn ghost sm" onclick="reopenReminder('${r.id}')">Öppna igen</button>`
+      }
       <button class="btn danger sm" onclick="deleteReminder('${r.id}')">Ta bort</button></div>`
     }
     ${r.customer_id ? `<button class="btn ghost sm" onclick="go('kund','${r.customer_id}')">Kund</button>` : ""}
@@ -1925,7 +2589,7 @@ async function viewReminders() {
       : `<div class="card" style="margin-bottom:16px"><div class="hd"><h2>Ny påminnelse</h2></div><div class="pad">
     <div class="fgrid">
       <div><label class="f" for="rt">Rubrik</label><input id="rt" placeholder="Ring om hydroforbyte"></div>
-      <div><label class="f" for="rd">Datum</label><input id="rd" type="date"></div>
+      <div><label class="f" for="rd">Gäller datum</label><input id="rd" type="date"></div>
       <div><label class="f" for="rc">Gäller anläggning</label><select id="rc">
         ${customers
           .flatMap((c) =>
@@ -1935,9 +2599,12 @@ async function viewReminders() {
             )
           )
           .join("")}</select></div>
-      <div><label class="f" for="rn">Förvarning</label><select id="rn">
-        <option value="0">På dagen</option><option value="7" selected>7 dagar före</option>
-        <option value="14">14 dagar före</option><option value="30">30 dagar före</option></select></div>
+      <div><label class="f" for="rpd">Påminn den</label>
+        <input id="rpd" type="date">
+        <div class="hint">Lämna tom så påminner den på förfallodagen.</div></div>
+      <div><label class="f" for="rpt">Klockan</label>
+        <input id="rpt" type="time" value="07:30">
+        <div class="hint">Din lokala tid.</div></div>
     </div>
     <label class="f" for="rb">Anteckning</label><textarea id="rb" style="min-height:60px"></textarea>
     <button class="btn pri sm" style="margin-top:12px" id="rsave">Spara påminnelse</button>
@@ -1960,20 +2627,43 @@ async function createReminder() {
   const facility = $("#rc").value;
   if (!title || !due) return toast("Rubrik och datum behövs", true);
   if (!facility) return toast("Välj vilken anläggning påminnelsen gäller", true);
+
+  // Klienten räknar om till UTC, så vald tid gäller där användaren står.
+  const paminnDag = val("rpd") || due;
+  const paminnTid = val("rpt") || "07:30";
+  const remindAt = new Date(`${paminnDag}T${paminnTid}`);
+  if (isNaN(remindAt)) return toast("Ogiltig tidpunkt för påminnelsen", true);
   try {
     await api("/reminders", {
       method: "POST",
       body: {
         title,
         due_date: due,
+        due_time: paminnDag === due ? paminnTid : "",
+        remind_at: remindAt.toISOString(),
         body: $("#rb").value,
         facility_id: facility,
-        notify_days_before: parseInt($("#rn").value, 10),
         kind: "egen",
       },
     });
     toast("Påminnelse sparad");
     viewReminders();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function omplanera(id) {
+  const dag = prompt("Vilket datum ska påminnelsen gå ut? (ÅÅÅÅ-MM-DD)", new Date().toISOString().slice(0, 10));
+  if (dag === null) return;
+  const tid = prompt("Vilken tid? (TT:MM)", "07:30");
+  if (tid === null) return;
+  const nar = new Date(`${dag}T${tid}`);
+  if (isNaN(nar)) return toast("Kunde inte tolka datum eller tid", true);
+  try {
+    await api(`/reminders/${id}`, { method: "PATCH", body: { remind_at: nar.toISOString() } });
+    toast(`Påminner ${dt(nar.toISOString())}`);
+    await afterReminderChange();
   } catch (e) {
     toast(e.message, true);
   }
@@ -2240,15 +2930,17 @@ function planFrom(facilityId) {
 /* ---------------- administration ---------------- */
 async function viewAdmin() {
   const token = claim();
-  const tab = S.tab && ["konton", "notiser", "backup", "logg"].includes(S.tab) ? S.tab : "konton";
+  const tab =
+    S.tab && ["konton", "notiser", "sgu", "backup", "logg"].includes(S.tab) ? S.tab : "konton";
   const T = (id, label) =>
     `<button class="${tab === id ? "on" : ""}" onclick="go('admin','${id}')">${label}</button>`;
   mountShell(`
     <div class="spread"><div><div class="eyebrow">Administration</div><h1>Inställningar</h1></div></div>
-    <div class="tabs">${T("konton", "Konton")}${T("notiser", "Notiser")}${T("backup", "Backup")}${T("logg", "Logg")}</div>
+    <div class="tabs">${T("konton", "Konton")}${T("notiser", "Notiser")}${T("sgu", "SGU")}${T("backup", "Backup")}${T("logg", "Logg")}</div>
     <div id="adminbody"><div class="skel"></div><div class="skel"></div></div>`);
 
   if (tab === "konton") await adminUsers();
+  else if (tab === "sgu") await adminSgu();
   else if (tab === "notiser") await adminNotifications();
   else if (tab === "backup") await adminBackup();
   else await adminLog();
@@ -2256,23 +2948,55 @@ async function viewAdmin() {
 
 async function adminUsers() {
   const token = claim();
-  const users = await api("/users");
+  const [users, sec] = await Promise.all([api("/users"), api("/security")]);
   if (!current(token) || !$("#adminbody")) return;
-  $("#adminbody").innerHTML = `
-  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Användare</h2></div>
-    <table><thead><tr><th>Användare</th><th>Namn</th><th>Roll</th><th>Tvåfaktor</th><th>Senast inloggad</th><th>Status</th></tr></thead>
-    <tbody>${users
-      .map(
-        (u) => `<tr>
-      <td data-l="Användare" class="mono">${esc(u.username)}</td>
+  S.data.users = users;
+
+  const rad = (u) => {
+    const jag = u.id === S.user.id;
+    return `<tr>
+      <td data-l="Användare"><span class="mono">${esc(u.username)}</span>
+        ${jag ? `<span class="tag n" style="margin-left:6px">du</span>` : ""}</td>
       <td data-l="Namn">${esc(u.full_name || "—")}</td>
       <td data-l="Roll">${esc(u.role)}</td>
-      <td data-l="Tvåfaktor">${u.totp_enabled ? "Aktiv" : "Av"}</td>
+      <td data-l="Tvåfaktor">${
+        u.totp_enabled
+          ? `<span class="tag ok">På</span>`
+          : u.totp_required || sec.require_totp_all
+            ? `<span class="tag action">Krävs, ej satt</span>`
+            : `<span class="tag n">Av</span>`
+      }</td>
       <td data-l="Senast" class="tid">${dt(u.last_login)}</td>
-      <td data-l="Status">${u.is_active ? `<span class="tag ok">Aktivt</span>` : `<span class="tag action">Avstängt</span>`}</td>
-    </tr>`
-      )
-      .join("")}</tbody></table></div>
+      <td data-l="Status">${
+        u.is_active ? `<span class="tag ok">Aktivt</span>` : `<span class="tag action">Avstängt</span>`
+      }</td>
+      <td data-l=""><button class="btn ghost sm" onclick="editUser('${u.id}')">Hantera</button></td>
+    </tr>`;
+  };
+
+  $("#adminbody").innerHTML = `
+  <div class="card" style="margin-bottom:18px">
+    <div class="hd"><h2>Säkerhet för alla konton</h2>
+      <span class="tag ${sec.require_totp_all ? "ok" : "n"}">${sec.require_totp_all ? "Tvåfaktor krävs" : "Frivilligt"}</span></div>
+    <div class="pad">
+      <label style="display:flex;gap:10px;align-items:flex-start;font-size:14.5px">
+        <input type="checkbox" id="req_all" ${sec.require_totp_all ? "checked" : ""}
+          style="width:auto;margin-top:3px" onchange="setRequireAll(this.checked)">
+        <span>Kräv tvåfaktor för alla användare
+          <span class="hint" style="display:block;margin-top:2px">Den som inte har det påslaget
+          möts av uppsättningen vid nästa sidladdning och kommer inte vidare förrän det är klart.
+          Gäller även dig.</span></span>
+      </label>
+    </div></div>
+
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Användare</h2>
+    <span class="tag n">${users.length}</span></div>
+    <table><thead><tr><th>Användare</th><th>Namn</th><th>Roll</th><th>Tvåfaktor</th>
+      <th>Senast inloggad</th><th>Status</th><th></th></tr></thead>
+    <tbody>${users.map(rad).join("")}</tbody></table>
+    <div id="userbox"></div>
+  </div>
+
   <div class="card"><div class="hd"><h2>Nytt konto</h2></div><div class="pad">
     <div class="fgrid">
       <div><label class="f" for="nu">Användarnamn</label><input id="nu" autocapitalize="none"></div>
@@ -2285,15 +3009,16 @@ async function adminUsers() {
     </div>
     <button class="btn pri sm" style="margin-top:14px" id="ncreate">Skapa konto</button>
   </div></div>`;
+
   $("#ncreate").onclick = async () => {
     try {
       await api("/users", {
         method: "POST",
         body: {
-          username: $("#nu").value.trim(),
-          full_name: $("#nn").value.trim(),
-          password: $("#np").value,
-          role: $("#nr").value,
+          username: val("nu").trim(),
+          full_name: val("nn").trim(),
+          password: val("np"),
+          role: val("nr"),
         },
       });
       toast("Kontot skapat");
@@ -2304,56 +3029,146 @@ async function adminUsers() {
   };
 }
 
+async function setRequireAll(on) {
+  try {
+    await api("/security", { method: "PUT", body: { require_totp_all: on } });
+    toast(on ? "Tvåfaktor krävs nu för alla konton" : "Tvåfaktor är frivilligt igen");
+    adminUsers();
+  } catch (e) {
+    toast(e.message, true);
+    adminUsers();
+  }
+}
+
+function editUser(userId) {
+  const u = (S.data.users || []).find((x) => x.id === userId);
+  const box = $("#userbox");
+  if (!u || !box) return;
+  if (box.dataset.open === userId) {
+    box.innerHTML = "";
+    box.dataset.open = "";
+    return;
+  }
+  box.dataset.open = userId;
+  const jag = u.id === S.user.id;
+
+  box.innerHTML = `
+  <div class="pad" style="border-top:1px solid var(--line);background:#F8FAFA">
+    <div class="spread" style="margin-bottom:10px">
+      <h2 style="margin:0">Hantera ${esc(u.username)}</h2>
+      <button class="btn ghost sm" onclick="editUser('${u.id}')">Stäng</button>
+    </div>
+    <div class="fgrid">
+      <div><label class="f" for="uu_name">Användarnamn</label>
+        <input id="uu_name" value="${esc(u.username)}" autocapitalize="none">
+        <div class="hint">Byte påverkar inte inloggade sessioner.</div></div>
+      <div><label class="f" for="uu_full">Namn</label><input id="uu_full" value="${esc(u.full_name || "")}"></div>
+      <div><label class="f" for="uu_mail">E-post</label><input id="uu_mail" type="email" value="${esc(u.email || "")}"></div>
+      <div><label class="f" for="uu_role">Roll</label>
+        <select id="uu_role" ${jag ? "disabled" : ""}>
+          ${["tekniker", "admin", "lasare"]
+            .map((r) => `<option value="${r}"${u.role === r ? " selected" : ""}>${r}</option>`)
+            .join("")}</select>
+        ${jag ? `<div class="hint">Du kan inte ändra din egen roll.</div>` : ""}</div>
+    </div>
+
+    <div class="row" style="margin-top:14px;gap:18px">
+      <label style="display:flex;gap:8px;align-items:center;font-size:14px;width:auto">
+        <input type="checkbox" id="uu_totp" ${u.totp_required ? "checked" : ""} style="width:auto">
+        Kräv tvåfaktor för just den här användaren</label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:14px;width:auto">
+        <input type="checkbox" id="uu_active" ${u.is_active ? "checked" : ""}
+          ${jag ? "disabled" : ""} style="width:auto">
+        Kontot är aktivt</label>
+    </div>
+
+    <label class="f" for="uu_pw">Sätt nytt lösenord</label>
+    <div class="row">
+      <input id="uu_pw" type="password" placeholder="Lämna tomt för att behålla" style="flex:1;min-width:200px">
+      <button class="btn ghost sm" onclick="slumpaLosen()">Slumpa</button>
+    </div>
+    <div class="hint" id="uu_pwhint">Minst 10 tecken. Be användaren byta vid första inloggningen.</div>
+
+    <div class="row" style="margin-top:16px">
+      <button class="btn pri sm" onclick="saveUser('${u.id}')">Spara</button>
+      ${
+        u.totp_enabled
+          ? `<button class="btn ghost sm" onclick="resetTotp('${u.id}','${esc(u.username)}')">
+               Nollställ tvåfaktor</button>`
+          : ""
+      }
+      ${
+        jag
+          ? ""
+          : `<button class="btn danger sm" style="margin-left:auto"
+               onclick="toggleActive('${u.id}', ${!u.is_active})">
+               ${u.is_active ? "Stäng av kontot" : "Aktivera kontot"}</button>`
+      }
+    </div>
+  </div>`;
+  scrollTill(box);
+}
+
+function slumpaLosen() {
+  const ord = ["berg", "brunn", "foder", "kax", "pump", "spricka", "vatten", "borr", "slam", "rör",
+               "grus", "morän", "tryck", "nivå", "filter", "hydrofor"];
+  const p = () => ord[Math.floor(Math.random() * ord.length)];
+  const losen = `${p()}-${p()}-${p()}-${Math.floor(10 + Math.random() * 89)}`;
+  $("#uu_pw").type = "text";
+  $("#uu_pw").value = losen;
+  $("#uu_pwhint").innerHTML =
+    `<strong>Skriv ner det nu:</strong> det går inte att läsa ut igen efter att du sparat.`;
+}
+
+async function saveUser(userId) {
+  const body = {
+    username: val("uu_name").trim(),
+    full_name: val("uu_full").trim(),
+    email: val("uu_mail").trim(),
+    totp_required: $("#uu_totp").checked,
+  };
+  if (!$("#uu_role").disabled) body.role = val("uu_role");
+  if (!$("#uu_active").disabled) body.is_active = $("#uu_active").checked;
+  if (val("uu_pw")) body.new_password = val("uu_pw");
+  try {
+    await api(`/users/${userId}`, { method: "PATCH", body });
+    toast("Kontot sparat");
+    adminUsers();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function toggleActive(userId, aktivera) {
+  if (!aktivera && !confirm("Stänga av kontot? Användaren loggas ut vid nästa anrop.")) return;
+  try {
+    await api(`/users/${userId}`, { method: "PATCH", body: { is_active: aktivera } });
+    toast(aktivera ? "Kontot aktiverat" : "Kontot avstängt");
+    adminUsers();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function resetTotp(userId, namn) {
+  if (!confirm(`Nollställa tvåfaktor för ${namn}? Använd när någon tappat sin telefon.`)) return;
+  try {
+    await api(`/users/${userId}`, { method: "PATCH", body: { reset_totp: true } });
+    toast("Tvåfaktor nollställd, användaren får sätta upp den på nytt");
+    adminUsers();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
 async function adminNotifications() {
   const token = claim();
-  const [mail, devices, me] = await Promise.all([
-    api("/notifications/email"),
-    api("/notifications/push/status"),
-    api("/me"),
-  ]);
+  const mail = await api("/notifications/email");
   if (!current(token) || !$("#adminbody")) return;
   $("#adminbody").innerHTML = `
-  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Notiser på denna enhet</h2></div><div class="pad">
-    <div id="pushbanner"></div>
-    <p class="hint" style="margin-top:0">Notiser är kopplade till enheten, inte till kontot. Varje telefon
-      och dator behöver slås på en gång. På iPhone krävs att appen ligger på hemskärmen.</p>
-    ${
-      devices.devices.length
-        ? `<div style="margin-top:12px">${devices.devices
-            .map(
-              (d) => `<div class="filerow"><div class="ftype other">ENHET</div>
-        <div style="flex:1;min-width:0"><div style="font-weight:500;font-size:13.5px">${esc((d.user_agent || "okänd enhet").slice(0, 70))}</div>
-        <div class="fmeta">tillagd ${dt(d.created_at, false)}${d.last_used_at ? " · senaste notis " + dt(d.last_used_at) : ""}</div></div></div>`
-            )
-            .join("")}</div>`
-        : `<p class="hint">Inga enheter registrerade för ditt konto än.</p>`
-    }
-  </div></div>
-
-  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Textstorlek</h2></div>
-    <div class="pad">
-      <p class="lead" style="margin-top:0">Gäller den här enheten och sparas. Ute i fält, i solljus
-        eller med handskar på är större text ofta skillnaden mellan läsbart och inte.</p>
-      ${sizePicker()}
-    </div></div>
-
-  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Lägg till på hemskärmen</h2></div>
-    <div class="pad" id="installbox">${installHtml()}</div></div>
-
-  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Tvåfaktor för ditt konto</h2>
-    <span class="tag ${me.totp_enabled ? "ok" : "n"}">${me.totp_enabled ? "Påslagen" : "Av"}</span></div>
-    <div class="pad" id="totpbox">
-    ${
-      me.totp_enabled
-        ? `<p class="lead" style="margin-top:0">Engångskod krävs vid inloggning. Tappar du telefonen
-             kan en annan administratör nollställa tvåfaktor på ditt konto.</p>
-           <div class="row"><input id="totp_pw" type="password" placeholder="Ditt lösenord" style="max-width:240px">
-           <button class="btn danger sm" onclick="totpDisable()">Stäng av</button></div>`
-        : `<p class="lead" style="margin-top:0">Skydda kontot med en engångskod från en app som
-             Google Authenticator, Aegis eller 1Password. Utan detta räcker lösenordet.</p>
-           <button class="btn pri sm" onclick="totpStart()">Slå på tvåfaktor</button>`
-    }
-    </div></div>
+  <p class="lead" style="margin-top:0;margin-bottom:16px">Notiser, tvåfaktor och textstorlek för
+    ditt eget konto finns under <a href="#/konto">Mitt konto</a>. Här nedan ställs e-post in för
+    hela installationen.</p>
 
   <div class="card"><div class="hd"><h2>E-post</h2>
     <span class="tag ${mail.enabled ? "ok" : "n"}">${mail.enabled ? "Aktiv" : "Av"}</span></div><div class="pad">
@@ -2378,9 +3193,6 @@ async function adminNotifications() {
       <button class="btn ghost sm" id="mtest">Skicka testmejl</button>
     </div>
   </div></div>`;
-
-  const banner = $("#pushbanner");
-  if (banner) banner.innerHTML = await pushBanner();
 
   const collect = () => ({
     enabled: $("#me").checked,
@@ -2552,6 +3364,73 @@ function copySteps(json) {
     .catch(() => toast("Kunde inte kopiera, markera texten i stället", true));
 }
 
+async function adminSgu() {
+  const token = claim();
+  const [st, delningar] = await Promise.all([api("/sgu/status"), api("/share/log?limit=20")]);
+  if (!current(token) || !$("#adminbody")) return;
+  $("#adminbody").innerHTML = `
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Brunnsarkivet</h2>
+    <span class="tag ${st.totalt ? "ok" : "n"}">${st.totalt.toLocaleString("sv-SE")} brunnar</span></div>
+    <div class="pad">
+      <p class="lead" style="margin-top:0">Hämtar SGU:s öppna data en gång och lagrar lokalt, så att
+        uppslag inför ett besök går direkt utan att ringa ut. SGU uppdaterar en gång i veckan,
+        så en synk i veckan räcker. Hämta det län ni jobbar i.</p>
+      <div class="row">
+        <select id="sgu_lan" style="width:auto">
+          ${st.tillgangliga_lan.map((l) => `<option value="${l.kod}">${l.kod} ${esc(l.namn)}</option>`).join("")}
+        </select>
+        <button class="btn pri sm" id="sgu_go">Hämta län</button>
+        <span class="hint" id="sgu_hint" style="margin:0">Första hämtningen kan ta någon minut.</span>
+      </div>
+      ${
+        st.lan.length
+          ? `<table style="margin-top:16px"><thead><tr><th>Län</th><th>Brunnar</th><th>Hämtat</th></tr></thead>
+             <tbody>${st.lan
+               .map(
+                 (l) => `<tr><td data-l="Län">${esc(l.kod)} ${esc(l.namn)}</td>
+               <td data-l="Brunnar" class="tid">${l.antal.toLocaleString("sv-SE")}</td>
+               <td data-l="Hämtat" class="tid">${dt(l.hamtad)}</td></tr>`
+               )
+               .join("")}</tbody></table>`
+          : `<p class="hint" style="margin-top:14px">Inget hämtat än.</p>`
+      }
+      <p class="hint" style="margin-top:14px">Data från SGU Brunnsarkivet, licens Creative Commons
+        Erkännande 4.0. SGU ska anges som källa där uppgifterna visas, vilket sker automatiskt i
+        underlaget. Brunnsarkivet innehåller ingen vattenkvalitet.</p>
+    </div></div>
+
+  <div class="card"><div class="hd"><h2>Senast delat med externa</h2></div>
+    ${
+      delningar.length
+        ? `<table><thead><tr><th>Tid</th><th>Mottagare</th><th>Innehåll</th><th>Av</th></tr></thead>
+           <tbody>${delningar
+             .map(
+               (d) => `<tr><td data-l="Tid" class="tid">${dt(d.sent_at)}</td>
+             <td data-l="Mottagare">${esc(d.recipient)}</td>
+             <td data-l="Innehåll" class="tsub">${esc(d.fields)}</td>
+             <td data-l="Av">${esc(d.sent_by)}</td></tr>`
+             )
+             .join("")}</tbody></table>`
+        : `<div class="empty"><div class="big">Inget delat än</div>
+           <p>Utskick till externa borrare loggas här och i kundens journal.</p></div>`
+    }
+  </div>`;
+
+  $("#sgu_go").onclick = async (e) => {
+    const knapp = e.target;
+    knapp.disabled = true;
+    knapp.textContent = "Hämtar…";
+    $("#sgu_hint").textContent = "Detta kan ta någon minut, låt fliken vara öppen.";
+    try {
+      const r = await api("/sgu/sync", { method: "POST", body: { lanskod: val("sgu_lan") } });
+      toast(`${r.sparade.toLocaleString("sv-SE")} brunnar hämtade`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+    adminSgu();
+  };
+}
+
 async function adminLog() {
   const token = claim();
   const audit = await api("/audit?limit=100");
@@ -2583,11 +3462,15 @@ function render() {
     journal: viewJournalAll,
     paminnelser: viewReminders,
     nara: viewNearby,
-    ny: viewOnboarding,
+    ny: viewNewFacility,
+    konto: viewAccount,
+    besok: (S.id ? viewVisit : viewVisits),
     admin: viewAdmin,
   };
   const fn = views[S.route] || viewDashboard;
-  Promise.resolve(fn()).catch((e) => {
+  Promise.resolve(fn())
+    .then(() => hydreraBilder())
+    .catch((e) => {
     // Svälj bara om användaren hunnit navigera bort. Ett fel i den vy som
     // faktiskt visas ska alltid synas, annars står man inför en halv sida
     // utan att veta varför.
