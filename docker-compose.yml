@@ -1,42 +1,17 @@
-# Borrjournal. Två containrar, inga förberedelser.
+# Borrjournal. En container, SQLite. Inga förberedelser, inget lösenord till någon databas.
 #
-#   cp .env.example .env      (fyll i hemligheterna)
+#   cp .env.example .env      (fyll i två hemligheter)
 #   docker compose up -d --build
 #
-# Appen lyssnar på APP_PORT från .env (8000 om inget anges).
-# Sätt en reverse proxy framför den för HTTPS.
-# Databasen publiceras inte alls och är bara nåbar från appen.
+# Allt ligger i volymen "data": databasfilen, uppladdade filer, tumnaglar och backuper.
 
 services:
-  db:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: borrjournal
-      POSTGRES_USER: borrjournal
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?sätt POSTGRES_PASSWORD i .env}
-    volumes:
-      - db-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U borrjournal -d borrjournal"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   app:
     build: ./backend
     container_name: borrjournal-app
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
     environment:
-      # Delarna var för sig, inte en färdig URL. Då spelar det ingen roll om
-      # lösenordet innehåller /, + eller @, som annars förstör anslutningssträngen.
-      POSTGRES_HOST: db
-      POSTGRES_DB: borrjournal
-      POSTGRES_USER: borrjournal
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      DATABASE_URL: sqlite+aiosqlite:////data/borrjournal.db
       SECRET_KEY: ${SECRET_KEY:?sätt SECRET_KEY i .env}
       DATA_DIR: /data
       TOKEN_EXPIRE_HOURS: ${TOKEN_EXPIRE_HOURS:-12}
@@ -45,15 +20,15 @@ services:
       BOOTSTRAP_PASSWORD: ${BOOTSTRAP_PASSWORD:?sätt BOOTSTRAP_PASSWORD i .env}
       SEED_DEMO: ${SEED_DEMO:-false}
     volumes:
-      # Uppladdade filer, tumnaglar och backuper
-      - files:/data
+      - data:/data
       - ./frontend:/app/frontend:ro
     ports:
-      # Port och lyssnaradress sätts i .env. Standard: 8000 på alla gränssnitt.
-      # Sätt APP_BIND=127.0.0.1 om proxyn kör direkt på värden.
-      # Stäng porten utifrån i brandväggen, annars går den att nå förbi HTTPS.
       - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
 
 volumes:
-  db-data:
-  files:
+  data:

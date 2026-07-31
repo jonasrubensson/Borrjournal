@@ -6,64 +6,34 @@ på telefon som på dator.
 
 ## Komma igång
 
-Det finns ingen `.env` i arkivet, bara `.env.example`. Det är med avsikt: den innehåller
-lösenord och ska aldrig följa med en fil du skickar vidare. Skapa den så här:
-
 ```bash
 cd borrjournal
 cp .env.example .env
 sed -i "s|^SECRET_KEY=.*|SECRET_KEY=$(openssl rand -hex 32)|;\
-s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 24)|;\
 s|^BOOTSTRAP_PASSWORD=.*|BOOTSTRAP_PASSWORD=$(openssl rand -hex 12)|" .env
-grep BOOTSTRAP_PASSWORD .env    # detta är ditt första inloggningslösenord
+grep BOOTSTRAP_PASSWORD .env      # ditt första inloggningslösenord
+
 docker compose up -d --build
+./kontrollera.sh
 ```
 
-Hex, inte base64. Base64 ger tecken som `/` och `+` som ställer till det i skalkommandon.
-Appen klarar dem numera i lösenordet, men det finns ingen anledning att bjuda in problemet.
+`kontrollera.sh` säger rakt ut om appen fungerar, och visar loggen om något är fel.
+Vill du ha demodata att klicka runt i: sätt `SEED_DEMO=true` i `.env` **innan** första starten.
 
-Compose vägrar starta om `POSTGRES_PASSWORD`, `SECRET_KEY` eller `BOOTSTRAP_PASSWORD` är tomma,
-så du får ett tydligt fel i stället för en osäker installation.
-
-Öppna `http://localhost:8000` och logga in med `admin` och det lösenord du satte i
-`BOOTSTRAP_PASSWORD`. Byta lösenord gör du via `POST /api/me/password` eller genom att skapa ett
-eget konto under **Konton** och stänga av admin-kontot.
-
-Vill du testa med demodata i en tom databas: sätt `SEED_DEMO=true` innan första starten.
-Sju kunder läggs in, varav tre delar pumpmodell så att flottfiltret blir meningsfullt att prova.
+En container, SQLite, ingen databas att lösenordsskydda. Allt ligger i volymen `data`:
+databasfilen, uppladdade filer, tumnaglar och backuper.
 
 ### Reverse proxy framför
 
-Appen lyssnar på port 8000 och terminerar ingen HTTPS själv. Sätt vilken proxy du vill framför.
-Ingen nätverkskonfiguration i compose, ingenting att förbereda.
-
-Port och lyssnaradress sätts i `.env`:
+Appen lyssnar på porten i `APP_PORT` och terminerar ingen HTTPS. Sätt vilken proxy du vill framför
+och peka den på värdens IP, den porten.
 
 | Variabel | Standard | Betydelse |
 |---|---|---|
-| `APP_PORT` | `8000` | Porten på värden. Ändra om 8000 är upptagen. |
-| `APP_BIND` | `0.0.0.0` | Vilken adress porten binds till. `127.0.0.1` gör appen nåbar bara lokalt. |
+| `APP_PORT` | `8000` | Porten på värden |
+| `APP_BIND` | `0.0.0.0` | `127.0.0.1` om proxyn kör direkt på värden |
 
-Kör proxyn i Docker behöver den nå värdens IP, låt då `APP_BIND` stå kvar på `0.0.0.0`. Kör den
-direkt på värden är `APP_BIND=127.0.0.1` säkrare, då kan ingen nå appen förbi proxyn.
-Efter ändring: `docker compose up -d`.
-
-Vill du hellre nå appen på containernamnet, koppla in proxyn i appens nätverk efter uppstart:
-
-```bash
-docker network ls | grep borrjournal          # heter normalt borrjournal_default
-docker network connect borrjournal_default <din-proxy-container>
-```
-
-Då svarar appen på `http://borrjournal-app:8000`.
-
-#### Om proxyn är Nginx Proxy Manager
-
-Proxy Hosts → Add Proxy Host: scheme `http`, forward hostname värdens IP (eller
-`borrjournal-app`), port `8000`, Block Common Exploits på. SSL-fliken: Let's Encrypt, Force SSL
-och HTTP/2.
-
-Advanced-fliken, den viktiga raden först:
+I Nginx Proxy Manager, Advanced-fliken, den viktiga raden först:
 
 ```nginx
 client_max_body_size 30M;
@@ -75,14 +45,25 @@ add_header X-Frame-Options "DENY" always;
 add_header Referrer-Policy "same-origin" always;
 ```
 
-Utan `client_max_body_size` stryper nginx uppladdningar långt under 25 MB, och felet syns bara som
-att uppladdningen dör mitt i. Håll den något över `MAX_UPLOAD_MB` i `.env`, så är det appen som
-avvisar för stora filer med ett läsbart meddelande.
-
-**Stäng port 8000 utifrån i brandväggen.** Annars går den att nå direkt, förbi HTTPS.
+Utan `client_max_body_size` stryper nginx uppladdningar långt under 25 MB, och det syns bara som
+att uppladdningen dör mitt i. Stäng porten utifrån i brandväggen, annars går den att nå förbi
+HTTPS.
 
 **HTTPS krävs för notiser.** Service workers och webbpush fungerar bara över HTTPS, med undantag
-för `localhost`. Fixa certifikatet innan du testar notiser på telefonen.
+för `localhost`. Utan certifikat fungerar allt annat som vanligt, bara notiserna uteblir.
+
+### Inga externa beroenden
+
+Gränssnittet hämtar ingenting från internet: inga typsnitt från CDN, inga bibliotek. Appen
+fungerar lika bra på ett internt nät utan internetuppkoppling. Går något ändå fel vid start visas
+felet i en röd list längst ner i stället för att sidan blir tom.
+
+### Postgres senare
+
+Byt till Postgres genom att sätta `POSTGRES_HOST`, `POSTGRES_USER` och `POSTGRES_PASSWORD` i
+miljön och lägga till en `db`-tjänst i compose. Appen bygger anslutningssträngen själv och kodar
+lösenordet korrekt. Flytta data genom att ta en backup, packa upp den och köra
+`python -m app.restore db.json` mot den nya databasen.
 
 ## Jobb i närheten
 
@@ -123,30 +104,6 @@ kontrollerad mot Lantmäteriets officiella testpunkter.
 jobb. Webbläsare tillåter inte att en webbapp läser positionen i bakgrunden, av goda skäl. Det
 kräver en riktig app på telefonen. Det appen kan är att svara direkt när du frågar, och det gör
 den på ett par sekunder.
-
-## Postgres eller SQLite?
-
-Standarduppsättningen använder Postgres. Det finns också en variant med bara en container:
-
-```bash
-docker compose -f docker-compose.sqlite.yml up -d --build
-```
-
-| | Postgres | SQLite |
-|---|---|---|
-| Containrar | två | en |
-| Backupmotor | JSON, eller pg_dump från db-containern | JSON |
-| Samtidiga skrivningar | obegränsat | serialiseras, WAL är påslaget |
-| Extern åtkomst för rapportverktyg | ja | nej, filen ligger i volymen |
-| Rimligt vid | vilken storlek som helst | ett företag med en handfull användare |
-
-För en borrfirma med några montörer räcker SQLite gott. Välj Postgres om du vill kunna koppla
-externa verktyg mot databasen, eller om registret ska växa till fler samtidiga användare.
-Byt inte databas för att komma runt ett byggfel: pg_dump är bara ett klientverktyg för backupen
-och påverkar inte hur appen lagrar data.
-
-Har du redan data i Postgres och vill byta: ta en backup, packa upp den, och läs in `db.json`
-med `python -m app.restore` mot den nya databasen.
 
 ## Arkitektur
 
@@ -249,43 +206,6 @@ uvicorn app.main:app --reload
 ```
 
 Standarddatabasen är då SQLite i `backend/borrjournal.db`, ingen Postgres behövs.
-
-## Om något går fel vid start
-
-### `password authentication failed for user "borrjournal"`
-
-`POSTGRES_PASSWORD` läses **bara första gången databasen skapas**. Startade du stacken en gång
-innan `.env` var ifylld, ligger det gamla lösenordet kvar i volymen `db-data` och matchar inte
-det nya. Två vägar:
-
-**Har du ingen data ännu, börja om rent:**
-
-```bash
-docker compose down
-docker volume rm borrjournal_db-data
-docker compose up -d
-```
-
-**Har du data du vill behålla, ändra lösenordet i databasen i stället:**
-
-```bash
-docker compose exec db psql -U borrjournal -c \
-  "ALTER USER borrjournal PASSWORD 'lösenordet-som-står-i-din-env';"
-docker compose restart app
-```
-
-Volymnamnet börjar med katalogens namn. Heter mappen något annat än `borrjournal`,
-kolla med `docker volume ls`.
-
-### Appen startar men svarar inte
-
-```bash
-docker compose logs app --tail 40
-docker compose ps
-```
-
-`depends_on` väntar på att databasen ska bli frisk, så appen startar normalt tio till tjugo
-sekunder efter databasen vid första uppstarten.
 
 ## Att veta om driften
 
