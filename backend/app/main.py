@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 
 from . import scheduler
 from .config import settings
+from .version import APP_VERSION
 from .db import SessionLocal, init_db
 from .models import User
 from .routers import (
@@ -60,6 +61,18 @@ async def lifespan(app: FastAPI):
     os.makedirs(os.path.join(settings.data_dir, "thumbs"), exist_ok=True)
     await init_db()
     await bootstrap()
+
+    # Påminnelser ska finnas direkt, inte först när nattens genomsökning kört.
+    try:
+        from .db import SessionLocal as _S
+        from .services.reminders import generate_auto
+
+        async with _S() as db:
+            created = await generate_auto(db)
+            if created:
+                print(f"[borrjournal] {created} påminnelser genererade vid start")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[borrjournal] kunde inte generera påminnelser vid start: {exc}")
     task = asyncio.create_task(scheduler.loop())
     try:
         yield
@@ -69,7 +82,7 @@ async def lifespan(app: FastAPI):
             await task
 
 
-app = FastAPI(title="Borrjournal", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Borrjournal", version=APP_VERSION, lifespan=lifespan)
 
 app.include_router(auth.router)
 app.include_router(customers.router)
@@ -84,7 +97,12 @@ app.include_router(nearby.router)
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": APP_VERSION}
+
+
+@app.get("/api/version")
+async def version():
+    return {"version": APP_VERSION}
 
 
 if os.path.isdir(FRONTEND_DIR):

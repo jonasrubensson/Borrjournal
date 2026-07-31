@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     # Sätt till true för att fylla databasen med demodata vid tom start
     seed_demo: bool = False
 
+    # Adressuppslag. Töm geocoder_url för att stänga av funktionen helt.
+    geocoder_url: str = "https://nominatim.openstreetmap.org/search"
+    geocoder_country_code: str = "se"
+    geocoder_country_name: str = "Sverige"
+    geocoder_user_agent: str = "Borrjournal/1.3 (internt kundregister)"
+
     class Config:
         env_file = ".env"
         env_prefix = ""
