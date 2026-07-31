@@ -85,6 +85,43 @@ async def totp_start(user: User = Depends(current_user), db: AsyncSession = Depe
     return {"secret": secret, "uri": uri}
 
 
+@router.get("/me/totp/qr")
+async def totp_qr(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """QR-kod att skanna med Google Authenticator, Aegis, 1Password eller liknande."""
+    import io
+
+    import qrcode
+    from fastapi.responses import StreamingResponse
+
+    if not user.totp_secret:
+        raise HTTPException(status_code=400, detail="Starta tvåfaktor först")
+    uri = pyotp.TOTP(user.totp_secret).provisioning_uri(
+        name=user.username, issuer_name="Borrjournal"
+    )
+    img = qrcode.make(uri)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/png")
+
+
+@router.post("/me/totp/disable")
+async def totp_disable(
+    payload: dict,
+    request: Request,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Kräver lösenord, annars räcker en obevakad skärm för att slå av skyddet."""
+    if not verify_password(payload.get("password", ""), user.hashed_password):
+        raise HTTPException(status_code=401, detail="Fel lösenord")
+    user.totp_enabled = False
+    user.totp_secret = None
+    await db.commit()
+    await log_action(db, "TOTP_DISABLED", actor=user.username, request=request)
+    return {"ok": True}
+
+
 @router.post("/me/totp/confirm")
 async def totp_confirm(
     payload: dict,

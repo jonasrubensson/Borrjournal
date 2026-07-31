@@ -185,6 +185,30 @@ async def nearby_facility(
     }
 
 
+@router.get("/geocode")
+async def geocode_address(
+    q: str,
+    municipality: str = "",
+    _: User = Depends(current_user),
+):
+    """Slår upp koordinater från en adress eller fastighetsbeteckning."""
+    from ..config import settings
+    from ..services.geocode import geocode
+
+    if not settings.geocoder_url:
+        raise HTTPException(status_code=503, detail="Adressuppslag är avstängt på servern")
+    try:
+        hit = await geocode(q, municipality)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if not hit:
+        raise HTTPException(
+            status_code=404,
+            detail="Hittade ingen träff på adressen. Skriv koordinaten för hand.",
+        )
+    return hit
+
+
 @router.get("/coordinates/parse")
 async def parse_endpoint(q: str, _: User = Depends(current_user)):
     """Låter gränssnittet visa tolkningen direkt medan man skriver."""

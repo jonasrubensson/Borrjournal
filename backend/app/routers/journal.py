@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..models import Customer, JournalEntry, Reminder, StoredFile, User
 from ..schemas import JournalIn, journal_out
-from ..security import current_user, log_action, require_write
+from ..security import current_user, log_action, require_admin, require_write
 
 router = APIRouter(prefix="/api", tags=["journal"])
 
@@ -53,6 +53,23 @@ async def add_entry(
         raise HTTPException(status_code=404, detail="Kunden finns inte")
     if not payload.title.strip() and not payload.body.strip():
         raise HTTPException(status_code=400, detail="Skriv en rubrik eller en anteckning")
+
+    # Allt ska kunna spåras till en anläggning. Har kunden minst en måste en väljas,
+    # annars blir journalen omöjlig att följa när kunden har flera brunnar.
+    from ..models import Facility
+
+    facilities = (
+        await db.execute(select(Facility.id).where(Facility.customer_id == customer_id))
+    ).scalars().all()
+    if facilities:
+        if not payload.facility_id:
+            raise HTTPException(
+                status_code=400, detail="Välj vilken anläggning anteckningen gäller"
+            )
+        if payload.facility_id not in facilities:
+            raise HTTPException(
+                status_code=400, detail="Anläggningen hör inte till den här kunden"
+            )
 
     entry = JournalEntry(
         customer_id=customer_id,
@@ -132,3 +149,77 @@ async def all_entries(
         item["customer"] = {"id": customer.id, "name": customer.name, "customer_no": customer.customer_no}
         out.append(item)
     return out
+
+
+@router.patch("/journal/{entry_id}")
+async def retract_entry(
+    entry_id: str,
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Drar tillbaka en anteckning. Texten står kvar men märks som struken.
+
+    Journalen är avsiktligt inte redigerbar. En anteckning som visar sig vara fel
+    stryks och ersätts av en ny, så att det går att se vad som stod och vem som
+    ändrade sig. Det är hela poängen med en journal.
+    """
+    from datetime import datetime, timezone
+
+    entry = (
+        await db.execute(select(JournalEntry).where(JournalEntry.id == entry_id))
+    ).scalar_one_or_none()
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Anteckningen finns inte")
+
+    if payload.get("undo"):
+        entry.retracted_at = None
+        entry.retracted_by = ""
+        entry.retraction_reason = ""
+        action = "JOURNAL_UNRETRACT"
+    else:
+        entry.retracted_at = datetime.now(timezone.utc)
+        entry.retracted_by = user.full_name or user.username
+        entry.retraction_reason = (payload.get("reason") or "").strip()[:255]
+        action = "JOURNAL_RETRACT"
+
+    await db.commit()
+    await db.refresh(entry)
+    await log_action(
+        db,
+        action,
+        actor=user.username,
+        object_type="journal",
+        object_id=entry.id,
+        request=request,
+        detail=entry.retraction_reason,
+    )
+    return journal_out(entry)
+
+
+@router.delete("/journal/{entry_id}", status_code=204)
+async def delete_entry(
+    entry_id: str,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Radera på riktigt. Endast administratör, för rena felinmatningar."""
+    entry = (
+        await db.execute(select(JournalEntry).where(JournalEntry.id == entry_id))
+    ).scalar_one_or_none()
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Anteckningen finns inte")
+    title = entry.title
+    await db.delete(entry)
+    await db.commit()
+    await log_action(
+        db,
+        "JOURNAL_DELETE",
+        actor=user.username,
+        object_type="journal",
+        object_id=entry_id,
+        request=request,
+        detail=title,
+    )

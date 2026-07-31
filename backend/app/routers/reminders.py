@@ -132,6 +132,15 @@ async def create_reminder(
     if not payload.title.strip():
         raise HTTPException(status_code=400, detail="Påminnelsen behöver en rubrik")
 
+    # Väljs en anläggning ska kunden fyllas i automatiskt, så inget hamnar löst i luften
+    if payload.facility_id:
+        f = (
+            await db.execute(select(Facility).where(Facility.id == payload.facility_id))
+        ).unique().scalar_one_or_none()
+        if f is None:
+            raise HTTPException(status_code=404, detail="Anläggningen finns inte")
+        payload.customer_id = f.customer_id
+
     r = Reminder(
         **payload.model_dump(),
         created_by=user.full_name or user.username,

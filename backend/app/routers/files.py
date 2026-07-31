@@ -25,16 +25,34 @@ def ensure_dirs() -> None:
     os.makedirs(THUMB_DIR, exist_ok=True)
 
 
+def _save_thumb(img: Image.Image, stored_name: str) -> str:
+    img.thumbnail((640, 640))
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    name = f"{stored_name}.thumb.jpg"
+    img.save(os.path.join(THUMB_DIR, name), "JPEG", quality=82)
+    return name
+
+
 def make_thumb(raw: bytes, stored_name: str) -> str | None:
     try:
-        img = Image.open(io.BytesIO(raw))
-        img.thumbnail((640, 640))
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        name = f"{stored_name}.thumb.jpg"
-        img.save(os.path.join(THUMB_DIR, name), "JPEG", quality=82)
-        return name
+        return _save_thumb(Image.open(io.BytesIO(raw)), stored_name)
     except (UnidentifiedImageError, OSError):
+        return None
+
+
+def make_pdf_thumb(raw: bytes, stored_name: str) -> str | None:
+    """Första sidan som tumnagel. Ett borrprotokoll går att känna igen på håll."""
+    try:
+        import pypdfium2
+
+        pdf = pypdfium2.PdfDocument(raw)
+        if len(pdf) == 0:
+            return None
+        page = pdf[0]
+        bitmap = page.render(scale=1.4)
+        return _save_thumb(bitmap.to_pil(), stored_name)
+    except Exception:  # noqa: BLE001 - en trasig PDF får inte stoppa uppladdningen
         return None
 
 
@@ -75,7 +93,12 @@ async def upload(
     with open(os.path.join(FILE_DIR, stored_name), "wb") as fh:
         fh.write(raw)
 
-    thumb_name = make_thumb(raw, stored_name) if kind == "bild" else None
+    if kind == "bild":
+        thumb_name = make_thumb(raw, stored_name)
+    elif content_type == "application/pdf":
+        thumb_name = make_pdf_thumb(raw, stored_name)
+    else:
+        thumb_name = None
 
     record = StoredFile(
         customer_id=customer_id,

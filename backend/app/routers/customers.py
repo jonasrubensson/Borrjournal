@@ -11,8 +11,9 @@ from ..schemas import (
     customer_out,
     facility_out,
 )
-from ..security import current_user, log_action, require_write
+from ..security import current_user, log_action, require_admin, require_write
 from ..services.geo import parse_coordinates
+from ..services.reminders import generate_auto
 
 router = APIRouter(prefix="/api", tags=["kunder"])
 
@@ -144,6 +145,7 @@ async def create_facility(
     db.add(f)
     await db.commit()
     await db.refresh(f)
+    await generate_auto(db)
     await log_action(
         db, "FACILITY_CREATE", actor=user.username, object_type="facility", object_id=f.id, request=request
     )
@@ -171,6 +173,7 @@ async def update_facility(
             setattr(f, key, value)
     await db.commit()
     await db.refresh(f)
+    await generate_auto(db)
     await log_action(
         db, "FACILITY_UPDATE", actor=user.username, object_type="facility", object_id=f.id, request=request
     )
@@ -298,6 +301,7 @@ async def onboarding(
     await db.commit()
     await db.refresh(customer)
     await db.refresh(facility)
+    await generate_auto(db)
     await log_action(
         db,
         "ONBOARDING",
@@ -308,3 +312,146 @@ async def onboarding(
         detail=f"{customer.customer_no} / {facility.facility_no}",
     )
     return {"customer": customer_out(customer), "facility": facility_out(facility)}
+
+
+@router.delete("/facilities/{facility_id}", status_code=204)
+async def delete_facility(
+    facility_id: str,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Tar bort en anläggning. Journalen behålls, men lossas från anläggningen."""
+    f = (
+        await db.execute(select(Facility).where(Facility.id == facility_id))
+    ).unique().scalar_one_or_none()
+    if f is None:
+        raise HTTPException(status_code=404, detail="Anläggningen finns inte")
+
+    from ..models import JournalEntry, Reminder, StoredFile
+
+    for model in (JournalEntry, StoredFile):
+        rows = (await db.execute(select(model).where(model.facility_id == facility_id))).scalars().all()
+        for row in rows:
+            row.facility_id = None
+    reminders = (
+        await db.execute(select(Reminder).where(Reminder.facility_id == facility_id))
+    ).scalars().all()
+    for r in reminders:
+        await db.delete(r)
+
+    label = f"{f.facility_no} {f.facility_type}"
+    await db.delete(f)
+    await db.commit()
+    await log_action(
+        db,
+        "FACILITY_DELETE",
+        actor=user.username,
+        object_type="facility",
+        object_id=facility_id,
+        request=request,
+        detail=label,
+    )
+
+
+@router.post("/facilities/{facility_id}/pump-change")
+async def change_pump(
+    facility_id: str,
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Byter pump och skriver en journalrad om bytet, med den gamla pumpen bevarad i texten."""
+    f = (
+        await db.execute(select(Facility).where(Facility.id == facility_id))
+    ).unique().scalar_one_or_none()
+    if f is None:
+        raise HTTPException(status_code=404, detail="Anläggningen finns inte")
+
+    old = " ".join(x for x in (f.pump_manufacturer, f.pump_model) if x) or "ingen pump"
+    if f.pump_serial:
+        old += f" (serienr {f.pump_serial})"
+
+    f.pump_manufacturer = (payload.get("pump_manufacturer") or "").strip()
+    f.pump_model = (payload.get("pump_model") or "").strip()
+    f.pump_serial = (payload.get("pump_serial") or "").strip()
+    f.pump_installed_at = payload.get("pump_installed_at") or ""
+    f.pump_status = payload.get("pump_status") or "Installerad"
+    if payload.get("pump_depth_m") not in (None, ""):
+        f.pump_depth_m = float(payload["pump_depth_m"])
+    if payload.get("pressure_tank"):
+        f.pressure_tank = payload["pressure_tank"]
+    if payload.get("reset_service", True):
+        f.last_service_at = f.pump_installed_at or f.last_service_at
+        f.status = "ok"
+
+    new = " ".join(x for x in (f.pump_manufacturer, f.pump_model) if x) or "ingen pump"
+    if f.pump_serial:
+        new += f" (serienr {f.pump_serial})"
+
+    from ..models import JournalEntry
+
+    note = payload.get("note", "").strip()
+    db.add(
+        JournalEntry(
+            customer_id=f.customer_id,
+            facility_id=f.id,
+            entry_type="Pumpbyte",
+            title=f"Pumpbyte på {f.facility_no}",
+            body=f"Gammal pump: {old}\nNy pump: {new}" + (f"\n\n{note}" if note else ""),
+            author_id=user.id,
+            author_name=user.full_name or user.username,
+        )
+    )
+    await db.commit()
+    await db.refresh(f)
+    await log_action(
+        db,
+        "PUMP_CHANGE",
+        actor=user.username,
+        object_type="facility",
+        object_id=f.id,
+        request=request,
+        detail=f"{old} -> {new}",
+    )
+    return facility_out(f, with_customer=True)
+
+
+@router.delete("/customers/{customer_id}", status_code=204)
+async def delete_customer(
+    customer_id: str,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Tar bort kund med allt: anläggningar, journal, filer och påminnelser."""
+    import os
+
+    from ..config import settings
+    from ..models import StoredFile
+
+    c = await get_customer(db, customer_id)
+    files = (
+        await db.execute(select(StoredFile).where(StoredFile.customer_id == customer_id))
+    ).scalars().all()
+    for f in files:
+        for path in (
+            os.path.join(settings.data_dir, "files", f.stored_name),
+            os.path.join(settings.data_dir, "thumbs", f.thumb_name) if f.thumb_name else None,
+        ):
+            if path and os.path.exists(path):
+                os.remove(path)
+
+    label = f"{c.customer_no} {c.name}"
+    await db.delete(c)
+    await db.commit()
+    await log_action(
+        db,
+        "CUSTOMER_DELETE",
+        actor=user.username,
+        object_type="customer",
+        object_id=customer_id,
+        request=request,
+        detail=label,
+    )
