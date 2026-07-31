@@ -65,6 +65,15 @@ miljön och lägga till en `db`-tjänst i compose. Appen bygger anslutningssträ
 lösenordet korrekt. Flytta data genom att ta en backup, packa upp den och köra
 `python -m app.restore db.json` mot den nya databasen.
 
+## Filer och bilder
+
+Både dokument- och bildfliken visar korten i rutnät med förhandsvisning, så det går att se vad som
+är vad utan att öppna varje fil. Bilder skalas till 640 px vid uppladdning. För PDF renderas första
+sidan som tumnagel, vilket gör att ett borrprotokoll går att känna igen på håll. DOCX och XLSX kan
+inte förhandsvisas och får en tydlig typmarkering i stället.
+
+Bilder tagna med telefonen får kameran direkt via bildfliken.
+
 ## Ändra och ta bort
 
 | Vad | Var | Vem |
@@ -114,6 +123,21 @@ Sorteringen sätter angelägenhet före avstånd. En försenad service två mil 
 fungerande brunn på samma gata, eftersom det är den avstickaren som faktiskt är värd något.
 Bocka i stoppen och tryck *Öppna rundan i kartan*, så byggs en Google Maps-rutt med din position
 som start och stoppen som delmål (högst tio, det är kartans gräns).
+
+### Koordinater från adressen
+
+I onboardingformuläret och i anläggningens redigeringsvy finns **Hämta från adressen**, som slår
+upp koordinaten från adress, fastighetsbeteckning och kommun.
+
+Det är det enda i appen som kräver internet. Det finns ingen rimlig väg att slå upp svenska
+adresser offline utan att packa in ett adressregister. Standard är OpenStreetMaps Nominatim, vars
+villkor kräver identifierbar User-Agent och högst en förfrågan per sekund, vilket respekteras.
+Kör du eget Nominatim, peka om `GEOCODER_URL` i `.env`. Töm variabeln för att stänga av
+funktionen helt.
+
+Uppslaget hittar adressen, inte borrhålet. Det som visas är en startpunkt att justera, och
+gränssnittet säger det rakt ut. För exakt läge på hålet: stå vid det och tryck **Hämta min
+position**, eller skriv in koordinaten från borrprotokollet.
 
 ### Koordinater
 
@@ -168,6 +192,17 @@ Nginx Proxy Manager (443) → app (FastAPI + uvicorn) → Postgres
 | Autentisering | JWT + bcrypt, valfri TOTP | Samma mönster som dokumentationsplattformen |
 | Notiser | Webbpush (VAPID) + SMTP | Inga tredjepartstjänster, inget konto att skapa |
 | Schemaläggning | asyncio-loop i appen | Inget Celery, ingen extra container att hålla vid liv |
+
+### Tvåfaktor
+
+Under **Inställningar → Notiser** kan varje användare slå på tvåfaktor för sitt eget konto.
+Servern visar en QR-kod att skanna med Google Authenticator, Aegis, 1Password eller liknande, samt
+nyckeln i klartext om kameran krånglar. Inget slås på förrän du bekräftat med en giltig kod, så du
+kan inte låsa ute dig själv genom att avbryta.
+
+Att stänga av kräver lösenordet, annars räcker en obevakad skärm för att ta bort skyddet. Har någon
+tappat sin telefon kan en administratör nollställa tvåfaktor på kontot via
+`PATCH /api/users/{id}` med `reset_totp`.
 
 ### Roller
 
@@ -226,11 +261,19 @@ för att den sortens fråga ska vara exakt och snabb.
 | GET | `/api/nearby` | Jobb nära en position eller en tolkad koordinat |
 | GET | `/api/facilities/{id}/nearby` | Vad som kan slås ihop med resan dit |
 | GET | `/api/coordinates/parse` | Tolkar inklistrad koordinat, för direktrespons i formuläret |
+| GET | `/api/version` | Serverns version, gränssnittet varnar om de går isär |
+| GET | `/api/geocode` | Koordinat från adress |
+| GET | `/api/me/totp/qr` | QR-kod för att slå på tvåfaktor |
+| POST | `/api/me/totp/disable` | Stäng av tvåfaktor, kräver lösenord |
 | GET | `/api/audit` | Händelselogg, endast admin |
 
 Interaktiv dokumentation finns på `/docs` när appen kör.
 
 ## Journalen
+
+Varje anteckning hör till en anläggning. Har kunden flera brunnar går det annars inte att följa
+vad som gjorts var, och då tappar journalen sitt värde som underlag. Har kunden ingen anläggning
+ännu säger journalfliken till och länkar dit man lägger till en.
 
 Journalrader tidsstämplas av servern, aldrig av klienten, och signeras med den inloggade
 användaren. Rader ändras inte i efterhand: en rättelse skapas som en ny rad med `corrects_id`
