@@ -1,4 +1,7 @@
 :root{
+  /* Textstorlek. Sätts av användaren och sparas per enhet. */
+  --scale:1;
+  --base:calc(15px * var(--scale));
   --ink:#0E1F2A; --ink-2:#33505E; --stone:#6B7A80; --line:#D3DBDC;
   --paper:#EFF2F1; --panel:#FFFFFF; --water:#1F7A8C; --water-dark:#155F6E;
   --brass:#B3801F; --alert:#A6402F; --ok:#2E7D5B;
@@ -10,7 +13,7 @@
 }
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
-body{font-family:var(--sans);background:var(--paper);color:var(--ink);font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%}
+body{font-family:var(--sans);background:var(--paper);color:var(--ink);font-size:var(--base);line-height:1.5;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%}
 button{font-family:inherit;font-size:inherit;cursor:pointer}
 a{color:var(--water)}
 :focus-visible{outline:2px solid var(--water);outline-offset:2px}
@@ -187,36 +190,93 @@ legend{font-family:var(--cond);font-size:15px;font-weight:700;text-transform:upp
 @media (max-width:900px){
   :root{--nav:0px}
   .app{grid-template-columns:1fr}
-  .side{position:fixed;bottom:0;left:0;right:0;top:auto;height:auto;flex-direction:row;padding:0;z-index:30;
-        border-top:1px solid #1B3644;padding-bottom:env(safe-area-inset-bottom)}
+
+  /* Flikrad längst ner. Fast höjd så ikon och text alltid ligger på samma linje. */
+  .side{position:fixed;bottom:0;left:0;right:0;top:auto;height:auto;flex-direction:row;padding:0;
+        z-index:30;border-top:1px solid #1B3644;padding-bottom:env(safe-area-inset-bottom)}
   .brand,.navgroup,.side .foot{display:none}
   .nav{flex-direction:row;width:100%}
-  .nav a{flex:1;flex-direction:column;gap:3px;border-left:none;border-top:2px solid transparent;padding:9px 2px 8px;font-size:10.5px;text-align:center;justify-content:center}
+  .nav a{flex:1 1 0;min-width:0;flex-direction:column;align-items:center;justify-content:flex-start;
+         gap:4px;border-left:none;border-top:2px solid transparent;padding:8px 2px 7px;
+         font-size:10.5px;line-height:1.15;text-align:center;position:relative;min-height:56px}
+  .nav a svg{flex:0 0 auto;width:20px;height:20px}
+  .nav a span{display:block;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .nav a.on{border-left:none;border-top-color:var(--water);background:rgba(31,122,140,.14)}
   .nav .cnt{display:none}
-  .top{padding:9px 14px;gap:10px}
-  .who span:not(.av){display:none}
-  .view{padding:16px 14px 84px}
-  .grid2,.stats{grid-template-columns:1fr}
-  .stats{grid-template-columns:1fr 1fr;gap:10px}
-  h1{font-size:24px}
-  .steps{flex-wrap:wrap} .step{flex:1 1 45%;border-bottom:1px solid var(--line)}
-  .jentry{grid-template-columns:1fr;gap:4px}
-  .jmeta{display:flex;gap:8px} .jmeta .dt{display:inline}
-  .chead{padding:16px}
-  .card .pad{padding:14px}
+  .nav .badge{display:block;position:absolute;top:4px;left:50%;margin-left:6px;padding:0 5px;
+              font-size:9.5px;line-height:15px;min-width:16px;height:16px}
 
-  /* tabeller blir kort */
+  /* Toppfält: sök tar plats, knappar behåller tumstorlek */
+  .top{padding:8px 12px;gap:8px}
+  .top .btn{padding:8px 10px;min-height:42px}
+  .who span:not(.av){display:none}
+  .view{padding:14px 12px 84px}
+
+  .spread{gap:10px;margin-bottom:14px}
+  .spread > div:first-child{min-width:0;flex:1 1 100%}
+  .spread .row{width:100%}
+  .spread .row .btn{flex:1 1 auto}
+
+  .grid2{grid-template-columns:1fr;gap:14px}
+  .stats{grid-template-columns:1fr 1fr;gap:10px}
+  .stat{padding:12px 14px}
+  h1{font-size:calc(1.55 * var(--base))}
+
+  .card .pad{padding:14px}
+  .card .hd{padding:11px 14px}
+  .chead{padding:16px 14px}
+
+  /* Faktarutor i en kolumn, etikett över värde, allt vänsterställt mot samma linje */
+  .facts,.facts.tight{grid-template-columns:1fr 1fr;gap:12px 14px}
+  .fact .v{overflow-wrap:anywhere}
+
+  .fgrid{grid-template-columns:1fr;gap:0}
+  input,select,textarea{font-size:max(16px, var(--base))}  /* under 16px zoomar iOS in */
+
+  .jentry{grid-template-columns:1fr;gap:4px}
+  .jmeta{display:flex;gap:8px;align-items:baseline}
+  .jmeta .dt{display:inline}
+  .jmeta br{display:none}
+
+  .tabs{margin-bottom:14px}
+  .tabs button{padding:10px 13px}
+
+  .steps{flex-wrap:wrap}
+  .step{flex:1 1 46%;border-bottom:1px solid var(--line);min-height:46px}
+
+  .btn{min-height:44px}
+  .btn.sm{min-height:40px;padding:8px 12px}
+  .row{gap:8px}
+
+  /* Filrader: ikon, text och knappar på egna rader i stället för att tryckas ihop */
+  .filerow{flex-wrap:wrap;gap:10px;padding:12px 0}
+  .filerow > div[style*="flex:1"]{flex:1 1 60%;min-width:0}
+  .filerow .row{width:100%;justify-content:flex-start}
+  .imgs{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+
+  .profile{justify-content:flex-start}
+
+  /* Tabeller blir kort. Etikett och värde delar rad på samma baslinje. */
   table,thead,tbody,tr,td{display:block;width:100%}
   thead{display:none}
-  tbody tr{border:1px solid var(--line);border-radius:var(--r);margin-bottom:10px;background:#fff;padding:4px 0}
+  tbody tr{border:1px solid var(--line);border-radius:var(--r);margin-bottom:10px;background:#fff;
+           padding:6px 0}
   tbody tr:hover td{background:none}
-  td{border:none;padding:5px 14px;display:flex;gap:10px;justify-content:space-between;align-items:baseline}
-  td:before{content:attr(data-l);font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--stone);flex:0 0 40%}
+  td{border:none;padding:6px 14px;display:grid;grid-template-columns:38% 1fr;gap:10px;
+     align-items:baseline}
+  td:before{content:attr(data-l);font-family:var(--mono);font-size:calc(.63 * var(--base));
+            letter-spacing:.1em;text-transform:uppercase;color:var(--stone)}
   td:empty{display:none}
-  .btn{min-height:42px}
+  td .tsub,td .tname{display:block}
+  td > .row{grid-column:1 / -1}
+  td > .row .btn{flex:1 1 auto}
 }
-@media (max-width:420px){ .stats{grid-template-columns:1fr} }
+@media (max-width:420px){
+  .stats{grid-template-columns:1fr}
+  .facts,.facts.tight{grid-template-columns:1fr}
+  td{grid-template-columns:44% 1fr}
+  .step{flex:1 1 100%}
+}
 
 /* notisbricka i navigationen */
 .nav .badge{background:var(--alert);color:#fff;border-radius:9px;padding:1px 6px;font-size:10px;min-width:18px;text-align:center}
@@ -240,3 +300,41 @@ legend{font-family:var(--cond);font-size:15px;font-weight:700;text-transform:upp
 .thumb .noprev.other span{background:var(--stone)}
 .linkbtn{background:none;border:none;padding:0;color:#A6402F;font-family:var(--mono);
   font-size:10.5px;cursor:pointer;text-decoration:underline}
+
+
+/* ---------- textstorlek ---------- */
+html[data-scale="stor"]{--scale:1.15}
+html[data-scale="storre"]{--scale:1.32}
+html[data-scale="storst"]{--scale:1.5}
+
+/* Allt som tidigare hade fast pixelstorlek följer nu med när texten växer */
+h1{font-size:calc(1.87 * var(--base))}
+h2{font-size:calc(1.2 * var(--base))}
+.eyebrow{font-size:calc(.7 * var(--base))}
+.lead,.hint,.tsub,.fmeta{font-size:calc(.85 * var(--base))}
+.tag{font-size:calc(.7 * var(--base))}
+.stat .v{font-size:calc(2 * var(--base))}
+.stat .l{font-size:calc(.7 * var(--base))}
+table{font-size:calc(.93 * var(--base))}
+th{font-size:calc(.7 * var(--base))}
+.tid{font-size:calc(.83 * var(--base))}
+label.f{font-size:calc(.67 * var(--base))}
+input,select,textarea{font-size:var(--base)}
+.btn{font-size:var(--base)}
+.btn.sm{font-size:calc(.87 * var(--base))}
+.fact .k{font-size:calc(.67 * var(--base))}
+.fact .v{font-size:calc(.97 * var(--base))}
+.jmeta{font-size:calc(.77 * var(--base))}
+.tabs button{font-size:var(--base)}
+.nav a{font-size:calc(.97 * var(--base))}
+
+/* ---------- storleksväljare ---------- */
+.sizepick{display:inline-flex;border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.sizepick button{background:#fff;border:none;border-right:1px solid var(--line);padding:7px 12px;
+  color:var(--ink-2);line-height:1;min-width:44px;min-height:40px}
+.sizepick button:last-child{border-right:none}
+.sizepick button.on{background:var(--water);color:#fff}
+.sizepick button:nth-child(1){font-size:13px}
+.sizepick button:nth-child(2){font-size:15px}
+.sizepick button:nth-child(3){font-size:17px}
+.sizepick button:nth-child(4){font-size:19px}

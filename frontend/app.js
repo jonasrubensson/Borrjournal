@@ -2,12 +2,13 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "1.3.0";
+const UI_VERSION = "1.4.0";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
   user: JSON.parse(localStorage.getItem("bj_user") || "null"),
   route: "oversikt",
+  size: "normal",
   id: null,
   tab: "journal",
   step: 0,
@@ -937,6 +938,118 @@ async function setStatus(facilityId, status) {
 
 
 
+
+/* ---------------- textstorlek ---------------- */
+const SIZES = [
+  ["normal", "Normal"],
+  ["stor", "Stor"],
+  ["storre", "Större"],
+  ["storst", "Störst"],
+];
+
+function applySize(name) {
+  const value = SIZES.some(([k]) => k === name) ? name : "normal";
+  if (value === "normal") document.documentElement.removeAttribute("data-scale");
+  else document.documentElement.setAttribute("data-scale", value);
+  try {
+    localStorage.setItem("bj_size", value);
+  } catch (_) {}
+  S.size = value;
+}
+
+function sizePicker() {
+  return `<div class="sizepick" role="group" aria-label="Textstorlek">
+    ${SIZES.map(
+      ([k, label]) =>
+        `<button class="${S.size === k ? "on" : ""}" onclick="setSize('${k}')"
+          title="${label} text" aria-pressed="${S.size === k}">A</button>`
+    ).join("")}</div>`;
+}
+
+function setSize(name) {
+  applySize(name);
+  if (S.route === "admin") viewAdmin();
+  toast(`Textstorlek: ${(SIZES.find(([k]) => k === name) || [])[1]}`);
+}
+
+/* ---------------- installera på hemskärmen ---------------- */
+const INSTALL = {
+  prompt: null,
+  installed: () =>
+    (typeof window.matchMedia === "function" &&
+      window.matchMedia("(display-mode: standalone)").matches) ||
+    navigator.standalone === true,
+  isIos: () =>
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1),
+};
+
+// Chrome och Edge på Android och dator skickar den här strax efter laddning.
+// Safari gör det inte, och har inget motsvarande API.
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  INSTALL.prompt = e;
+  const box = document.getElementById("installbox");
+  if (box) box.innerHTML = installHtml();
+});
+window.addEventListener("appinstalled", () => {
+  INSTALL.prompt = null;
+  toast("Borrjournal tillagd på hemskärmen");
+  const box = document.getElementById("installbox");
+  if (box) box.innerHTML = installHtml();
+});
+
+function installHtml() {
+  try {
+    return installHtmlInner();
+  } catch (e) {
+    console.warn("installationskortet kunde inte ritas", e);
+    return `<p class="hint" style="margin:0">Installation stöds inte i den här webbläsaren.</p>`;
+  }
+}
+
+function installHtmlInner() {
+  if (INSTALL.installed())
+    return `<p class="hint" style="margin:0">Appen körs redan från hemskärmen. Notiser fungerar.</p>`;
+
+  if (!window.isSecureContext)
+    return `<p class="hint" style="margin:0;color:var(--brass)">Installation kräver HTTPS.
+      Sidan körs över vanlig HTTP, och då erbjuder varken Android eller iPhone att lägga till
+      den på hemskärmen.</p>`;
+
+  if (INSTALL.prompt)
+    return `<div class="row">
+      <button class="btn pri" onclick="doInstall()">Lägg till på hemskärmen</button>
+      <span class="hint" style="margin:0">Öppnas i eget fönster, utan adressfält.</span>
+    </div>`;
+
+  if (INSTALL.isIos())
+    return `<div>
+      <p class="lead" style="margin-top:0">På iPhone och iPad finns ingen knapp att trycka på:
+        Safari tillåter inte att en webbplats installerar sig själv. Tre steg i stället:</p>
+      <ol style="margin:0;padding-left:20px;line-height:1.9">
+        <li>Tryck på <strong>Dela</strong> längst ner i Safari (fyrkanten med pilen uppåt)</li>
+        <li>Bläddra ner och välj <strong>Lägg till på hemskärmen</strong></li>
+        <li>Öppna Borrjournal från hemskärmen, inte från Safari</li>
+      </ol>
+      <p class="hint">Kräver iOS 16.4 eller senare för notiser. Använder du Chrome på iPhone
+        måste du göra det från Safari, det är den enda webbläsaren på iOS som kan installera.</p>
+    </div>`;
+
+  return `<p class="hint" style="margin:0">Den här webbläsaren erbjuder ingen installation.
+    Prova Chrome eller Edge på Android och dator, eller Safari på iPhone.</p>`;
+}
+
+async function doInstall() {
+  if (!INSTALL.prompt) return toast("Webbläsaren erbjuder ingen installation just nu", true);
+  INSTALL.prompt.prompt();
+  const { outcome } = await INSTALL.prompt.userChoice;
+  INSTALL.prompt = null;
+  const box = document.getElementById("installbox");
+  if (box) box.innerHTML = installHtml();
+  toast(outcome === "accepted" ? "Installerad" : "Installationen avbröts");
+}
+
 /* ---------------- tvåfaktor ---------------- */
 async function totpStart() {
   const box = $("#totpbox");
@@ -1610,7 +1723,9 @@ const PUSH = {
     /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1),
   installed: () =>
-    window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true,
+    (typeof window.matchMedia === "function" &&
+      window.matchMedia("(display-mode: standalone)").matches) ||
+    navigator.standalone === true,
 
   async ready() {
     if (!("serviceWorker" in navigator)) return null;
@@ -1805,14 +1920,13 @@ async function viewReminders() {
     <div class="stat"><div class="v">${sum.open}</div><div class="l">Öppna totalt</div></div>
   </div>
   ${
-    S.user.role === "lasare"
+    S.user.role === "lasare" || !customers.some((c) => c.facilities.length)
       ? ""
       : `<div class="card" style="margin-bottom:16px"><div class="hd"><h2>Ny påminnelse</h2></div><div class="pad">
     <div class="fgrid">
       <div><label class="f" for="rt">Rubrik</label><input id="rt" placeholder="Ring om hydroforbyte"></div>
       <div><label class="f" for="rd">Datum</label><input id="rd" type="date"></div>
       <div><label class="f" for="rc">Gäller anläggning</label><select id="rc">
-        <option value="">Ingen särskild anläggning</option>
         ${customers
           .flatMap((c) =>
             c.facilities.map(
@@ -1843,7 +1957,9 @@ async function viewReminders() {
 async function createReminder() {
   const title = $("#rt").value.trim();
   const due = $("#rd").value;
+  const facility = $("#rc").value;
   if (!title || !due) return toast("Rubrik och datum behövs", true);
+  if (!facility) return toast("Välj vilken anläggning påminnelsen gäller", true);
   try {
     await api("/reminders", {
       method: "POST",
@@ -1851,7 +1967,7 @@ async function createReminder() {
         title,
         due_date: due,
         body: $("#rb").value,
-        facility_id: $("#rc").value || null,
+        facility_id: facility,
         notify_days_before: parseInt($("#rn").value, 10),
         kind: "egen",
       },
@@ -2214,6 +2330,16 @@ async function adminNotifications() {
     }
   </div></div>
 
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Textstorlek</h2></div>
+    <div class="pad">
+      <p class="lead" style="margin-top:0">Gäller den här enheten och sparas. Ute i fält, i solljus
+        eller med handskar på är större text ofta skillnaden mellan läsbart och inte.</p>
+      ${sizePicker()}
+    </div></div>
+
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Lägg till på hemskärmen</h2></div>
+    <div class="pad" id="installbox">${installHtml()}</div></div>
+
   <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Tvåfaktor för ditt konto</h2>
     <span class="tag ${me.totp_enabled ? "ok" : "n"}">${me.totp_enabled ? "Påslagen" : "Av"}</span></div>
     <div class="pad" id="totpbox">
@@ -2445,7 +2571,8 @@ async function adminLog() {
 
 /* ---------------- render ---------------- */
 function render() {
-  const mine = claim();
+  claim();
+  const vy = S.route + "|" + S.id + "|" + S.tab;
   if (!S.token || !S.user) return viewLogin();
   const views = {
     oversikt: viewDashboard,
@@ -2461,11 +2588,20 @@ function render() {
   };
   const fn = views[S.route] || viewDashboard;
   Promise.resolve(fn()).catch((e) => {
-    // Hann användaren byta vy hör felet till en vy som inte visas längre.
-    if (mine !== renderSeq || e.message === "401") return;
+    // Svälj bara om användaren hunnit navigera bort. Ett fel i den vy som
+    // faktiskt visas ska alltid synas, annars står man inför en halv sida
+    // utan att veta varför.
+    if (S.route + "|" + S.id + "|" + S.tab !== vy || e.message === "401") return;
+    console.error("fel i vyn", S.route, e);
     mountShell(`<div class="err">${esc(e.message)}</div>
       <button class="btn ghost sm" onclick="render()">Försök igen</button>`);
   });
+}
+
+try {
+  applySize(localStorage.getItem("bj_size") || "normal");
+} catch (_) {
+  S.size = "normal";
 }
 
 applyHash();
