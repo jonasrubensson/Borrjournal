@@ -67,6 +67,12 @@ lösenordet korrekt. Flytta data genom att ta en backup, packa upp den och köra
 
 ## Filer och bilder
 
+Bilder och dokument hämtas med inloggningstoken och läggs in som blob-URL:er, eftersom en vanlig
+`<img src>` inte kan skicka Authorization-headern och därför fick 401. Alternativet, att lägga
+token i frågesträngen, hade hamnat i webbserverloggar och referrers. Bara det som syns på skärmen
+hämtas, så en kund med femtio foton drar inte hem allt på en gång.
+
+
 Både dokument- och bildfliken visar korten i rutnät med förhandsvisning, så det går att se vad som
 är vad utan att öppna varje fil. Bilder skalas till 640 px vid uppladdning. För PDF renderas första
 sidan som tumnagel, vilket gör att ett borrprotokoll går att känna igen på håll. DOCX och XLSX kan
@@ -110,6 +116,71 @@ Vid start läggs kolumner som tillkommit sedan databasen skapades till automatis
 aldrig ändringar eller borttag. Du kan alltså byta ut koden mot en nyare version utan att tömma
 databasen. Byggs schemat om på riktigt behövs Alembic.
 
+## Platsbesök före kund
+
+Ett besök är inte en kund. Den som ringer och vill ha ett pris blir ett **platsbesök** med bara det
+som behövs för att åka dit: kontaktperson, fastighet, ärende, koordinat. Ingen kundpost, inget
+kundnummer, ingen anläggning.
+
+Blir det affär trycker du **Blev kund**. Då skapas kund och första anläggningen av det som redan är
+ifyllt, koordinaten följer med, och en journalrad noterar vilket besök kunden kom ur, inklusive
+offertsumman. Blir det inget sätter du status *Blev inget* med en anledning, och registret förblir
+rent från folk som aldrig blev kunder.
+
+| Status | Betyder |
+|---|---|
+| Inbokat | Besök planerat |
+| Besökt | Varit där, inget pris lämnat än |
+| Offert lämnad | Pris ute, väntar svar |
+| Blev kund | Omvandlat, kunden finns i registret |
+| Blev inget | Avslutat utan affär |
+
+## Inför besöket: vad grannarna stötte på
+
+Öppnar du ett besök med koordinat visas ett underlag byggt på SGU:s brunnsarkiv:
+
+* hur djupt till berg grannarna hade, som spann och median
+* hur djupt de borrade, uppdelat på vatten- och energibrunnar
+* vilken kapacitet de fick, och hur stor andel som ligger under 600 l/h
+* grundvattennivå, samt en lista på de närmaste brunnarna med avstånd
+
+Överst står en tolkning i klartext: ungefär hur mycket foderrör som lär gå åt och vilket borrdjup
+som är rimligt att räkna med. Radien går att ändra mellan 500 m och 5 km. Samma underlag finns på
+befintliga anläggningar under **Grannbrunnar**.
+
+**Vattenkvalitet går inte att få.** Brunnsarkivet innehåller läge, djup, jorddjup, foderrör,
+kapacitet och nivåer, men ingen kemi och inga bakterier. SGU har separata data om
+grundvattenkvalitet, men de kommer från miljöövervakningens stationer, inte från grannens brunn,
+och säger ingenting om en enskild fastighet. Ett vattenprov på plats är enda vägen, och det står
+också i underlaget så att ingen tror något annat.
+
+### Hämta SGU-data
+
+**Inställningar → SGU**, välj län och hämta. Data lagras lokalt, så uppslag går på millisekunder
+utan att ringa ut. SGU uppdaterar en gång i veckan och appen synkar om automatiskt när lokala data
+är äldre än sju dagar. Ett normalstort län tar någon minut första gången.
+
+Licensen är Creative Commons Erkännande 4.0, vilket kräver att SGU anges som källa där uppgifterna
+visas. Det sker automatiskt i underlaget.
+
+Lägesnoggrannheten varierar. Många brunnar är satta på fastighetens mittpunkt snarare än på hålet,
+vilket SGU själva påpekar. Underlaget duger utmärkt för att bedöma en trakt, inte för att peka ut
+exakt var någon annans hål sitter.
+
+## Dela med externa borrare
+
+**Dela**-knappen finns på en anläggning och på ett platsbesök. Du väljer mottagare och kryssar i
+vad som ska följa med: plats, åtkomst, borrdata, berg, pump, kontaktuppgifter, grannunderlag.
+Meddelandet skickas som e-post från din egen server via samma SMTP som påminnelserna.
+
+Ingenting öppnas utåt. Appen ansluter bara ut, precis som förut. Det som skickas loggas i kundens
+journal och i **Inställningar → SGU** under senast delat, så det går att svara på vem som fick vad.
+
+Att ta emot borrprotokoll från externa borrare är inte byggt. När det blir aktuellt är den säkra
+vägen samma princip: en egen brevlåda som appen hämtar från utgående via IMAP, avsändare på
+godkänd lista, och allt som kommer in hamnar i en granskningskö där en människa godkänner innan
+något skrivs till registret.
+
 ## Jobb i närheten
 
 Två situationer, samma underlag:
@@ -126,7 +197,7 @@ som start och stoppen som delmål (högst tio, det är kartans gräns).
 
 ### Koordinater från adressen
 
-I onboardingformuläret och i anläggningens redigeringsvy finns **Hämta från adressen**, som slår
+I registreringsformuläret och i anläggningens redigeringsvy finns **Hämta från adressen**, som slår
 upp koordinaten från adress, fastighetsbeteckning och kommun.
 
 Det är det enda i appen som kräver internet. Det finns ingen rimlig väg att slå upp svenska
@@ -212,18 +283,38 @@ Samma ställe. Vad knappen gör beror på webbläsaren, och det är inget jag ka
   ingen annan webbläsare på iOS kan installera.
 * **Utan HTTPS:** varken Android eller iOS erbjuder installation alls. Kortet säger det rakt ut.
 
+### Mitt konto
+
+Klicka på ditt namn uppe till höger. Där sköter varje användare, oavsett roll, sitt eget:
+tvåfaktor, byte av lösenord, textstorlek, notiser och installation på hemskärmen. Tidigare låg
+tvåfaktor under administrationen, dit bara administratörer kommer, vilket gjorde att en tekniker
+inte kunde skydda sitt eget konto.
+
 ### Tvåfaktor
 
-Under **Inställningar → Notiser** kan varje användare slå på tvåfaktor för sitt eget konto.
+Under **Mitt konto** kan varje användare slå på tvåfaktor för sitt konto.
 Servern visar en QR-kod att skanna med Google Authenticator, Aegis, 1Password eller liknande, samt
 nyckeln i klartext om kameran krånglar. Inget slås på förrän du bekräftat med en giltig kod, så du
 kan inte låsa ute dig själv genom att avbryta.
 
-Att stänga av kräver lösenordet, annars räcker en obevakad skärm för att ta bort skyddet. Har någon
-tappat sin telefon kan en administratör nollställa tvåfaktor på kontot via
-`PATCH /api/users/{id}` med `reset_totp`.
+Att stänga av kräver lösenordet, annars räcker en obevakad skärm för att ta bort skyddet.
+
+En administratör kan under **Inställningar → Konton** kräva tvåfaktor för en enskild användare
+eller för alla. Den som omfattas möts av uppsättningen vid nästa anrop och kommer inte vidare
+förrän den är klar: servern nekar allt utom kontosidan och själva uppsättningen. Påtvingad
+tvåfaktor går inte att stänga av från kontosidan.
+
+Undantaget är `/api/security`, som en administratör alltid når. Utan den nödutgången skulle en
+administratör som slår på kravet utan att själv ha tvåfaktor låsa ut sig från inställningen som
+skulle stänga av det igen. Rutten är fortfarande skyddad av adminrollen.
+
+Tappar någon sin telefon nollställer en administratör tvåfaktor på kontot under **Hantera**.
 
 ### Roller
+
+Under **Inställningar → Konton** kan en administratör byta användarnamn, sätta nytt lösenord,
+kräva tvåfaktor, nollställa tvåfaktor och stänga av ett konto. En administratör kan varken stänga
+av sitt eget konto eller ta bort sin egen adminroll, så det går inte att låsa ut sig av misstag.
 
 | Roll | Får |
 |---|---|
@@ -262,7 +353,12 @@ för att den sortens fråga ska vara exakt och snabb.
 | GET/POST | `/api/customers/{id}/journal` | Journal. Tidsstämpel och signatur sätts av servern |
 | POST | `/api/customers/{id}/files` | Uppladdning av PDF, DOCX, XLSX, bild |
 | GET | `/api/files/{id}` `/api/files/{id}/thumb` | Hämta fil respektive tumnagel |
-| POST | `/api/onboarding` | Skapar kund + anläggning + första journalraden i ett anrop |
+| POST | `/api/new-facility` | Skapar kund + anläggning + första journalraden i ett anrop |
+| GET/POST | `/api/visits` | Platsbesök före kund |
+| POST | `/api/visits/{id}/convert` | Gör kund och anläggning av ett besök |
+| GET | `/api/sgu/briefing` | Grannbrunnar och statistik inför besök |
+| POST | `/api/sgu/sync` | Hämtar ett län från SGU, endast admin |
+| POST | `/api/share` | Skickar valda uppgifter till extern borrare med e-post |
 | GET/POST | `/api/reminders` | Lista och skapa påminnelser |
 | PATCH | `/api/reminders/{id}` | Kvittera, skjut fram, ändra |
 | POST | `/api/reminders/scan` | Kör automatgenereringen direkt |
@@ -340,6 +436,12 @@ påslaget som nu. Blir det aktuellt att byta: sätt `POSTGRES_HOST`, `POSTGRES_U
 `POSTGRES_PASSWORD`, lägg till en `db`-tjänst i compose, ta en backup, packa upp den och kör
 `python -m app.restore db.json` mot den nya databasen. Appen bygger anslutningssträngen själv och
 kodar lösenordet korrekt, så tecken som `/` och `+` ställer inte till det.
+
+## Tid och tidszon
+
+Allt lagras i UTC och serveras med tidszon, så webbläsaren räknar om till lokal tid. Utan offset
+i tidsstämpeln tolkar webbläsaren den som lokal tid, och en journalrad skriven 22:01 svensk tid
+skulle visas som 20:01. Det gäller särskilt SQLite, som lagrar tidsstämplar utan zon.
 
 ## Att veta om driften
 
