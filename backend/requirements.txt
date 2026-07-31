@@ -13,3 +13,6 @@ Pillow==11.1.0
 pywebpush==2.0.3
 aiosmtplib==3.0.2
 cryptography==44.0.0
+pypdfium2==4.30.1
+qrcode==8.0
+httpx==0.28.1
