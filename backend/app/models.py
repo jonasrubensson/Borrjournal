@@ -35,6 +35,8 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Krav satt på just den här användaren. Ett globalt krav kan också gälla.
+    totp_required: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     last_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -191,6 +193,13 @@ class Reminder(Base):
     title: Mapped[str] = mapped_column(String(200))
     body: Mapped[str] = mapped_column(Text, default="")
     due_date: Mapped[str] = mapped_column(String(10), index=True)
+    # Klockslag på förfallodagen, tomt = hela dagen
+    due_time: Mapped[str] = mapped_column(String(5), default="")
+    # Exakt tidpunkt då påminnelsen ska gå ut, i UTC. Sätts av klienten som
+    # räknar om från lokal tid, så 08:00 betyder 08:00 hos användaren.
+    remind_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     notify_days_before: Mapped[int] = mapped_column(Integer, default=14)
 
     status: Mapped[str] = mapped_column(String(12), default="open", index=True)  # open | done
@@ -245,3 +254,88 @@ class BackupRecord(Base):
     counts: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
     created_by: Mapped[str] = mapped_column(String(120), default="")
+
+
+class SguWell(Base):
+    """Cache av SGU:s brunnsarkiv. Ersätts vid varje synk, ingen egen data här."""
+
+    __tablename__ = "sgu_wells"
+
+    brunnsid: Mapped[str] = mapped_column(String(30), primary_key=True)
+    lanskod: Mapped[str] = mapped_column(String(4), index=True)
+    kommunkod: Mapped[str] = mapped_column(String(6), default="")
+    n: Mapped[float] = mapped_column(Float, index=True)
+    e: Mapped[float] = mapped_column(Float, index=True)
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lagesnoggrannhet: Mapped[str] = mapped_column(String(4), default="")
+    fastighet: Mapped[str] = mapped_column(String(120), default="")
+    ort: Mapped[str] = mapped_column(String(80), default="")
+    borrdatum: Mapped[str] = mapped_column(String(10), default="")
+    totaldjup: Mapped[float | None] = mapped_column(Float, nullable=True)
+    djup_till_berg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    vattenmangd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    grundvattenniva: Mapped[float | None] = mapped_column(Float, nullable=True)
+    foderror_till: Mapped[float | None] = mapped_column(Float, nullable=True)
+    anvandning: Mapped[str] = mapped_column(String(10), default="", index=True)
+    tatning: Mapped[str] = mapped_column(String(10), default="")
+    anmarkning: Mapped[str] = mapped_column(String(255), default="")
+    hamtad_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Visit(Base):
+    """Ett platsbesök innan det finns en kund.
+
+    Poängen är att slippa lägga upp en kund för någon som kanske aldrig blir det.
+    Här sparas bara det som behövs för att åka dit och lämna ett pris. Blir det
+    affär skapas kunden av besöket, och besöket följer med som historik.
+    """
+
+    __tablename__ = "visits"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    visit_no: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+
+    # planerat | genomfort | offert | vunnen | forlorad
+    status: Mapped[str] = mapped_column(String(20), default="planerat", index=True)
+    planned_at: Mapped[str] = mapped_column(String(10), default="")
+
+    contact_name: Mapped[str] = mapped_column(String(200), default="")
+    phone: Mapped[str] = mapped_column(String(40), default="")
+    email: Mapped[str] = mapped_column(String(200), default="")
+
+    property_designation: Mapped[str] = mapped_column(String(120), default="", index=True)
+    address: Mapped[str] = mapped_column(String(200), default="")
+    municipality: Mapped[str] = mapped_column(String(80), default="")
+    coordinates: Mapped[str] = mapped_column(String(80), default="")
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    errand: Mapped[str] = mapped_column(Text, default="")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    quote_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_sent_at: Mapped[str] = mapped_column(String(10), default="")
+    lost_reason: Mapped[str] = mapped_column(String(255), default="")
+
+    customer_id: Mapped[str | None] = mapped_column(
+        ForeignKey("customers.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_by: Mapped[str] = mapped_column(String(120), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class ShareLog(Base):
+    """Vad som skickats ut till externa borrare, och av vem."""
+
+    __tablename__ = "share_log"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    facility_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    visit_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    recipient: Mapped[str] = mapped_column(String(255))
+    subject: Mapped[str] = mapped_column(String(255), default="")
+    fields: Mapped[str] = mapped_column(Text, default="")
+    attachments: Mapped[str] = mapped_column(Text, default="")
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    sent_by: Mapped[str] = mapped_column(String(120), default="")

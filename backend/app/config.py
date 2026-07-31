@@ -40,7 +40,10 @@ class Settings(BaseSettings):
     geocoder_url: str = "https://nominatim.openstreetmap.org/search"
     geocoder_country_code: str = "se"
     geocoder_country_name: str = "Sverige"
-    geocoder_user_agent: str = "Borrjournal/1.3 (internt kundregister)"
+    geocoder_user_agent: str = "Borrjournal (internt kundregister)"
+
+    # SGU:s brunnsarkiv, öppna data. Töm för att stänga av.
+    sgu_base_url: str = "https://resource.sgu.se/oppnadata/grundvatten/brunnar/v1"
 
     class Config:
         env_file = ".env"

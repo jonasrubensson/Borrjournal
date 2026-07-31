@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field
 
@@ -64,8 +64,8 @@ class FacilityIn(BaseModel):
     last_service_at: str = ""
 
 
-class OnboardingIn(BaseModel):
-    """Onboardingformuläret: skapar kund + anläggning + första journalanteckningen."""
+class NewFacilityIn(BaseModel):
+    """Registrering av ny anläggning: skapar kund + anläggning + första journalanteckningen."""
 
     customer: CustomerIn
     facility: FacilityIn
@@ -119,7 +119,8 @@ def user_out(u: User) -> dict:
         "role": u.role,
         "is_active": u.is_active,
         "totp_enabled": u.totp_enabled,
-        "last_login": u.last_login.isoformat() if u.last_login else None,
+        "totp_required": u.totp_required,
+        "last_login": iso_utc(u.last_login) if u.last_login else None,
     }
 
 
@@ -186,7 +187,7 @@ def customer_out(c: Customer, facilities: bool = True) -> dict:
         "address": c.address,
         "municipality": c.municipality,
         "notes": c.notes,
-        "created_at": c.created_at.isoformat() if c.created_at else None,
+        "created_at": iso_utc(c.created_at) if c.created_at else None,
     }
     if facilities:
         d["facilities"] = [facility_out(f) for f in c.facilities]
@@ -203,11 +204,11 @@ def journal_out(j: JournalEntry, files: list[StoredFile] | None = None) -> dict:
         "entry_type": j.entry_type,
         "title": j.title,
         "body": j.body,
-        "created_at": j.created_at.isoformat() if j.created_at else None,
+        "created_at": iso_utc(j.created_at) if j.created_at else None,
         "author_name": j.author_name,
         "corrects_id": j.corrects_id,
         "retracted": j.retracted_at is not None,
-        "retracted_at": j.retracted_at.isoformat() if j.retracted_at else None,
+        "retracted_at": iso_utc(j.retracted_at) if j.retracted_at else None,
         "retracted_by": j.retracted_by,
         "retraction_reason": j.retraction_reason,
         "attachments": [file_out(f) for f in (files or [])],
@@ -226,10 +227,21 @@ def file_out(f: StoredFile) -> dict:
         "size_bytes": f.size_bytes,
         "caption": f.caption,
         "has_thumb": bool(f.thumb_name),
-        "uploaded_at": f.uploaded_at.isoformat() if f.uploaded_at else None,
+        "uploaded_at": iso_utc(f.uploaded_at) if f.uploaded_at else None,
         "uploaded_by": f.uploaded_by,
     }
 
 
-def iso(dt: datetime | None) -> str | None:
-    return dt.isoformat() if dt else None
+def iso_utc(value) -> str | None:
+    """Serialiserar tid med tidszon.
+
+    SQLite lagrar tidsstämplar utan zon, så det som kommer tillbaka är naivt.
+    Skickas det vidare utan offset tolkar webbläsaren det som lokal tid, och
+    en journalrad skriven 22:01 svensk tid visas som 20:01. Allt lagras i UTC,
+    så naiva värden märks som UTC här.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
+    return value.isoformat()  # date, saknar tidszon och behöver ingen

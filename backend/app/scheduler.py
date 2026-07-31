@@ -18,6 +18,7 @@ from .services.notify import DEFAULT_SCHEDULE, SCHEDULE_KEY, get_setting
 
 _last_backup_day: str | None = None
 _last_scan_day: str | None = None
+_last_sgu_day: str | None = None
 
 
 async def _run_backup(conf: dict) -> None:
@@ -31,17 +32,51 @@ async def _run_backup(conf: dict) -> None:
 
 
 async def _run_reminders() -> None:
+    """Genererar de automatiska en gång per dygn."""
     async with SessionLocal() as db:
         created = await reminder_service.generate_auto(db)
+        await reminder_service.backfill_remind_at(db)
+        if created:
+            print(f"[schemaläggare] {created} nya automatiska påminnelser")
+
+
+async def _check_reminders() -> None:
+    """Skickar det som förfallit. Körs ofta, så en påminnelse satt till 07:30
+    går ut 07:30 och inte vid nästa dygnsgenomgång."""
+    async with SessionLocal() as db:
         result = await reminder_service.notify_due(db)
-        print(
-            f"[schemaläggare] påminnelser: {created} nya, {result['reminders']} meddelade "
-            f"(e-post: {result['email']}, push: {result['push']})"
-        )
+        if result["reminders"]:
+            print(
+                f"[schemaläggare] {result['reminders']} påminnelser skickade "
+                f"(e-post: {result['email']}, push: {result['push']})"
+            )
+
+
+async def _run_sgu() -> None:
+    """SGU uppdaterar sina öppna data en gång i veckan, så oftare är onödigt."""
+    from sqlalchemy import func, select
+
+    from .models import SguWell
+    from .services import sgu as sgu_service
+
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(SguWell.lanskod, func.max(SguWell.hamtad_at)).group_by(SguWell.lanskod)
+            )
+        ).all()
+        for lanskod, hamtad in rows:
+            if not sgu_service.is_stale(hamtad, dagar=7):
+                continue
+            try:
+                r = await sgu_service.sync_lan(db, lanskod)
+                print(f"[schemaläggare] SGU {lanskod}: {r['sparade']} brunnar uppdaterade")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[schemaläggare] SGU {lanskod} misslyckades: {exc}")
 
 
 async def loop() -> None:
-    global _last_backup_day, _last_scan_day
+    global _last_backup_day, _last_scan_day, _last_sgu_day
     # Låt appen komma igång innan första kontrollen
     await asyncio.sleep(20)
     while True:
@@ -62,6 +97,14 @@ async def loop() -> None:
             if _last_scan_day != today and after(conf.get("reminder_scan_hour", 6), 0):
                 _last_scan_day = today
                 await _run_reminders()
+
+            # Efter påminnelserna, samma tid på dygnet. Hoppar över län som är färska.
+            if _last_sgu_day != today and after(conf.get("reminder_scan_hour", 6), 30):
+                _last_sgu_day = today
+                await _run_sgu()
+
+            # Förfallna påminnelser kollas varje varv, alltså varje minut
+            await _check_reminders()
 
         except asyncio.CancelledError:
             raise

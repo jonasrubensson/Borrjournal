@@ -22,6 +22,7 @@ from .routers import (
     nearby,
     reminders,
     search,
+    visits,
 )
 from .routers import settings as settings_router
 from .security import hash_password
@@ -69,8 +70,14 @@ async def lifespan(app: FastAPI):
 
         async with _S() as db:
             created = await generate_auto(db)
-            if created:
-                print(f"[borrjournal] {created} påminnelser genererade vid start")
+            from .services.reminders import backfill_remind_at
+
+            fyllda = await backfill_remind_at(db)
+            if created or fyllda:
+                print(
+                    f"[borrjournal] {created} påminnelser genererade, "
+                    f"{fyllda} fick tidpunkt vid start"
+                )
     except Exception as exc:  # noqa: BLE001
         print(f"[borrjournal] kunde inte generera påminnelser vid start: {exc}")
     task = asyncio.create_task(scheduler.loop())
@@ -93,6 +100,7 @@ app.include_router(reminders.router)
 app.include_router(backups.router)
 app.include_router(settings_router.router)
 app.include_router(nearby.router)
+app.include_router(visits.router)
 
 
 @app.get("/api/health")
