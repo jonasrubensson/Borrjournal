@@ -134,6 +134,11 @@ class JournalEntry(Base):
     # Rättelser skapar en ny rad som pekar på originalet
     corrects_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
+    # En dragen anteckning raderas inte, den märks. Historiken ska gå att visa upp.
+    retracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retracted_by: Mapped[str] = mapped_column(String(120), default="")
+    retraction_reason: Mapped[str] = mapped_column(String(255), default="")
+
 
 class StoredFile(Base):
     __tablename__ = "files"

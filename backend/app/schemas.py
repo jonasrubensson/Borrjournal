@@ -206,6 +206,10 @@ def journal_out(j: JournalEntry, files: list[StoredFile] | None = None) -> dict:
         "created_at": j.created_at.isoformat() if j.created_at else None,
         "author_name": j.author_name,
         "corrects_id": j.corrects_id,
+        "retracted": j.retracted_at is not None,
+        "retracted_at": j.retracted_at.isoformat() if j.retracted_at else None,
+        "retracted_by": j.retracted_by,
+        "retraction_reason": j.retraction_reason,
         "attachments": [file_out(f) for f in (files or [])],
     }
 
