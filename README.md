@@ -193,6 +193,25 @@ Nginx Proxy Manager (443) → app (FastAPI + uvicorn) → Postgres
 | Notiser | Webbpush (VAPID) + SMTP | Inga tredjepartstjänster, inget konto att skapa |
 | Schemaläggning | asyncio-loop i appen | Inget Celery, ingen extra container att hålla vid liv |
 
+### Textstorlek
+
+Under **Inställningar → Notiser** finns fyra textstorlekar. Valet sparas per enhet, så en montör
+kan köra stor text i mobilen medan kontorsdatorn står kvar på normal. Allt skalar med: rubriker,
+tabeller, etiketter och knappar, så linjeringen håller även i största läget.
+
+Inmatningsfält är aldrig mindre än 16 px, eftersom iOS annars zoomar in automatiskt när man
+klickar i ett fält och lämnar sidan sned.
+
+### Lägg till på hemskärmen
+
+Samma ställe. Vad knappen gör beror på webbläsaren, och det är inget jag kan påverka:
+
+* **Android, Chrome och Edge:** en riktig knapp som öppnar systemets installationsdialog.
+* **iPhone och iPad:** Safari tillåter inte att en webbplats installerar sig själv, så här visas i
+  stället tre steg: Dela → Lägg till på hemskärmen → öppna därifrån. Det måste göras från Safari,
+  ingen annan webbläsare på iOS kan installera.
+* **Utan HTTPS:** varken Android eller iOS erbjuder installation alls. Kortet säger det rakt ut.
+
 ### Tvåfaktor
 
 Under **Inställningar → Notiser** kan varje användare slå på tvåfaktor för sitt eget konto.
@@ -299,6 +318,28 @@ uvicorn app.main:app --reload
 ```
 
 Standarddatabasen är då SQLite i `backend/borrjournal.db`, ingen Postgres behövs.
+
+## När är Postgres värt besväret?
+
+SQLite räcker längre än de flesta tror. Byt när något av det här stämmer, inte innan:
+
+| Byt när | Varför |
+|---|---|
+| Fler än ungefär tio personer skriver samtidigt | SQLite serialiserar skrivningar. En skrivning tar millisekunder, så det är först vid många samtidiga som kön märks. |
+| Du vill koppla Power BI, Excel eller ett bokföringssystem mot databasen | SQLite är en fil i en Docker-volym. Postgres har en port att koppla mot, med egna läsbehörigheter. |
+| Registret passerar grovt räknat 100 000 anläggningar | Under det spelar det ingen roll. Ditt register lär hamna i tusental. |
+| Du vill ha replikering eller återställning till en viss tidpunkt | SQLite har ingen motsvarighet till WAL-arkivering och standby. |
+| Flera appinstanser ska dela databas | En SQLite-fil vill helst ha en skrivande process. |
+
+Och lika viktigt: **byt inte** för att det känns proffsigare, eller för att komma runt ett problem
+som inte är databasens fel. Två containrar är dubbelt så mycket att hålla vid liv, och ett
+databaslösenord är en sak till som kan vara fel. Det kostade oss ett par kvällar redan.
+
+För en borrfirma med några montörer och några tusen anläggningar är SQLite rätt val, med WAL
+påslaget som nu. Blir det aktuellt att byta: sätt `POSTGRES_HOST`, `POSTGRES_USER` och
+`POSTGRES_PASSWORD`, lägg till en `db`-tjänst i compose, ta en backup, packa upp den och kör
+`python -m app.restore db.json` mot den nya databasen. Appen bygger anslutningssträngen själv och
+kodar lösenordet korrekt, så tecken som `/` och `+` ställer inte till det.
 
 ## Att veta om driften
 
