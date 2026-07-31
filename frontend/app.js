@@ -560,18 +560,64 @@ async function viewJournalAll() {
 }
 
 function journalEntryHtml(j, showCustomer = false) {
+  const struken = j.retracted;
+  const kanRedigera = !showCustomer && S.user.role !== "lasare";
   return `<div class="jentry"${showCustomer ? ` style="cursor:pointer" onclick="go('kund','${j.customer_id}')"` : ""}>
     <div class="jmeta"><span class="dt">${dt(j.created_at, false)}</span>${dt(j.created_at).slice(11)}<br>${esc(j.author_name)}</div>
-    <div class="jbody">
-      <div class="h"><span class="ttl">${esc(j.title)}</span><span class="tag n">${esc(j.entry_type)}</span>
+    <div class="jbody"${struken ? ' style="opacity:.62"' : ""}>
+      <div class="h"><span class="ttl"${struken ? ' style="text-decoration:line-through"' : ""}>${esc(j.title)}</span>
+        <span class="tag n">${esc(j.entry_type)}</span>
+        ${struken ? `<span class="tag action">Struken</span>` : ""}
         ${showCustomer && j.customer ? `<span class="tsub">${esc(j.customer.name)}</span>` : ""}</div>
-      <p>${esc(j.body)}</p>
+      <p${struken ? ' style="text-decoration:line-through"' : ""}>${esc(j.body)}</p>
+      ${
+        struken
+          ? `<p class="tsub" style="margin-top:6px">Struken ${dt(j.retracted_at)} av ${esc(j.retracted_by)}${
+              j.retraction_reason ? ": " + esc(j.retraction_reason) : ""
+            }</p>`
+          : ""
+      }
       ${
         j.attachments && j.attachments.length
           ? `<div class="jatt">${j.attachments.map((a) => `<a href="#" onclick="openFile('${a.id}');return false">↳ ${esc(a.filename)}</a>`).join("")}</div>`
           : ""
       }
+      ${
+        kanRedigera
+          ? `<div class="row" style="margin-top:8px;gap:8px">
+        ${
+          struken
+            ? `<button class="btn ghost sm" onclick="retractEntry('${j.id}', true)">Ångra strykning</button>`
+            : `<button class="btn ghost sm" onclick="retractEntry('${j.id}', false)">Stryk</button>`
+        }
+        ${S.user.role === "admin" ? `<button class="btn danger sm" onclick="deleteEntry('${j.id}')">Radera</button>` : ""}
+      </div>`
+          : ""
+      }
     </div></div>`;
+}
+
+async function retractEntry(id, undo) {
+  let body = { undo: true };
+  if (!undo) {
+    const reason = prompt(
+      "Varför stryks anteckningen? Texten står kvar men märks som struken, så historiken är intakt."
+    );
+    if (reason === null) return;
+    body = { reason };
+  }
+  await api(`/journal/${id}`, { method: "PATCH", body });
+  toast(undo ? "Strykningen ångrad" : "Anteckningen struken");
+  S.data.journal = await api(`/customers/${S.data.customer.id}/journal`);
+  renderTab();
+}
+
+async function deleteEntry(id) {
+  if (!confirm("Radera anteckningen helt? Det går inte att ångra.\n\nÖverväg Stryk i stället, då bevaras historiken.")) return;
+  await api(`/journal/${id}`, { method: "DELETE" });
+  toast("Anteckningen raderad");
+  S.data.journal = await api(`/customers/${S.data.customer.id}/journal`);
+  renderTab();
 }
 
 /* ---------------- kundvy ---------------- */
@@ -607,6 +653,7 @@ async function viewCustomer() {
         <h1>${esc(c.name)}</h1>
         <p class="lead">${esc(c.property_designation || "")}${c.municipality ? ", " + esc(c.municipality) : ""}</p></div>
       <div class="row">${tag(c.status)}
+        ${S.user.role === "lasare" ? "" : `<button class="btn ghost sm" onclick="editCustomer()">Redigera kund</button>`}
         <button class="btn sm" onclick="go('kund','${c.id}/journal')">+ Journalanteckning</button></div>
     </div>
     <div class="facts">
@@ -616,6 +663,7 @@ async function viewCustomer() {
       <div class="fact"><div class="k">Anläggningar</div><div class="v mono" style="font-size:13.5px">${c.facilities.map((x) => esc(x.facility_no)).join(", ") || "—"}</div></div>
       <div class="fact"><div class="k">Service senast</div><div class="v mono" style="font-size:13.5px">${esc(facility?.service_due || "—")}</div></div>
     </div>
+    <div id="cedit"></div>
   </div>
   <div class="grid2">
     <div>
@@ -842,10 +890,14 @@ function tabFacilities(c) {
       S.user.role === "lasare"
         ? ""
         : `<div class="row" style="margin-top:12px">
-      <button class="btn ghost sm" onclick="markService('${f.id}')">Registrera service idag</button>
-      <button class="btn ghost sm" onclick="setStatus('${f.id}','action')">Flagga åtgärd krävs</button>
-      <button class="btn ghost sm" onclick="setStatus('${f.id}','ok')">Rensa flagga</button>
-    </div>`
+      <button class="btn ghost sm" onclick="editFacility('${f.id}')">Redigera</button>
+      <button class="btn sm" onclick="pumpChange('${f.id}')">Byt pump</button>
+      <button class="btn ghost sm" onclick="markService('${f.id}')">Service idag</button>
+      <button class="btn ghost sm" onclick="setStatus('${f.id}','${f.status_manual === "action" ? "ok" : "action"}')">
+        ${f.status_manual === "action" ? "Rensa flagga" : "Flagga åtgärd"}</button>
+      <button class="btn danger sm" onclick="removeFacility('${f.id}','${esc(f.facility_no)}')">Ta bort</button>
+    </div>
+    <div id="fedit-${f.id}"></div>`
     }
   </div>`
       )
@@ -866,6 +918,267 @@ async function setStatus(facilityId, status) {
   await api(`/facilities/${facilityId}`, { method: "PATCH", body: { status } });
   toast(status === "action" ? "Flaggad för åtgärd" : "Flaggan rensad");
   viewCustomer();
+}
+
+
+/* ---------------- redigera och ta bort ---------------- */
+function fld(id, label, value, type = "text", extra = "") {
+  return `<div><label class="f" for="${id}">${label}</label>
+    <input id="${id}" type="${type}" value="${esc(value ?? "")}" ${extra}
+      ${type === "number" ? 'step="any" inputmode="decimal"' : ""}></div>`;
+}
+function sel(id, label, value, options) {
+  return `<div><label class="f" for="${id}">${label}</label>
+    <select id="${id}">${options
+      .map((o) => `<option${String(value) === String(o) ? " selected" : ""}>${esc(o)}</option>`)
+      .join("")}</select></div>`;
+}
+const val = (id) => (document.getElementById(id) || {}).value ?? "";
+// Alla webbläsare har inte scrollIntoView med optioner. Ska aldrig fälla en knapp.
+const scrollTill = (el) => {
+  try {
+    if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } catch (_) {}
+};
+const numVal = (id) => {
+  const v = val(id).trim().replace(",", ".");
+  return v === "" ? null : isNaN(parseFloat(v)) ? null : parseFloat(v);
+};
+
+function editFacility(facilityId) {
+  const f = S.data.customer.facilities.find((x) => x.id === facilityId);
+  const box = document.getElementById("fedit-" + facilityId);
+  if (!f || !box) return;
+  if (box.innerHTML) return (box.innerHTML = "");
+
+  box.innerHTML = `
+  <div class="card" style="margin-top:14px;border-color:#C9DFE3">
+    <div class="hd" style="background:#F4F9FA"><h2>Redigera ${esc(f.facility_no)}</h2></div>
+    <div class="pad">
+      <fieldset><legend>Brunn</legend><div class="fgrid">
+        ${sel("e_type", "Typ", f.facility_type, ["Bergborrad brunn", "Energibrunn", "Grävd brunn", "Filterbrunn"])}
+        ${fld("e_drilled", "Borrdatum", f.drilled_at, "date")}
+        ${fld("e_soil", "Jorddjup (m)", f.soil_depth_m, "number")}
+        ${fld("e_casing", "Foderrör (m)", f.casing_length_m, "number")}
+        ${fld("e_depth", "Totalt djup (m)", f.total_depth_m, "number")}
+        ${fld("e_water", "Vattennivå (m)", f.water_level_m, "number")}
+        ${fld("e_cap", "Kapacitet (l/h)", f.capacity_lph, "number")}
+        ${fld("e_coord", "Koordinater", f.coordinates, "text", 'placeholder="59.72, 18.94 eller N 6620123 E 674321"')}
+      </div></fieldset>
+
+      <fieldset style="margin-top:14px"><legend>Pump</legend><div class="fgrid">
+        ${fld("e_pman", "Tillverkare", f.pump_manufacturer)}
+        ${fld("e_pmod", "Modell", f.pump_model)}
+        ${fld("e_pser", "Serienummer", f.pump_serial)}
+        ${fld("e_pdep", "Pumpdjup (m)", f.pump_depth_m, "number")}
+        ${fld("e_ptank", "Tryckkärl", f.pressure_tank)}
+        ${fld("e_pinst", "Installerad", f.pump_installed_at, "date")}
+        ${sel("e_pstat", "Pumpstatus", f.pump_status, ["", "Installerad", "Ska installeras", "Kunden ordnar själv", "Ingen pump (energibrunn)"])}
+      </div>
+      <p class="hint">Ska pumpen bytas ut mot en ny, använd <strong>Byt pump</strong> i stället.
+        Då skrivs den gamla pumpen in i journalen först.</p></fieldset>
+
+      <fieldset style="margin-top:14px"><legend>Service och giltighet</legend><div class="fgrid">
+        ${sel("e_int", "Serviceintervall (mån)", f.service_interval_months, [12, 24, 36, 0])}
+        ${fld("e_last", "Senaste service", f.last_service_at, "date")}
+        ${fld("e_wsamp", "Vattenprov taget", f.water_sample_at, "date")}
+        ${sel("e_wval", "Provet giltigt (mån)", f.water_sample_valid_months, [12, 24, 36, 60])}
+        ${fld("e_clabel", "Intyg, benämning", f.certificate_label, "text", 'placeholder="T.ex. entreprenörsintyg"')}
+        ${fld("e_cexp", "Intyget går ut", f.certificate_expires_at, "date")}
+      </div></fieldset>
+
+      <div><label class="f" for="e_bedrock">Berg och lager</label>
+        <textarea id="e_bedrock">${esc(f.bedrock_notes || "")}</textarea></div>
+      <div><label class="f" for="e_access">Åtkomst</label>
+        <textarea id="e_access">${esc(f.access_notes || "")}</textarea></div>
+
+      <div class="row" style="margin-top:14px">
+        <button class="btn pri sm" onclick="saveFacility('${f.id}')">Spara</button>
+        <button class="btn ghost sm" onclick="document.getElementById('fedit-${f.id}').innerHTML=''">Avbryt</button>
+      </div>
+    </div></div>`;
+  scrollTill(box);
+}
+
+async function saveFacility(facilityId) {
+  const body = {
+    facility_type: val("e_type"),
+    drilled_at: val("e_drilled"),
+    soil_depth_m: numVal("e_soil"),
+    casing_length_m: numVal("e_casing"),
+    total_depth_m: numVal("e_depth"),
+    water_level_m: numVal("e_water"),
+    capacity_lph: numVal("e_cap"),
+    coordinates: val("e_coord"),
+    pump_manufacturer: val("e_pman").trim(),
+    pump_model: val("e_pmod").trim(),
+    pump_serial: val("e_pser").trim(),
+    pump_depth_m: numVal("e_pdep"),
+    pressure_tank: val("e_ptank"),
+    pump_installed_at: val("e_pinst"),
+    pump_status: val("e_pstat"),
+    service_interval_months: parseInt(val("e_int"), 10) || 0,
+    last_service_at: val("e_last"),
+    water_sample_at: val("e_wsamp"),
+    water_sample_valid_months: parseInt(val("e_wval"), 10) || 36,
+    certificate_label: val("e_clabel"),
+    certificate_expires_at: val("e_cexp"),
+    bedrock_notes: val("e_bedrock"),
+    access_notes: val("e_access"),
+  };
+  try {
+    await api(`/facilities/${facilityId}`, { method: "PATCH", body });
+    await api("/reminders/scan", { method: "POST" });
+    toast("Anläggningen sparad");
+    viewCustomer();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function pumpChange(facilityId) {
+  const f = S.data.customer.facilities.find((x) => x.id === facilityId);
+  const box = document.getElementById("fedit-" + facilityId);
+  if (!f || !box) return;
+  const gammal = [f.pump_manufacturer, f.pump_model].filter(Boolean).join(" ") || "ingen pump";
+  box.innerHTML = `
+  <div class="card" style="margin-top:14px;border-color:#E3CE9E">
+    <div class="hd" style="background:#FBF5E8"><h2>Byt pump på ${esc(f.facility_no)}</h2></div>
+    <div class="pad">
+      <p class="lead" style="margin-top:0">Nuvarande: <strong>${esc(gammal)}</strong>${
+        f.pump_serial ? ` (serienr ${esc(f.pump_serial)})` : ""
+      }. Den skrivs in i journalen innan den nya ersätter den, så historiken finns kvar.</p>
+      <div class="fgrid">
+        ${fld("np_man", "Tillverkare", f.pump_manufacturer, "text", 'placeholder="Grundfos"')}
+        ${fld("np_mod", "Modell", "", "text", 'placeholder="SQ 2-70"')}
+        ${fld("np_ser", "Serienummer", "")}
+        ${fld("np_dep", "Pumpdjup (m)", f.pump_depth_m, "number")}
+        ${fld("np_tank", "Tryckkärl", f.pressure_tank)}
+        ${fld("np_date", "Installerad", new Date().toISOString().slice(0, 10), "date")}
+      </div>
+      <label class="f" for="np_note">Anteckning till journalen</label>
+      <textarea id="np_note" placeholder="Varför byttes pumpen, vad noterades vid uppdragning."></textarea>
+      <div class="row" style="margin-top:14px">
+        <button class="btn pri sm" onclick="savePumpChange('${f.id}')">Registrera pumpbyte</button>
+        <button class="btn ghost sm" onclick="document.getElementById('fedit-${f.id}').innerHTML=''">Avbryt</button>
+      </div>
+    </div></div>`;
+  scrollTill(box);
+}
+
+async function savePumpChange(facilityId) {
+  if (!val("np_mod").trim()) return toast("Fyll i modell på den nya pumpen", true);
+  try {
+    await api(`/facilities/${facilityId}/pump-change`, {
+      method: "POST",
+      body: {
+        pump_manufacturer: val("np_man"),
+        pump_model: val("np_mod"),
+        pump_serial: val("np_ser"),
+        pump_depth_m: numVal("np_dep"),
+        pressure_tank: val("np_tank"),
+        pump_installed_at: val("np_date"),
+        pump_status: "Installerad",
+        note: val("np_note"),
+      },
+    });
+    toast("Pumpbytet registrerat och journalfört");
+    viewCustomer();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function removeFacility(facilityId, label) {
+  if (
+    !confirm(
+      `Ta bort ${label}?\n\nJournalanteckningarna och filerna finns kvar på kunden, men lossas från anläggningen. Påminnelser för den försvinner.`
+    )
+  )
+    return;
+  try {
+    await api(`/facilities/${facilityId}`, { method: "DELETE" });
+    toast(`${label} borttagen`);
+    viewCustomer();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function editCustomer() {
+  const c = S.data.customer;
+  const box = document.getElementById("cedit");
+  if (!box) return;
+  if (box.innerHTML) return (box.innerHTML = "");
+  box.innerHTML = `
+  <div class="card" style="margin-top:14px;border-color:#C9DFE3">
+    <div class="hd" style="background:#F4F9FA"><h2>Redigera ${esc(c.customer_no)}</h2></div>
+    <div class="pad">
+      <div class="fgrid">
+        ${fld("c_name", "Namn", c.name)}
+        ${sel("c_type", "Kundtyp", c.customer_type, ["Privat", "Företag", "Förening", "Kommun"])}
+        ${fld("c_phone", "Telefon", c.phone, "tel")}
+        ${fld("c_email", "E-post", c.email, "email")}
+        ${fld("c_org", "Person- eller org.nr", c.org_no)}
+        ${fld("c_prop", "Fastighetsbeteckning", c.property_designation)}
+        ${fld("c_addr", "Adress", c.address)}
+        ${fld("c_mun", "Kommun", c.municipality)}
+        ${fld("c_inv", "Fakturaadress", c.invoice_address)}
+      </div>
+      <label class="f" for="c_notes">Anteckningar om kunden</label>
+      <textarea id="c_notes">${esc(c.notes || "")}</textarea>
+      <div class="row" style="margin-top:14px">
+        <button class="btn pri sm" onclick="saveCustomer()">Spara</button>
+        <button class="btn ghost sm" onclick="document.getElementById('cedit').innerHTML=''">Avbryt</button>
+        ${
+          S.user.role === "admin"
+            ? `<button class="btn danger sm" style="margin-left:auto" onclick="removeCustomer()">Ta bort kunden helt</button>`
+            : ""
+        }
+      </div>
+    </div></div>`;
+}
+
+async function saveCustomer() {
+  if (!val("c_name").trim()) return toast("Kunden behöver ett namn", true);
+  try {
+    await api(`/customers/${S.data.customer.id}`, {
+      method: "PATCH",
+      body: {
+        name: val("c_name").trim(),
+        customer_type: val("c_type"),
+        phone: val("c_phone"),
+        email: val("c_email"),
+        org_no: val("c_org"),
+        property_designation: val("c_prop"),
+        address: val("c_addr"),
+        municipality: val("c_mun"),
+        invoice_address: val("c_inv"),
+        notes: val("c_notes"),
+      },
+    });
+    toast("Kunden sparad");
+    viewCustomer();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function removeCustomer() {
+  const c = S.data.customer;
+  const svar = prompt(
+    `Detta raderar ${c.name} med alla anläggningar, journalanteckningar, filer och bilder. Det går inte att ångra.\n\nSkriv kundnumret ${c.customer_no} för att bekräfta:`
+  );
+  if (svar === null) return;
+  if (svar.trim().toUpperCase() !== c.customer_no.toUpperCase()) return toast("Fel kundnummer, inget raderat", true);
+  try {
+    await api(`/customers/${c.id}`, { method: "DELETE" });
+    toast(`${c.name} raderad`);
+    S.data.customers = null;
+    go("kunder");
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 /* ---------------- filer ---------------- */
@@ -1178,6 +1491,7 @@ async function submitOnboarding() {
 const PUSH = {
   supported: () =>
     "serviceWorker" in navigator && "PushManager" in window && "Notification" in window,
+  secure: () => window.isSecureContext === true,
   isIos: () =>
     /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1),
@@ -1268,6 +1582,10 @@ async function testPush() {
 
 async function pushBanner() {
   const state = await PUSH.state();
+  if (!PUSH.secure())
+    return `<div class="hint" style="color:var(--brass)">Notiser kräver HTTPS. Sidan körs över vanlig HTTP,
+      så webbläsaren tillåter varken notiser eller installation på hemskärmen. Allt annat fungerar,
+      och påminnelser via e-post går fram som vanligt.</div>`;
   if (state === "saknas")
     return `<div class="hint">Den här webbläsaren stöder inte notiser. E-post fungerar ändå.</div>`;
   if (state === "nekad")
@@ -1484,8 +1802,18 @@ async function runScanFor(customerId) {
 /* ---------------- jobb i närheten ---------------- */
 const GEO = {
   supported: () => "geolocation" in navigator,
+  // Platstjänst, service workers och notiser kräver säker kontext: HTTPS eller localhost.
+  secure: () => window.isSecureContext === true,
   get: () =>
     new Promise((resolve, reject) => {
+      if (!GEO.secure())
+        return reject(
+          new Error(
+            "Platstjänster kräver HTTPS. Sidan körs över vanlig HTTP, och då blockerar " +
+              "webbläsaren positionen. Sätt ett certifikat i din reverse proxy, eller " +
+              "skriv in koordinaten för hand så länge."
+          )
+        );
       if (!GEO.supported()) return reject(new Error("Enheten har ingen platstjänst."));
       navigator.geolocation.getCurrentPosition(
         (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude, acc: pos.coords.accuracy }),
@@ -1568,7 +1896,12 @@ async function viewNearby() {
           <option value="0"${!onlyJobs ? " selected" : ""}>Alla anläggningar</option>
         </select></div>
     </div>
-    <div id="geohint" class="hint"></div>
+    <div id="geohint" class="hint">${
+      GEO.secure()
+        ? ""
+        : `<span style="color:var(--brass)">Sidan körs över HTTP, så webbläsaren blockerar platstjänster.
+           Klistra in en koordinat nedan, eller sätt upp HTTPS i din reverse proxy.</span>`
+    }</div>
   </div></div>
   <div id="nearres"></div>`);
 
@@ -1944,7 +2277,7 @@ async function showRestore(id) {
         <button class="btn ghost sm" onclick="document.getElementById('restorebox').innerHTML=''">Stäng</button>
       </div>
     </div></div>`;
-  $("#restorebox").scrollIntoView({ behavior: "smooth", block: "start" });
+  scrollTill($("#restorebox"));
 }
 
 function copySteps(json) {
