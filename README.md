@@ -65,6 +65,42 @@ miljön och lägga till en `db`-tjänst i compose. Appen bygger anslutningssträ
 lösenordet korrekt. Flytta data genom att ta en backup, packa upp den och köra
 `python -m app.restore db.json` mot den nya databasen.
 
+## Ändra och ta bort
+
+| Vad | Var | Vem |
+|---|---|---|
+| Redigera kund | Knappen **Redigera kund** i kundhuvudet | tekniker, admin |
+| Redigera anläggning, inklusive pumpuppgifter | Fliken **Anläggning** → **Redigera** | tekniker, admin |
+| Byta ut en pump | Fliken **Anläggning** → **Byt pump** | tekniker, admin |
+| Lägga till anläggning på befintlig kund | Fliken **Anläggning** → **Lägg till anläggning** | tekniker, admin |
+| Ta bort anläggning | Fliken **Anläggning** → **Ta bort** | tekniker, admin |
+| Stryka en journalanteckning | **Stryk** under anteckningen | tekniker, admin |
+| Radera journalanteckning helt | **Radera** under anteckningen | admin |
+| Radera kund med allt innehåll | **Redigera kund** → **Ta bort kunden helt** | admin |
+
+### Pumpbyte i stället för överskrivning
+
+**Byt pump** skriver först en journalrad med den gamla pumpen och dess serienummer, sedan sätts
+den nya. Skriver du bara över modellen i redigeringsformuläret försvinner historiken, och då kan
+du inte längre svara på frågan vilka kunder som haft en viss serie. Det är just den frågan
+pumpflottan finns för.
+
+### Journalen stryks, den redigeras inte
+
+En anteckning som visar sig vara fel stryks med en angiven anledning. Texten står kvar, överstruken,
+tillsammans med vem som strök den och när. Det går att ångra. Poängen med en journal är att det ska
+gå att se vad som stod och vem som ändrade sig, annars är den inget värd som underlag i efterhand.
+Rena felinmatningar kan en administratör radera på riktigt.
+
+Att ta bort en anläggning raderar inte journalen. Anteckningarna ligger kvar på kunden, men lossas
+från anläggningen. Påminnelser knutna till den försvinner.
+
+### Uppgraderingar behåller data
+
+Vid start läggs kolumner som tillkommit sedan databasen skapades till automatiskt. Bara tillägg,
+aldrig ändringar eller borttag. Du kan alltså byta ut koden mot en nyare version utan att tömma
+databasen. Byggs schemat om på riktigt behövs Alembic.
+
 ## Jobb i närheten
 
 Två situationer, samma underlag:
@@ -99,6 +135,15 @@ Omvandlingen SWEREF 99 TM ↔ WGS84 är Gauss-Krügers formler för GRS 80. Den 
 sätt: rundgång fram och tillbaka avviker mindre än en hundradels millimeter, och en punkt på
 centralmeridianen (15°E) ger exakt E = 500000, vilket den ska per definition. Den är däremot inte
 kontrollerad mot Lantmäteriets officiella testpunkter.
+
+### Platstjänster kräver HTTPS
+
+`navigator.geolocation` fungerar bara i säker kontext, alltså HTTPS eller `localhost`. Öppnar du
+appen på `http://192.168.x.x` blockerar webbläsaren positionen utan att fråga. Detsamma gäller
+notiser och installation på hemskärmen. Appen säger till om detta i klartext i stället för att
+bara misslyckas, och koordinater går alltid att skriva eller klistra in för hand.
+
+Fixa certifikatet i din reverse proxy, så fungerar både position och notiser.
 
 **Det här kan inte göras:** appen kan inte meddela dig av sig själv när du råkar köra förbi ett
 jobb. Webbläsare tillåter inte att en webbapp läser positionen i bakgrunden, av goda skäl. Det
@@ -173,6 +218,11 @@ för att den sortens fråga ska vara exakt och snabb.
 | GET/PUT | `/api/backups/schedule` | Nattlig backup: tid och gallring |
 | GET/PUT | `/api/notifications/email` | SMTP-inställningar, lösenordet returneras aldrig |
 | POST | `/api/notifications/push/subscribe` | Registrera enhet för notiser |
+| DELETE | `/api/facilities/{id}` | Ta bort anläggning, journalen lossas men behålls |
+| POST | `/api/facilities/{id}/pump-change` | Byt pump och journalför bytet |
+| DELETE | `/api/customers/{id}` | Radera kund med allt, endast admin |
+| PATCH | `/api/journal/{id}` | Stryk eller ångra strykning |
+| DELETE | `/api/journal/{id}` | Radera anteckning, endast admin |
 | GET | `/api/nearby` | Jobb nära en position eller en tolkad koordinat |
 | GET | `/api/facilities/{id}/nearby` | Vad som kan slås ihop med resan dit |
 | GET | `/api/coordinates/parse` | Tolkar inklistrad koordinat, för direktrespons i formuläret |
