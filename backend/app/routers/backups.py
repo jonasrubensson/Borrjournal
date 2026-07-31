@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
+from ..schemas import iso_utc
 from ..models import BackupRecord, User
 from ..security import log_action, require_admin
 from ..services import backup as svc
@@ -23,7 +24,7 @@ def out(r: BackupRecord) -> dict:
         "trigger": r.trigger,
         "status": r.status,
         "detail": r.detail,
-        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "created_at": iso_utc(r.created_at) if r.created_at else None,
         "created_by": r.created_by,
         "exists": os.path.exists(os.path.join(svc.BACKUP_DIR, r.filename)),
     }

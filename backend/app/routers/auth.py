@@ -7,13 +7,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..models import User
-from ..schemas import LoginIn, UserIn, user_out
+from ..schemas import LoginIn, UserIn, iso_utc, user_out
 from ..security import (
     create_token,
     current_user,
     hash_password,
     log_action,
+    needs_totp_setup,
     require_admin,
+    totp_globally_required,
     verify_password,
 )
 
@@ -50,12 +52,19 @@ async def login(payload: LoginIn, request: Request, db: AsyncSession = Depends(g
     user.last_login = datetime.now(timezone.utc)
     await db.commit()
     await log_action(db, "LOGIN", actor=user.username, request=request)
-    return {"token": create_token(user), "user": user_out(user)}
+    return {
+        "token": create_token(user),
+        "user": user_out(user),
+        "totp_setup_required": await needs_totp_setup(db, user),
+    }
 
 
 @router.get("/me")
-async def me(user: User = Depends(current_user)):
-    return user_out(user)
+async def me(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    data = user_out(user)
+    data["totp_setup_required"] = await needs_totp_setup(db, user)
+    data["totp_required"] = user.totp_required or await totp_globally_required(db)
+    return data
 
 
 @router.post("/me/password")
@@ -115,6 +124,11 @@ async def totp_disable(
     """Kräver lösenord, annars räcker en obevakad skärm för att slå av skyddet."""
     if not verify_password(payload.get("password", ""), user.hashed_password):
         raise HTTPException(status_code=401, detail="Fel lösenord")
+    if user.totp_required or await totp_globally_required(db):
+        raise HTTPException(
+            status_code=403,
+            detail="Tvåfaktor är obligatorisk för ditt konto och kan inte stängas av.",
+        )
     user.totp_enabled = False
     user.totp_secret = None
     await db.commit()
@@ -189,7 +203,30 @@ async def update_user(
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=404, detail="Användaren finns inte")
-    for field in ("full_name", "email", "role", "is_active"):
+
+    # Byt användarnamn. Inloggningen bygger på id, så gamla sessioner överlever.
+    if payload.get("username") and payload["username"] != user.username:
+        nytt = payload["username"].strip()
+        if len(nytt) < 3:
+            raise HTTPException(status_code=400, detail="Användarnamnet måste vara minst 3 tecken")
+        upptaget = (
+            await db.execute(select(User.id).where(User.username == nytt))
+        ).first()
+        if upptaget:
+            raise HTTPException(status_code=409, detail="Användarnamnet är upptaget")
+        user.username = nytt
+
+    if "role" in payload and payload["role"] not in {"admin", "tekniker", "lasare"}:
+        raise HTTPException(status_code=400, detail="Okänd roll")
+
+    # En administratör får inte stänga av eller degradera sig själv och bli utelåst
+    if user.id == admin.id:
+        if payload.get("is_active") is False:
+            raise HTTPException(status_code=400, detail="Du kan inte stänga av ditt eget konto")
+        if payload.get("role") and payload["role"] != "admin":
+            raise HTTPException(status_code=400, detail="Du kan inte ta bort din egen adminroll")
+
+    for field in ("full_name", "email", "role", "is_active", "totp_required"):
         if field in payload:
             setattr(user, field, payload[field])
     if payload.get("new_password"):
@@ -206,6 +243,36 @@ async def update_user(
     return user_out(user)
 
 
+@router.get("/security")
+async def read_security(_: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    from ..services.notify import get_setting
+
+    return await get_setting(db, "security", {"require_totp_all": False})
+
+
+@router.put("/security")
+async def write_security(
+    payload: dict,
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from ..services.notify import get_setting, save_setting
+
+    conf = await get_setting(db, "security", {"require_totp_all": False})
+    if "require_totp_all" in payload:
+        conf["require_totp_all"] = bool(payload["require_totp_all"])
+    await save_setting(db, "security", conf)
+    await log_action(
+        db,
+        "SECURITY_UPDATE",
+        actor=admin.username,
+        request=request,
+        detail=f"kräv tvåfaktor för alla: {conf['require_totp_all']}",
+    )
+    return conf
+
+
 @router.get("/audit")
 async def audit(
     limit: int = 100, _: User = Depends(require_admin), db: AsyncSession = Depends(get_db)
@@ -217,7 +284,7 @@ async def audit(
     ).scalars().all()
     return [
         {
-            "at": r.at.isoformat() if r.at else None,
+            "at": iso_utc(r.at) if r.at else None,
             "actor": r.actor,
             "action": r.action,
             "object_type": r.object_type,

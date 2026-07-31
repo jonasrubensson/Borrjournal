@@ -7,7 +7,7 @@ from ..models import Customer, Facility, JournalEntry, User
 from ..schemas import (
     CustomerIn,
     FacilityIn,
-    OnboardingIn,
+    NewFacilityIn,
     customer_out,
     facility_out,
 )
@@ -261,10 +261,10 @@ async def pump_fleet(_: User = Depends(current_user), db: AsyncSession = Depends
     ]
 
 
-# ---------- onboarding ----------
-@router.post("/onboarding", status_code=201)
-async def onboarding(
-    payload: OnboardingIn,
+# ---------- registrering av ny anläggning ----------
+@router.post("/new-facility", status_code=201)
+async def register_facility(
+    payload: NewFacilityIn,
     request: Request,
     user: User = Depends(require_write),
     db: AsyncSession = Depends(get_db),
@@ -292,7 +292,7 @@ async def onboarding(
         customer_id=customer.id,
         facility_id=facility.id,
         entry_type="Registrering",
-        title=f"{facility.facility_no} registrerad via onboarding",
+        title=f"{facility.facility_no} registrerad",
         body=payload.first_note or "Anläggningen registrerades i systemet.",
         author_id=user.id,
         author_name=user.full_name or user.username,
@@ -304,7 +304,7 @@ async def onboarding(
     await generate_auto(db)
     await log_action(
         db,
-        "ONBOARDING",
+        "FACILITY_REGISTER",
         actor=user.username,
         object_type="facility",
         object_id=facility.id,

@@ -3,6 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
+from ..schemas import iso_utc
 from ..models import PushSubscription, User
 from ..security import current_user, log_action, require_admin
 from ..services.notify import (
@@ -134,8 +135,8 @@ async def push_status(user: User = Depends(current_user), db: AsyncSession = Dep
             {
                 "id": r.id,
                 "user_agent": r.user_agent,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-                "last_used_at": r.last_used_at.isoformat() if r.last_used_at else None,
+                "created_at": iso_utc(r.created_at) if r.created_at else None,
+                "last_used_at": iso_utc(r.last_used_at) if r.last_used_at else None,
             }
             for r in rows
         ]

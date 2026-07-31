@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
+from ..schemas import iso_utc
 from ..models import Customer, Facility, Reminder, User
 from ..security import current_user, log_action, require_write
 from ..services import reminders as svc
@@ -18,6 +19,10 @@ KINDS = {"service", "vattenprov", "intyg", "uppfoljning", "egen"}
 class ReminderIn(BaseModel):
     title: str
     due_date: str
+    due_time: str = ""
+    # ISO-tidpunkt med tidszon, t.ex. 2026-08-14T07:30:00+02:00. Klienten räknar
+    # om från användarens lokala tid så att 07:30 betyder 07:30 där hen står.
+    remind_at: str | None = None
     body: str = ""
     kind: str = "egen"
     customer_id: str | None = None
@@ -25,6 +30,18 @@ class ReminderIn(BaseModel):
     journal_id: str | None = None
     notify_days_before: int = 7
     assigned_to: str | None = None
+
+
+def _tolka_tid(varde: str | None) -> datetime | None:
+    if not varde:
+        return None
+    try:
+        d = datetime.fromisoformat(varde.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail="Ogiltig tidpunkt, ange den som ISO-datum med tidszon"
+        ) from None
+    return d.astimezone(timezone.utc) if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
 def out(r: Reminder, customer_name: str = "") -> dict:
@@ -36,6 +53,8 @@ def out(r: Reminder, customer_name: str = "") -> dict:
         "title": r.title,
         "body": r.body,
         "due_date": r.due_date,
+        "due_time": r.due_time,
+        "remind_at": iso_utc(r.remind_at) if r.remind_at else None,
         "days_left": (date.fromisoformat(r.due_date) - date.today()).days
         if _valid(r.due_date)
         else None,
@@ -46,11 +65,11 @@ def out(r: Reminder, customer_name: str = "") -> dict:
         "facility_id": r.facility_id,
         "journal_id": r.journal_id,
         "notify_days_before": r.notify_days_before,
-        "notified_at": r.notified_at.isoformat() if r.notified_at else None,
+        "notified_at": iso_utc(r.notified_at) if r.notified_at else None,
         "notified_channels": r.notified_channels,
         "auto": bool(r.auto_key),
         "created_by": r.created_by,
-        "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+        "completed_at": iso_utc(r.completed_at) if r.completed_at else None,
         "completed_by": r.completed_by,
     }
 
@@ -147,10 +166,10 @@ async def create_reminder(
             raise HTTPException(status_code=404, detail="Anläggningen finns inte")
         payload.customer_id = f.customer_id
 
-    r = Reminder(
-        **payload.model_dump(),
-        created_by=user.full_name or user.username,
-    )
+    data = payload.model_dump()
+    tid = _tolka_tid(data.pop("remind_at", None))
+    r = Reminder(**data, created_by=user.full_name or user.username)
+    r.remind_at = tid or svc.berakna_remind_at(r)
     r.title = r.title.strip()
     db.add(r)
     await db.commit()
@@ -194,12 +213,28 @@ async def update_reminder(
     if payload.get("snooze_days"):
         if not _valid(r.due_date):
             raise HTTPException(status_code=400, detail="Påminnelsen har inget giltigt datum")
-        moved = date.fromisoformat(r.due_date) + timedelta(days=int(payload["snooze_days"]))
+        dagar = int(payload["snooze_days"])
+        moved = date.fromisoformat(r.due_date) + timedelta(days=dagar)
         r.due_date = moved.isoformat()
+        if r.remind_at:
+            r.remind_at = r.remind_at + timedelta(days=dagar)
         r.notified_at = None
-    for field in ("title", "body", "due_date", "notify_days_before", "assigned_to"):
+    for field in ("title", "body", "due_date", "due_time", "notify_days_before", "assigned_to"):
         if field in payload:
             setattr(r, field, payload[field])
+    if "remind_at" in payload:
+        r.remind_at = _tolka_tid(payload["remind_at"])
+        r.notified_at = None
+    for field in ("title", "body", "due_date", "due_time", "notify_days_before"):
+        if field in payload and "remind_at" not in payload:
+            r.remind_at = svc.berakna_remind_at(
+                Reminder(
+                    due_date=r.due_date,
+                    notify_days_before=r.notify_days_before,
+                    remind_at=None,
+                )
+            )
+            break
     if "due_date" in payload:
         if not _valid(r.due_date):
             raise HTTPException(status_code=400, detail="Ange ett datum i formatet ÅÅÅÅ-MM-DD")
