@@ -132,7 +132,13 @@ async def create_reminder(
     if not payload.title.strip():
         raise HTTPException(status_code=400, detail="Påminnelsen behöver en rubrik")
 
-    # Väljs en anläggning ska kunden fyllas i automatiskt, så inget hamnar löst i luften
+    # Egna påminnelser måste höra till en anläggning. Automatgenererade har alltid en.
+    if payload.kind == "egen" and not payload.facility_id:
+        raise HTTPException(
+            status_code=400, detail="Välj vilken anläggning påminnelsen gäller"
+        )
+
+    # Kunden fylls i automatiskt från anläggningen, så inget hamnar löst i luften
     if payload.facility_id:
         f = (
             await db.execute(select(Facility).where(Facility.id == payload.facility_id))
