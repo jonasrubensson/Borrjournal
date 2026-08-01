@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "2.2.0";
+const UI_VERSION = "2.3.0";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
@@ -1077,7 +1077,8 @@ function newVisit() {
     <div class="hd" style="background:#F4F9FA"><h2>Nytt platsbesök</h2></div>
     <div class="pad">
       <p class="hint" style="margin-top:0">Fyll i så lite eller mycket du vill. Det enda som krävs
-        är något att känna igen platsen på.</p>
+        är något att känna igen platsen på. Anger du adress eller fastighet slås koordinaten upp
+        automatiskt, så att underlaget om grannbrunnar finns direkt.</p>
       <div class="fgrid">
         ${fld("v_name", "Kontaktperson", "")}
         ${fld("v_phone", "Telefon", "", "tel")}
@@ -1109,7 +1110,7 @@ async function saveNewVisit() {
     return toast("Ange kontaktperson, fastighet eller adress", true);
   try {
     const v = await api("/visits", { method: "POST", body });
-    toast(`${v.visit_no} skapat`);
+    toast(v.geocode ? `${v.visit_no} skapat, koordinat: ${v.geocode}` : `${v.visit_no} skapat`);
     go("besok", v.id);
   } catch (e) {
     toast(e.message, true);
@@ -1169,18 +1170,30 @@ async function viewVisit() {
         <label class="f" for="v_notes">Anteckningar från platsen</label>
         <textarea id="v_notes" placeholder="Åtkomst för riggen, var kunden vill ha hålet, vad som sades.">${esc(v.notes || "")}</textarea>
         <div class="fgrid">
+          ${fld("v_name2", "Kontaktperson", v.contact_name || "")}
+          ${fld("v_phone2", "Telefon", v.phone || "", "tel")}
+          ${fld("v_mail", "E-post", v.email || "", "email")}
+          ${fld("v_prop2", "Fastighetsbeteckning", v.property_designation || "")}
+          ${fld("v_addr2", "Adress", v.address || "")}
+          ${fld("v_mun2", "Kommun", v.municipality || "")}
+          ${fld("v_date2", "Planerat besök", v.planned_at || "", "date")}
           <div><label class="f" for="v_status">Status</label><select id="v_status">
             ${Object.entries(BESOK_STATUS)
               .map(([k, [l]]) => `<option value="${k}"${v.status === k ? " selected" : ""}>${l}</option>`)
               .join("")}</select></div>
           ${fld("v_quote", "Offertsumma (kr)", v.quote_amount ?? "", "number")}
-          ${fld("v_coord", "Koordinat", v.coordinates || "")}
-          ${fld("v_mail", "E-post", v.email || "", "email")}
         </div>
+        <label class="f" for="v_coord">Koordinat</label>
+        <input id="v_coord" value="${esc(v.coordinates || "")}"
+          placeholder="Fylls i automatiskt från adressen">
         <div class="row" style="margin-top:8px">
           <button class="btn ghost sm" onclick="visitPosition()">Hämta min position</button>
-          <button class="btn ghost sm" onclick="visitGeocode()">Hämta från adressen</button>
-          <span class="hint" id="v_coordhint" style="margin:0"></span>
+          <button class="btn ghost sm" onclick="visitGeocode()">Slå upp adressen igen</button>
+          <span class="hint" id="v_coordhint" style="margin:0">${
+            v.latitude
+              ? "Ändrar du adressen och sparar slås koordinaten upp på nytt."
+              : "Saknas. Fyll i adress och spara, eller hämta din position på plats."
+          }</span>
         </div>
         <div class="row" style="margin-top:14px">
           <button class="btn pri sm" onclick="saveVisit()">Spara</button>
@@ -1198,17 +1211,31 @@ async function viewVisit() {
 }
 
 async function saveVisit() {
+  const v = S.data.visit;
   const body = {
+    contact_name: val("v_name2").trim(),
+    phone: val("v_phone2"),
+    email: val("v_mail"),
+    property_designation: val("v_prop2").trim(),
+    address: val("v_addr2"),
+    municipality: val("v_mun2"),
+    planned_at: val("v_date2"),
     errand: val("v_errand2"),
     notes: val("v_notes"),
     status: val("v_status"),
-    email: val("v_mail"),
-    coordinates: val("v_coord"),
     quote_amount: numVal("v_quote"),
   };
+  // Skicka bara med koordinaten om den ändrats för hand. Annars låter vi servern
+  // slå upp den nya adressen, i stället för att den gamla koordinaten skriver över.
+  if (val("v_coord") !== (v.coordinates || "")) body.coordinates = val("v_coord");
+
   try {
-    await api(`/visits/${S.data.visit.id}`, { method: "PATCH", body });
-    toast("Besöket sparat");
+    const uppdaterad = await api(`/visits/${v.id}`, { method: "PATCH", body });
+    toast(
+      uppdaterad.geocode
+        ? `Sparat. Koordinat hämtad: ${uppdaterad.geocode}`
+        : "Besöket sparat"
+    );
     viewVisit();
   } catch (e) {
     toast(e.message, true);
@@ -1228,17 +1255,21 @@ async function visitPosition() {
 }
 
 async function visitGeocode() {
-  const v = S.data.visit;
   const hint = $("#v_coordhint");
-  const adress = [v.address, v.property_designation].filter(Boolean).join(", ");
-  if (!adress) return toast("Besöket saknar adress och fastighet", true);
+  // Läs det som står i fälten just nu, så att uppslaget funkar innan man sparat
+  const adress = [val("v_addr2"), val("v_prop2")].filter(Boolean).join(", ");
+  const kommun = val("v_mun2") || S.data.visit.municipality || "";
+  if (!adress) return toast("Fyll i adress eller fastighetsbeteckning först", true);
   hint.textContent = "Slår upp…";
   try {
     const r = await api(
-      `/geocode?q=${encodeURIComponent(adress)}&municipality=${encodeURIComponent(v.municipality || "")}`
+      `/geocode?q=${encodeURIComponent(adress)}&municipality=${encodeURIComponent(kommun)}`
     );
     $("#v_coord").value = `${r.latitude}, ${r.longitude}`;
-    hint.innerHTML = `Hittade ${esc(r.label.split(",").slice(0, 3).join(", "))}. Spara för att uppdatera underlaget.`;
+    hint.innerHTML = r.approximate
+      ? `<span style="color:var(--brass)">Hittade bara ${esc(r.short_label)}, alltså trakten och
+         inte adressen. Justera på plats med Hämta min position.</span>`
+      : `Hittade ${esc(r.short_label)}. Spara för att uppdatera underlaget.`;
   } catch (e) {
     hint.innerHTML = `<span style="color:var(--alert)">${esc(e.message)}</span>`;
   }
