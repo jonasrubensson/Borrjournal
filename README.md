@@ -80,6 +80,67 @@ inte förhandsvisas och får en tydlig typmarkering i stället.
 
 Bilder tagna med telefonen får kameran direkt via bildfliken.
 
+## Offert, arbetsorder och artiklar
+
+### Varför inte bara journalen?
+
+Journalen berättar vad som hände: berättande, oföränderlig, signerad. Den duger inte till att
+summera vad som ska faktureras. Därför finns **arbetsordern**, med strukturerade rader som har
+antal, pris och moms. De två hänger ihop: när en offert skickas eller en order sparas som PDF
+skrivs en journalrad om det.
+
+| | Journal | Arbetsorder |
+|---|---|---|
+| Svarar på | vad hände | vad kostade det |
+| Format | fritext med tidsstämpel | rader med antal och pris |
+| Ändras | nej, stryks | ja, tills den fakturerats |
+
+### Artikelregister
+
+**Artiklar** i menyn: det du har hemma i lager och det du brukar debitera. Varje artikel har
+inköps- och försäljningspris, enhet, moms, lagersaldo och en min-nivå som ger varning. Marginalen
+räknas ut, så en felprissatt artikel syns direkt.
+
+Saldot ändras aldrig direkt, bara genom lagerrörelser med anledning och anteckning. Varje saldo
+går därför att förklara i efterhand. Artiklar som utgår avaktiveras i stället för att raderas, så
+att gamla order står kvar oförändrade.
+
+Tjänster som borrning och etablering läggs upp med **lagerförs ej**. De prissätts som allt annat
+men rör inte lagret.
+
+### Offert
+
+Skapas på en kund eller direkt på ett platsbesök, innan kunden finns. Rader hämtas ur
+artikelregistret, som fyller i benämning, pris och enhet. Priset kopieras till raden, så att en
+prisändring i registret inte ändrar en offert som redan är skickad.
+
+**Visa PDF**, **Skriv ut** eller **Mejla till kund**. Vid utskick bifogas PDF:en, sparas bland
+kundens dokument och journalförs med belopp och giltighetstid. Blir besöket kund flyttas offerten
+med automatiskt.
+
+En accepterad offert har knappen **Skapa arbetsorder**, som tar med alla rader. Då skrivs inget in
+två gånger.
+
+### Arbetsorder och fakturering
+
+Fyll på med det som faktiskt gick åt, också sådant som tillkom under jobbet. Material och arbete
+särredovisas.
+
+Statusen driver allt annat:
+
+| Status | Vad som händer |
+|---|---|
+| Öppen | Under arbete |
+| Utförd | Materialet dras från lagret, en gång. Utfört-datum sätts |
+| Fakturerad | Fakturadatum sätts, fakturanummer kan fyllas i |
+| Betald | Betaldatum sätts |
+
+En fakturerad order går inte att lägga rader på eller radera, bara makulera. Vyn **Fakturera**
+visar allt som är utfört men inte fakturerat, och allt som är fakturerat men inte betalt, med
+belopp. Det är där saker annars glöms bort.
+
+Företagsuppgifterna som står överst på varje PDF fylls i under **Inställningar → Företag**.
+
 ## Ändra och ta bort
 
 | Vad | Var | Vem |
@@ -205,6 +266,14 @@ godkänd lista, och allt som kommer in hamnar i en granskningskö där en männi
 något skrivs till registret.
 
 ## Jobb i närheten
+
+Både anläggningar som behöver något **och inbokade platsbesök** visas. Öppnar du ett besök står
+under **Slå ihop med resan** vad mer som ligger inom tre mil: andra besök som är inbokade eller
+väntar på svar, och anläggningar med förfallen service. Ett besök som passerat sitt datum hamnar
+högst upp.
+
+Besök som blivit kund eller lagts ner faller bort automatiskt. I närhetsvyn går de att stänga av
+med **Inbokade besök → Bara anläggningar**.
 
 Två situationer, samma underlag:
 
@@ -477,6 +546,18 @@ påslaget som nu. Blir det aktuellt att byta: sätt `POSTGRES_HOST`, `POSTGRES_U
 `POSTGRES_PASSWORD`, lägg till en `db`-tjänst i compose, ta en backup, packa upp den och kör
 `python -m app.restore db.json` mot den nya databasen. Appen bygger anslutningssträngen själv och
 kodar lösenordet korrekt, så tecken som `/` och `+` ställer inte till det.
+
+## Uppdateringar och cachning
+
+Gränssnittet jämför sin version med serverns och lägger upp en list om de skiljer sig, med en
+knapp som hämtar om allt. Knappen rensar service workerns cache, avregistrerar den och laddar om
+på en ny adress.
+
+Bakom listen ligger orsaken: webbläsare cachar JavaScript utan att alltid fråga servern. Därför
+stämplas alla tillgångar med versionen, `/static/app.js?v=2.5.0`, så att en ny version blir en ny
+adress som måste hämtas. `index.html` och `sw.js` levereras med `no-cache`, versionsstämplade
+filer med lång hållbarhet. Ser du listen efter en uppdatering betyder det numera att webbläsaren
+har en gammal flik öppen, inte att backend är gammal.
 
 ## Tid och tidszon
 
