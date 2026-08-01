@@ -13,7 +13,7 @@ from ..services import reminders as svc
 
 router = APIRouter(prefix="/api/reminders", tags=["paminnelser"])
 
-KINDS = {"service", "vattenprov", "intyg", "uppfoljning", "egen"}
+KINDS = {"service", "vattenprov", "intyg", "uppfoljning", "egen", "betalning", "offert", "besok"}
 
 
 class ReminderIn(BaseModel):
@@ -287,7 +287,9 @@ async def scan(
 ):
     """Kör automatgenereringen direkt, t.ex. efter att ett serviceintervall ändrats."""
     created = await svc.generate_auto(db)
-    result = {"created": created}
+    created += await svc.generate_business(db)
+    stangda = await svc.stang_inaktuella(db)
+    result = {"created": created, "closed": stangda}
     if notify:
         result.update(await svc.notify_due(db))
     return result

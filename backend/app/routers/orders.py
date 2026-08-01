@@ -2,7 +2,7 @@ import os
 import uuid
 from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
@@ -32,6 +32,13 @@ router = APIRouter(prefix="/api", tags=["offert och order"])
 QUOTE_STATUS = ["utkast", "skickad", "accepterad", "avslagen", "utgangen"]
 ORDER_STATUS = ["oppen", "utford", "fakturerad", "betald", "makulerad"]
 
+LOGO_NAMN = "foretagslogotyp.png"
+
+
+def logo_sokvag() -> str:
+    return os.path.join(settings.data_dir, LOGO_NAMN)
+
+
 FORETAG_STANDARD = {
     "namn": "",
     "adress": "",
@@ -46,6 +53,10 @@ FORETAG_STANDARD = {
         "Priset förutsätter framkomlighet för borrigg."
     ),
     "offert_giltig_dagar": 30,
+    "betalningsvillkor_dagar": 30,
+    # Automatiska påminnelser
+    "paminn_obetald_efter_dagar": 7,
+    "paminn_offert_efter_dagar": 10,
 }
 
 
@@ -95,7 +106,9 @@ async def _rader(db: AsyncSession, *, quote_id=None, work_order_id=None) -> list
 async def _foretag(db: AsyncSession) -> dict:
     from ..services.notify import get_setting
 
-    return await get_setting(db, "foretag", FORETAG_STANDARD)
+    conf = await get_setting(db, "foretag", FORETAG_STANDARD)
+    conf["logotyp"] = logo_sokvag() if os.path.exists(logo_sokvag()) else ""
+    return conf
 
 
 async def _nasta(db: AsyncSession, model, kolumn, prefix: str) -> str:
@@ -111,7 +124,65 @@ async def _nasta(db: AsyncSession, model, kolumn, prefix: str) -> str:
 # ---------------- företagsuppgifter ----------------
 @router.get("/company")
 async def read_company(_: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    return await _foretag(db)
+    conf = await _foretag(db)
+    conf["har_logotyp"] = os.path.exists(logo_sokvag())
+    return conf
+
+
+@router.get("/company/logo")
+async def company_logo(db: AsyncSession = Depends(get_db)):
+    """Öppen utan inloggning, eftersom den visas på inloggningssidan."""
+    from fastapi.responses import FileResponse
+
+    if not os.path.exists(logo_sokvag()):
+        raise HTTPException(status_code=404, detail="Ingen logotyp uppladdad")
+    return FileResponse(logo_sokvag(), media_type="image/png")
+
+
+@router.post("/company/logo")
+async def upload_logo(
+    request: Request,
+    file: UploadFile = File(...),
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Tar emot logotypen och normaliserar den till PNG med rimlig storlek."""
+    import io as _io
+
+    from PIL import Image, UnidentifiedImageError
+
+    raw = await file.read()
+    if len(raw) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Bilden är större än 8 MB")
+    try:
+        bild = Image.open(_io.BytesIO(raw))
+        bild.load()
+    except (UnidentifiedImageError, OSError):
+        raise HTTPException(
+            status_code=415, detail="Kunde inte läsa bilden. Använd PNG, JPG eller WEBP."
+        ) from None
+
+    # Genomskinlighet bevaras, så att en logotyp med transparent bakgrund
+    # inte får en vit ruta runt sig i PDF:en.
+    if bild.mode not in ("RGBA", "RGB"):
+        bild = bild.convert("RGBA")
+    bild.thumbnail((900, 400))
+    os.makedirs(settings.data_dir, exist_ok=True)
+    bild.save(logo_sokvag(), "PNG")
+
+    await log_action(db, "LOGO_UPLOAD", actor=user.username, request=request)
+    return {"ok": True, "bredd": bild.width, "hojd": bild.height}
+
+
+@router.delete("/company/logo", status_code=204)
+async def delete_logo(
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    if os.path.exists(logo_sokvag()):
+        os.remove(logo_sokvag())
+    await log_action(db, "LOGO_DELETE", actor=user.username, request=request)
 
 
 @router.put("/company")
@@ -130,6 +201,151 @@ async def write_company(
     await save_setting(db, "foretag", conf)
     await log_action(db, "COMPANY_UPDATE", actor=user.username, request=request)
     return conf
+
+
+# ---------------- offertmallar ----------------
+def mall_ut(m) -> dict:
+    from ..services.templates import rader_ur
+
+    rader = rader_ur(m)
+    return {
+        "id": m.id,
+        "name": m.name,
+        "description": m.description,
+        "title": m.title,
+        "intro": m.intro,
+        "terms": m.terms,
+        "valid_days": m.valid_days,
+        "lines": rader,
+        "line_count": len(rader),
+        "is_builtin": m.is_builtin,
+        "estimate": round(
+            sum(r.get("quantity", 0) * r.get("unit_price", 0) * 1.25 for r in rader), 2
+        ),
+    }
+
+
+@router.get("/quote-templates")
+async def list_templates(_: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    from ..models import QuoteTemplate
+    from ..services.templates import se_till_att_mallar_finns
+
+    await se_till_att_mallar_finns(db)
+    mallar = (
+        await db.execute(select(QuoteTemplate).order_by(QuoteTemplate.sort_order, QuoteTemplate.name))
+    ).scalars().all()
+    return [mall_ut(m) for m in mallar]
+
+
+@router.post("/quote-templates", status_code=201)
+async def create_template(
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ny mall, antingen tom eller sparad från en befintlig offert."""
+    import json as _json
+
+    from ..models import QuoteTemplate
+
+    namn = (payload.get("name") or "").strip()
+    if not namn:
+        raise HTTPException(status_code=400, detail="Mallen behöver ett namn")
+
+    rader = payload.get("lines") or []
+    if payload.get("from_quote_id"):
+        q = await _hamta_offert(db, payload["from_quote_id"])
+        rader = [
+            {
+                "kind": r.kind,
+                "article_no": r.article_no,
+                "name": r.name,
+                "note": r.note,
+                "unit": r.unit,
+                "quantity": r.quantity,
+                "unit_price": r.unit_price,
+                "vat_percent": r.vat_percent,
+            }
+            for r in await _rader(db, quote_id=q.id)
+        ]
+        payload.setdefault("title", q.title)
+        payload.setdefault("intro", q.intro)
+        payload.setdefault("terms", q.terms)
+
+    m = QuoteTemplate(
+        name=namn,
+        description=payload.get("description", ""),
+        title=payload.get("title", ""),
+        intro=payload.get("intro", ""),
+        terms=payload.get("terms", ""),
+        valid_days=int(payload.get("valid_days") or 30),
+        lines=_json.dumps(rader, ensure_ascii=False),
+        sort_order=99,
+        created_by=user.full_name or user.username,
+    )
+    db.add(m)
+    await db.commit()
+    await db.refresh(m)
+    await log_action(
+        db, "TEMPLATE_CREATE", actor=user.username, object_type="template", object_id=m.id,
+        request=request, detail=m.name,
+    )
+    return mall_ut(m)
+
+
+@router.patch("/quote-templates/{template_id}")
+async def update_template(
+    template_id: str,
+    payload: dict,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    import json as _json
+
+    from ..models import QuoteTemplate
+
+    m = (
+        await db.execute(select(QuoteTemplate).where(QuoteTemplate.id == template_id))
+    ).scalar_one_or_none()
+    if m is None:
+        raise HTTPException(status_code=404, detail="Mallen finns inte")
+    for falt in ("name", "description", "title", "intro", "terms"):
+        if falt in payload:
+            setattr(m, falt, payload[falt])
+    if "valid_days" in payload:
+        m.valid_days = int(payload["valid_days"] or 30)
+    if "lines" in payload:
+        m.lines = _json.dumps(payload["lines"], ensure_ascii=False)
+    # En ändrad standardmall är inte längre standard, den är er egen
+    if not payload.get("behall_builtin"):
+        m.is_builtin = False
+    await db.commit()
+    await db.refresh(m)
+    return mall_ut(m)
+
+
+@router.delete("/quote-templates/{template_id}", status_code=204)
+async def delete_template(
+    template_id: str,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    from ..models import QuoteTemplate
+
+    m = (
+        await db.execute(select(QuoteTemplate).where(QuoteTemplate.id == template_id))
+    ).scalar_one_or_none()
+    if m is None:
+        raise HTTPException(status_code=404, detail="Mallen finns inte")
+    namn = m.name
+    await db.delete(m)
+    await db.commit()
+    await log_action(
+        db, "TEMPLATE_DELETE", actor=user.username, object_type="template",
+        object_id=template_id, request=request, detail=namn,
+    )
 
 
 # ---------------- offerter ----------------
@@ -240,14 +456,29 @@ async def create_quote(
         dagar = int(foretag.get("offert_giltig_dagar") or 30)
         giltig = date.fromordinal(date.today().toordinal() + dagar).isoformat()
 
+    # Mall vald: hämta rubrik, texter, giltighetstid och rader därifrån
+    mall = None
+    mallrader = []
+    if payload.get("template_id"):
+        from ..models import QuoteTemplate
+        from ..services.templates import rader_ur
+
+        mall = (
+            await db.execute(select(QuoteTemplate).where(QuoteTemplate.id == payload["template_id"]))
+        ).scalar_one_or_none()
+        if mall is None:
+            raise HTTPException(status_code=404, detail="Mallen finns inte")
+        mallrader = rader_ur(mall)
+        giltig = date.fromordinal(date.today().toordinal() + (mall.valid_days or 30)).isoformat()
+
     q = Quote(
         quote_no=await _nasta(db, Quote, Quote.quote_no, "OFF"),
         customer_id=customer_id,
         visit_id=visit_id,
         facility_id=payload.get("facility_id"),
-        title=payload.get("title", ""),
-        intro=payload.get("intro", ""),
-        terms=payload.get("terms") or foretag.get("villkor", ""),
+        title=payload.get("title") or (mall.title if mall else ""),
+        intro=payload.get("intro") or (mall.intro if mall else ""),
+        terms=payload.get("terms") or (mall.terms if mall else "") or foretag.get("villkor", ""),
         recipient_name=payload.get("recipient_name") or mottagare["namn"],
         recipient_address=payload.get("recipient_address") or mottagare["adress"],
         recipient_email=payload.get("recipient_email") or mottagare["epost"],
@@ -255,13 +486,46 @@ async def create_quote(
         created_by=user.full_name or user.username,
     )
     db.add(q)
+    await db.flush()
+
+    # Mallens rader matchas mot artikelregistret på nummer, så att dagens pris används
+    for i, r in enumerate(mallrader):
+        artikel = None
+        if r.get("article_no"):
+            artikel = (
+                await db.execute(select(Article).where(Article.article_no == r["article_no"]))
+            ).scalar_one_or_none()
+        if artikel is None and r.get("name"):
+            artikel = (
+                await db.execute(
+                    select(Article).where(
+                        func.lower(Article.name) == r["name"].lower(), Article.is_active.is_(True)
+                    )
+                )
+            ).scalar_one_or_none()
+
+        db.add(
+            LineItem(
+                quote_id=q.id,
+                article_id=artikel.id if artikel else None,
+                position=i,
+                kind=r.get("kind", "material"),
+                article_no=artikel.article_no if artikel else r.get("article_no", ""),
+                name=r.get("name", ""),
+                note=r.get("note", ""),
+                unit=(artikel.unit if artikel else r.get("unit", "st")),
+                quantity=r.get("quantity", 1),
+                unit_price=(artikel.sales_price if artikel else r.get("unit_price", 0)),
+                vat_percent=(artikel.vat_percent if artikel else r.get("vat_percent", 25)),
+            )
+        )
     await db.commit()
     await db.refresh(q)
     await log_action(
         db, "QUOTE_CREATE", actor=user.username, object_type="quote", object_id=q.id,
-        request=request, detail=q.quote_no,
+        request=request, detail=f"{q.quote_no}" + (f" ur mall {mall.name}" if mall else ""),
     )
-    return quote_ut(q, [])
+    return quote_ut(q, await _rader(db, quote_id=q.id))
 
 
 async def _hamta_offert(db: AsyncSession, quote_id: str) -> Quote:
@@ -543,7 +807,7 @@ async def send_quote(
     brodtext = payload.get("message") or (
         f"Hej,\n\nBifogat finner ni offert {q.quote_no}"
         + (f" avseende {q.title}" if q.title else "")
-        + f".\n\nSumma inklusive moms: {total['brutto']:,.2f} kr".replace(",", " ")
+        + f".\n\nSumma inklusive moms: {belopp_text(total['brutto'])} kr"
         + (f"\nOfferten gäller till {q.valid_until}." if q.valid_until else "")
         + f"\n\nHör gärna av er vid frågor.\n\nMed vänlig hälsning\n{foretag.get('namn', '')}\n"
     )
