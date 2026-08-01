@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "2.3.0";
+const UI_VERSION = "3.0.0";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
@@ -104,6 +104,8 @@ const ROUTES = [
   ["besok", "Besök", "M10 17 s6-5.3 6-10a6 6 0 1 0-12 0c0 4.7 6 10 6 10z M10 5 v4 M8 7 h4"],
   ["paminnelser", "Påminnelser", "M10 3 a5 5 0 0 0-5 5 c0 4-2 5-2 5 h14 s-2-1-2-5 a5 5 0 0 0-5-5 M8 16 a2 2 0 0 0 4 0"],
   ["journal", "Journal", "M5 3 h10 v14 H5z M8 7 h6 M8 10 h6 M8 13 h4"],
+  ["ekonomi", "Fakturera", "M3 5 h14 v10 H3z M3 8 h14 M6 12 h4"],
+  ["artiklar", "Artiklar", "M3 6 l7-3 l7 3 v8 l-7 3 l-7-3z M3 6 l7 3 l7-3 M10 9 v8"],
   ["pumpar", "Pumpar", "M6 3 h8 v5 h-8z M10 8 v9 M6 17 h8"],
   ["ny", "Ny", "M10 4 v12 M4 10 h12"],
 ];
@@ -698,16 +700,20 @@ async function viewCustomer() {
   const token = claim();
   mountShell(`<div class="skel" style="width:35%"></div><div class="skel"></div><div class="skel"></div>`);
   const id = S.id;
-  const [c, journal, files, reminders] = await Promise.all([
+  const [c, journal, files, reminders, offerter, order] = await Promise.all([
     api(`/customers/${id}`),
     api(`/customers/${id}/journal`),
     api(`/customers/${id}/files`),
     api(`/reminders?status=open&customer_id=${id}`),
+    api(`/quotes?customer_id=${id}`),
+    api(`/work-orders?customer_id=${id}`),
   ]);
   S.data.customer = c;
   S.data.journal = journal;
   S.data.files = files;
   S.data.reminders = reminders;
+  S.data.quotes = offerter;
+  S.data.orders = order;
 
   const docs = files.filter((f) => f.kind === "dokument");
   const imgs = files.filter((f) => f.kind === "bild");
@@ -740,7 +746,7 @@ async function viewCustomer() {
   </div>
   <div class="grid2">
     <div>
-      <div class="tabs">${T("journal", "Journal", journal.length)}${T("dokument", "Dokument", docs.length)}${T("bilder", "Bilder", imgs.length)}${T("paminnelser", "Påminnelser", reminders.length)}${T("anlaggning", "Anläggning", c.facilities.length)}</div>
+      <div class="tabs">${T("journal", "Journal", journal.length)}${T("dokument", "Dokument", docs.length)}${T("bilder", "Bilder", imgs.length)}${T("offerter", "Offerter", offerter.length)}${T("order", "Order", order.length)}${T("paminnelser", "Påminnelser", reminders.length)}${T("anlaggning", "Anläggning", c.facilities.length)}</div>
       <div class="card"><div class="pad" id="tabbody"></div></div>
     </div>
     ${
@@ -785,6 +791,8 @@ function renderTab() {
   slappBlobbar();
   if (S.tab === "journal") body.innerHTML = tabJournal(c, S.data.journal);
   else if (S.tab === "paminnelser") body.innerHTML = tabReminders(c, S.data.reminders);
+  else if (S.tab === "offerter") body.innerHTML = tabQuotes(c, S.data.quotes);
+  else if (S.tab === "order") body.innerHTML = tabOrders(c, S.data.orders);
   else if (S.tab === "dokument") body.innerHTML = tabFiles(c, S.data.files.filter((f) => f.kind === "dokument"));
   else if (S.tab === "bilder") body.innerHTML = tabImages(c, S.data.files.filter((f) => f.kind === "bild"));
   else body.innerHTML = tabFacilities(c);
@@ -1197,6 +1205,7 @@ async function viewVisit() {
         </div>
         <div class="row" style="margin-top:14px">
           <button class="btn pri sm" onclick="saveVisit()">Spara</button>
+          <button class="btn sm" onclick="nyOffert(null,'${v.id}')">Skapa offert</button>
           <button class="btn ghost sm" onclick="shareDialog({visit_id:'${v.id}'})">Dela med extern borrare</button>
           <button class="btn danger sm" style="margin-left:auto" onclick="removeVisit()">Ta bort</button>
         </div>
@@ -1208,6 +1217,98 @@ async function viewVisit() {
   <div id="sharebox"></div>`;
 
   loadBriefing({ visit_id: v.id });
+  loadVisitNearby(v);
+  loadVisitQuotes(v);
+}
+
+async function loadVisitQuotes(v) {
+  const offerter = await api(`/quotes?visit_id=${v.id}`);
+  if (!offerter.length || S.route !== "besok" || S.id !== v.id) return;
+  const holder = document.createElement("div");
+  holder.innerHTML = `<div class="card" style="margin-top:18px">
+    <div class="hd"><h2>Offerter på det här besöket</h2><span class="tag n">${offerter.length}</span></div>
+    <div class="pad" style="padding-top:2px">${offerter
+      .map((q) => {
+        const [text, klass] = OFFERT_STATUS[q.status] || [q.status, "n"];
+        return `<div class="filerow" style="cursor:pointer" onclick="go('offert','${q.id}')">
+        <div class="ftype pdf">OFF</div>
+        <div style="flex:1;min-width:0"><div style="font-weight:600">${esc(q.title || q.quote_no)}</div>
+          <div class="fmeta">${esc(q.quote_no)} · ${dt(q.created_at, false)}</div></div>
+        <span class="mono" style="font-weight:600">${kr(q.totals.brutto)} kr</span>
+        <span class="tag ${klass}">${text}</span></div>`;
+      })
+      .join("")}</div></div>`;
+  $("#view").appendChild(holder.firstElementChild);
+}
+
+/* Egna jobb och andra besök nära det här besöket. Hämtas efter att sidan visats,
+   och infogas bara om användaren står kvar på samma besök. */
+async function loadVisitNearby(v) {
+  const token = renderSeq;
+  const box = $("#visitside");
+  if (!box) return;
+  if (v.latitude == null) {
+    box.innerHTML = `<div class="card"><div class="hd"><h2>Slå ihop med resan</h2></div>
+      <div class="pad"><p class="hint" style="margin:0">Besöket saknar koordinat. Fyll i adressen
+      och spara, så slås den upp automatiskt.</p></div></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="card"><div class="hd"><h2>Slå ihop med resan</h2></div>
+    <div class="pad"><div class="skel"></div><div class="skel"></div></div></div>`;
+  try {
+    const r = await api(`/visits/${v.id}/nearby?radius_km=${S.filter.tripRadius || 30}`);
+    if (token !== renderSeq || S.id !== v.id) return;
+    const besok = r.results.filter((x) => x.typ === "besok");
+    const jobb = r.results.filter((x) => x.typ !== "besok");
+    box.innerHTML = `<div class="card">
+      <div class="hd"><h2>Slå ihop med resan</h2>
+        <span class="tag n">${r.results.length} inom ${r.radius_km} km</span></div>
+      <div class="pad" style="padding-top:2px">
+        ${
+          r.results.length
+            ? (besok.length
+                ? `<div class="eyebrow" style="margin:6px 0 4px">Andra besök</div>` +
+                  besok.map((h) => nearbyRow(h, false)).join("")
+                : "") +
+              (jobb.length
+                ? `<div class="eyebrow" style="margin:14px 0 4px">Anläggningar som behöver något</div>` +
+                  jobb.map((h) => nearbyRow(h, false)).join("")
+                : "") +
+              `<div class="row" style="margin-top:12px">
+                 <button class="btn ghost sm" onclick="planeraFranBesok('${v.id}')">Planera runda härifrån</button>
+                 ${[30, 60, 100]
+                   .map(
+                     (km) =>
+                       `<button class="btn ghost sm" style="${
+                         km === (S.filter.tripRadius || 30)
+                           ? "border-color:var(--water);color:var(--water-dark)"
+                           : ""
+                       }" onclick="S.filter.tripRadius=${km};loadVisitNearby(S.data.visit)">${km} km</button>`
+                   )
+                   .join("")}
+               </div>`
+            : `<div class="empty"><div class="big">Inget annat i närheten</div>
+               <p>Varken inbokade besök eller anläggningar som behöver något inom ${r.radius_km} km.</p>
+               <div class="row" style="justify-content:center;margin-top:10px">
+                 ${[30, 60, 100]
+                   .map(
+                     (km) =>
+                       `<button class="btn ghost sm" onclick="S.filter.tripRadius=${km};loadVisitNearby(S.data.visit)">${km} km</button>`
+                   )
+                   .join("")}</div></div>`
+        }
+      </div></div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="card"><div class="pad"><p class="hint" style="margin:0">${esc(e.message)}</p></div></div>`;
+  }
+}
+
+function planeraFranBesok(visitId) {
+  const v = S.data.visit;
+  if (!v || v.latitude == null) return toast("Besöket saknar koordinat", true);
+  S.origin = { latitude: v.latitude, longitude: v.longitude };
+  S.filter.radius = S.filter.tripRadius || 30;
+  go("nara");
 }
 
 async function saveVisit() {
@@ -1477,6 +1578,956 @@ async function sendShare(targetJson) {
   } catch (e) {
     toast(e.message, true);
   }
+}
+
+
+
+function tabQuotes(c, offerter) {
+  const laser = S.user.role === "lasare";
+  return `
+  ${
+    laser
+      ? ""
+      : `<div class="row" style="margin-bottom:14px">
+    <button class="btn pri sm" onclick="nyOffert('${c.id}')">+ Ny offert</button>
+    <span class="hint" style="margin:0">Skapar ett utkast du fyller med rader.</span></div>`
+  }
+  ${
+    offerter.length
+      ? offerter
+          .map((q) => {
+            const [text, klass] = OFFERT_STATUS[q.status] || [q.status, "n"];
+            return `<div class="filerow" style="cursor:pointer" onclick="go('offert','${q.id}')">
+        <div class="ftype pdf">OFF</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600">${esc(q.title || q.quote_no)}</div>
+          <div class="fmeta">${esc(q.quote_no)} · ${dt(q.created_at, false)}${
+            q.valid_until ? ` · giltig till ${q.valid_until}` : ""
+          }${q.sent_at ? ` · skickad ${dt(q.sent_at, false)}` : ""}</div></div>
+        <span class="mono" style="font-weight:600">${kr(q.totals.brutto)} kr</span>
+        <span class="tag ${klass}">${text}</span></div>`;
+          })
+          .join("")
+      : `<div class="empty"><div class="big">Inga offerter</div>
+         <p>En offert kan mejlas som PDF och sparas automatiskt bland kundens dokument.</p></div>`
+  }`;
+}
+
+function tabOrders(c, order) {
+  const laser = S.user.role === "lasare";
+  return `
+  ${
+    laser
+      ? ""
+      : `<div class="row" style="margin-bottom:14px">
+    <button class="btn pri sm" onclick="nyOrder('${c.id}')">+ Ny arbetsorder</button>
+    <span class="hint" style="margin:0">För material och arbete som ska faktureras.</span></div>`
+  }
+  ${
+    order.length
+      ? order
+          .map((o) => {
+            const [text, klass] = ORDER_STATUS[o.status] || [o.status, "n"];
+            return `<div class="filerow" style="cursor:pointer" onclick="go('order','${o.id}')">
+        <div class="ftype" style="background:${
+          o.status === "betald" ? "#2E7D5B" : o.status === "oppen" ? "var(--stone)" : "#B3801F"
+        }">AO</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600">${esc(o.title || o.order_no)}</div>
+          <div class="fmeta">${esc(o.order_no)}${o.performed_at ? ` · utförd ${o.performed_at}` : ""}${
+            o.invoice_no ? ` · faktura ${esc(o.invoice_no)}` : ""
+          } · material ${krRund(o.material_total)} kr, arbete ${krRund(o.labour_total)} kr</div></div>
+        <span class="mono" style="font-weight:600">${kr(o.totals.brutto)} kr</span>
+        <span class="tag ${klass}">${text}</span></div>`;
+          })
+          .join("")
+      : `<div class="empty"><div class="big">Inga arbetsorder</div>
+         <p>Journalen berättar vad som hände. Arbetsordern håller reda på vad som gick åt,
+         så att inget glöms bort vid faktureringen.</p></div>`
+  }`;
+}
+
+async function nyOffert(customerId, visitId) {
+  const titel = prompt("Vad gäller offerten?", "");
+  if (titel === null) return;
+  try {
+    const q = await api("/quotes", {
+      method: "POST",
+      body: customerId ? { customer_id: customerId, title: titel } : { visit_id: visitId, title: titel },
+    });
+    toast(`${q.quote_no} skapad`);
+    go("offert", q.id);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function nyOrder(customerId) {
+  const titel = prompt("Vad gäller arbetsordern?", "");
+  if (titel === null) return;
+  const c = S.data.customer;
+  const anl = c && c.facilities.length ? c.facilities[0].id : null;
+  try {
+    const o = await api("/work-orders", {
+      method: "POST",
+      body: { customer_id: customerId, title: titel, facility_id: anl },
+    });
+    toast(`${o.order_no} skapad`);
+    go("order", o.id);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/* ---------------- pengar: gemensamt ---------------- */
+const kr = (v) =>
+  (v ?? 0).toLocaleString("sv-SE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const krRund = (v) => Math.round(v ?? 0).toLocaleString("sv-SE");
+
+const RAD_TYP = { material: "Material", arbete: "Arbete", ovrigt: "Övrigt" };
+const OFFERT_STATUS = {
+  utkast: ["Utkast", "n"],
+  skickad: ["Skickad", "soon"],
+  accepterad: ["Accepterad", "ok"],
+  avslagen: ["Avslagen", "action"],
+  utgangen: ["Utgången", "n"],
+};
+const ORDER_STATUS = {
+  oppen: ["Öppen", "n"],
+  utford: ["Utförd, ej fakturerad", "soon"],
+  fakturerad: ["Fakturerad, ej betald", "soon"],
+  betald: ["Betald", "ok"],
+  makulerad: ["Makulerad", "n"],
+};
+
+async function oppnaPdf(path) {
+  const res = await fetch(path, { headers: { Authorization: `Bearer ${S.token}` } });
+  if (!res.ok) return toast("Kunde inte skapa PDF", true);
+  const url = URL.createObjectURL(await res.blob());
+  window.open(url, "_blank");
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+async function skrivUt(path) {
+  const res = await fetch(path, { headers: { Authorization: `Bearer ${S.token}` } });
+  if (!res.ok) return toast("Kunde inte skapa PDF", true);
+  const url = URL.createObjectURL(await res.blob());
+  const ram = document.createElement("iframe");
+  ram.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0";
+  ram.src = url;
+  ram.onload = () => {
+    try {
+      ram.contentWindow.focus();
+      ram.contentWindow.print();
+    } catch (_) {
+      window.open(url, "_blank");
+    }
+  };
+  document.body.appendChild(ram);
+  setTimeout(() => {
+    ram.remove();
+    URL.revokeObjectURL(url);
+  }, 60000);
+}
+
+/* Radtabell som används av både offert och arbetsorder */
+function radTabell(dok, laser, kanRedigera) {
+  const grupper = ["material", "arbete", "ovrigt"];
+  let html = `<table><thead><tr><th>Benämning</th><th>Antal</th><th>Enhet</th>
+    <th>À-pris</th><th>Summa</th>${kanRedigera ? "<th></th>" : ""}</tr></thead><tbody>`;
+  for (const g of grupper) {
+    const rader = dok.lines.filter((r) => (r.kind || "material") === g);
+    if (!rader.length) continue;
+    html += `<tr><td colspan="${kanRedigera ? 6 : 5}" style="padding-top:12px">
+      <span class="eyebrow" style="margin:0">${RAD_TYP[g]}</span></td></tr>`;
+    for (const r of rader) {
+      html += `<tr>
+        <td data-l="Benämning"><span class="tname">${esc(r.name)}</span>
+          ${r.article_no ? `<span class="tsub"> ${esc(r.article_no)}</span>` : ""}
+          ${r.note ? `<div class="tsub">${esc(r.note)}</div>` : ""}
+          ${r.discount_percent ? `<div class="tsub">rabatt ${r.discount_percent} %</div>` : ""}</td>
+        <td data-l="Antal" class="tid">${r.quantity}</td>
+        <td data-l="Enhet" class="tid">${esc(r.unit)}</td>
+        <td data-l="À-pris" class="tid">${kr(r.unit_price)}</td>
+        <td data-l="Summa" class="tid"><strong>${kr(r.line_total)}</strong></td>
+        ${
+          kanRedigera
+            ? `<td><div class="row" style="gap:4px">
+            <button class="btn ghost sm" onclick="redigeraRad('${r.id}',${r.quantity},${r.unit_price})">Ändra</button>
+            <button class="btn danger sm" onclick="taBortRad('${r.id}')">×</button></div></td>`
+            : ""
+        }</tr>`;
+    }
+  }
+  html += `</tbody></table>
+  <div class="pad" style="border-top:1px solid var(--line)">
+    <div style="max-width:320px;margin-left:auto">
+      ${sumRad("Netto", dok.totals.netto)}
+      ${sumRad("Moms", dok.totals.moms)}
+      <div style="border-top:1px solid var(--ink);margin:6px 0 0;padding-top:6px">
+        ${sumRad("Att betala", dok.totals.brutto, true)}
+      </div>
+    </div></div>`;
+  return html;
+}
+
+function sumRad(etikett, varde, fet = false) {
+  return `<div style="display:flex;justify-content:space-between;padding:3px 0;
+    font-size:${fet ? "16px" : "14px"};font-weight:${fet ? "600" : "400"}">
+    <span>${etikett}</span><span class="mono">${kr(varde)} kr</span></div>`;
+}
+
+async function redigeraRad(id, antal, pris) {
+  const nyttAntal = prompt("Antal:", antal);
+  if (nyttAntal === null) return;
+  const nyttPris = prompt("À-pris:", pris);
+  if (nyttPris === null) return;
+  await api(`/lines/${id}`, {
+    method: "PATCH",
+    body: {
+      quantity: parseFloat(String(nyttAntal).replace(",", ".")) || 0,
+      unit_price: parseFloat(String(nyttPris).replace(",", ".")) || 0,
+    },
+  });
+  laddaOmDokument();
+}
+
+async function taBortRad(id) {
+  if (!confirm("Ta bort raden?")) return;
+  await api(`/lines/${id}`, { method: "DELETE" });
+  laddaOmDokument();
+}
+
+function laddaOmDokument() {
+  if (S.route === "offert") viewQuote();
+  else if (S.route === "order") viewOrder();
+}
+
+/* Radväljare med artiklar, används av både offert och order */
+async function radFormular(malId, typ) {
+  const artiklar = S.data.articles || (await api("/articles"));
+  S.data.articles = artiklar;
+  return `
+  <div class="jnew" style="margin-top:14px">
+    <strong style="font-family:var(--cond);text-transform:uppercase;letter-spacing:.05em">Lägg till rad</strong>
+    <div class="fgrid">
+      <div style="grid-column:1/-1"><label class="f" for="ln_art">Artikel ur registret</label>
+        <select id="ln_art" onchange="artikelVald()">
+          <option value="">Fri rad, skriv själv nedan</option>
+          ${artiklar
+            .map(
+              (a) =>
+                `<option value="${a.id}" data-pris="${a.sales_price}" data-enhet="${esc(a.unit)}"
+                  data-namn="${esc(a.name)}" data-lager="${a.track_stock ? a.stock : ""}">
+                  ${esc(a.article_no)} · ${esc(a.name)} · ${krRund(a.sales_price)} kr/${esc(a.unit)}${
+                    a.track_stock ? ` · lager ${a.stock}` : ""
+                  }</option>`
+            )
+            .join("")}
+        </select></div>
+      ${fld("ln_namn", "Benämning", "")}
+      <div><label class="f" for="ln_typ">Typ</label><select id="ln_typ">
+        <option value="material">Material</option><option value="arbete">Arbete</option>
+        <option value="ovrigt">Övrigt</option></select></div>
+      ${fld("ln_antal", "Antal", 1, "number")}
+      ${fld("ln_enhet", "Enhet", "st")}
+      ${fld("ln_pris", "À-pris", "", "number")}
+      ${fld("ln_rabatt", "Rabatt %", "", "number")}
+    </div>
+    ${fld("ln_note", "Anteckning på raden", "")}
+    <button class="btn pri sm" style="margin-top:12px" onclick="laggRad('${malId}','${typ}')">Lägg till</button>
+  </div>`;
+}
+
+function artikelVald() {
+  const val_ = $("#ln_art");
+  const o = val_.selectedOptions[0];
+  if (!o || !val_.value) return;
+  $("#ln_namn").value = o.dataset.namn || "";
+  $("#ln_pris").value = o.dataset.pris || "";
+  $("#ln_enhet").value = o.dataset.enhet || "st";
+}
+
+async function laggRad(malId, typ) {
+  const body = {
+    article_id: val("ln_art") || null,
+    name: val("ln_namn").trim(),
+    kind: val("ln_typ"),
+    unit: val("ln_enhet") || "st",
+    quantity: numVal("ln_antal") ?? 1,
+    unit_price: numVal("ln_pris") ?? 0,
+    discount_percent: numVal("ln_rabatt") ?? 0,
+    note: val("ln_note"),
+  };
+  if (!body.article_id && !body.name) return toast("Välj artikel eller skriv en benämning", true);
+  try {
+    const vag = typ === "quote" ? `/quotes/${malId}/lines` : `/work-orders/${malId}/lines`;
+    await api(vag, { method: "POST", body });
+    toast("Raden tillagd");
+    laddaOmDokument();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+
+/* ---------------- offert ---------------- */
+async function viewQuote() {
+  const token = claim();
+  mountShell(`<div class="skel" style="width:35%"></div><div class="skel"></div>`);
+  const q = await api(`/quotes/${S.id}`);
+  if (!current(token)) return;
+  S.data.quote = q;
+  const [text, klass] = OFFERT_STATUS[q.status] || [q.status, "n"];
+  const laser = S.user.role === "lasare";
+  const kanRedigera = !laser && ["utkast", "skickad"].includes(q.status);
+
+  $("#view").innerHTML = `
+  <button class="back" onclick="${q.customer_id ? `go('kund','${q.customer_id}/offerter')` : `go('besok','${q.visit_id}')`}">← Tillbaka</button>
+  <div class="chead">
+    <div class="spread" style="margin-bottom:0">
+      <div><div class="eyebrow">${esc(q.quote_no)} · skapad ${dt(q.created_at, false)} av ${esc(q.created_by)}</div>
+        <h1>${esc(q.title || "Offert")}</h1>
+        <p class="lead">${esc(q.recipient_name)}${q.customer_name ? ` · ${esc(q.customer_name)}` : ""}</p></div>
+      <div class="row"><span class="tag ${klass}">${esc(text)}</span>
+        <span class="mono" style="font-size:19px;font-weight:600">${kr(q.totals.brutto)} kr</span></div>
+    </div>
+    <div class="facts">
+      <div class="fact"><div class="k">Giltig till</div><div class="v mono">${esc(q.valid_until || "—")}</div></div>
+      <div class="fact"><div class="k">Mottagare</div><div class="v">${esc(q.recipient_email || "—")}</div></div>
+      <div class="fact"><div class="k">Netto</div><div class="v mono">${kr(q.totals.netto)} kr</div></div>
+      <div class="fact"><div class="k">Moms</div><div class="v mono">${kr(q.totals.moms)} kr</div></div>
+      ${q.sent_at ? `<div class="fact"><div class="k">Skickad</div><div class="v mono" style="font-size:13px">${dt(q.sent_at)}</div></div>` : ""}
+      ${q.decided_at ? `<div class="fact"><div class="k">Besked</div><div class="v mono">${esc(q.decided_at)}</div></div>` : ""}
+    </div>
+  </div>
+
+  <div class="row" style="margin-bottom:16px">
+    <button class="btn" onclick="oppnaPdf('/api/quotes/${q.id}/pdf')">Visa PDF</button>
+    <button class="btn ghost" onclick="skrivUt('/api/quotes/${q.id}/pdf')">Skriv ut</button>
+    <button class="btn ghost" onclick="laddaNer('/api/quotes/${q.id}/pdf?ladda_ner=true','${esc(q.quote_no)}.pdf')">Ladda ner</button>
+    ${laser ? "" : `<button class="btn pri" onclick="skickaOffert()">Mejla till kund</button>`}
+    ${
+      !laser && q.status === "skickad"
+        ? `<button class="btn ghost" onclick="offertBesked('accepterad')">Accepterad</button>
+           <button class="btn ghost" onclick="offertBesked('avslagen')">Avslagen</button>`
+        : ""
+    }
+    ${
+      !laser && q.status === "accepterad" && q.customer_id
+        ? `<button class="btn pri" onclick="skapaOrderFranOffert()">Skapa arbetsorder</button>`
+        : ""
+    }
+  </div>
+  <div id="sendbox"></div>
+
+  <div class="card">
+    <div class="hd"><h2>Rader</h2><span class="tag n">${q.lines.length}</span></div>
+    ${
+      q.lines.length
+        ? radTabell(q, laser, kanRedigera)
+        : `<div class="empty"><div class="big">Inga rader än</div>
+           <p>Lägg till material och arbete nedan. Artiklar ur registret fyller i pris och enhet åt dig.</p></div>`
+    }
+    <div class="pad" id="radform">${kanRedigera ? "" : ""}</div>
+  </div>
+
+  ${
+    laser
+      ? ""
+      : `<div class="card" style="margin-top:16px"><div class="hd"><h2>Text och villkor</h2></div>
+    <div class="pad">
+      <div class="fgrid">
+        ${fld("q_titel", "Rubrik", q.title || "")}
+        ${fld("q_giltig", "Giltig till", q.valid_until || "", "date")}
+        ${fld("q_mott", "Mottagarens namn", q.recipient_name || "")}
+        ${fld("q_mail", "E-post", q.recipient_email || "", "email")}
+        ${fld("q_adr", "Adress", q.recipient_address || "")}
+        ${fld("q_rabatt", "Rabatt på hela offerten %", q.discount_percent || "", "number")}
+      </div>
+      <label class="f" for="q_intro">Inledande text</label>
+      <textarea id="q_intro">${esc(q.intro || "")}</textarea>
+      <label class="f" for="q_villkor">Villkor</label>
+      <textarea id="q_villkor">${esc(q.terms || "")}</textarea>
+      <div class="row" style="margin-top:14px">
+        <button class="btn pri sm" onclick="sparaOffert()">Spara</button>
+        <button class="btn danger sm" style="margin-left:auto" onclick="taBortOffert()">Ta bort offerten</button>
+      </div>
+    </div></div>`
+  }`;
+
+  if (kanRedigera) $("#radform").innerHTML = await radFormular(q.id, "quote");
+}
+
+async function sparaOffert() {
+  try {
+    await api(`/quotes/${S.data.quote.id}`, {
+      method: "PATCH",
+      body: {
+        title: val("q_titel"),
+        valid_until: val("q_giltig"),
+        recipient_name: val("q_mott"),
+        recipient_email: val("q_mail"),
+        recipient_address: val("q_adr"),
+        discount_percent: numVal("q_rabatt") ?? 0,
+        intro: val("q_intro"),
+        terms: val("q_villkor"),
+      },
+    });
+    toast("Offerten sparad");
+    viewQuote();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function offertBesked(status) {
+  await api(`/quotes/${S.data.quote.id}`, { method: "PATCH", body: { status } });
+  toast(status === "accepterad" ? "Markerad som accepterad" : "Markerad som avslagen");
+  viewQuote();
+}
+
+async function taBortOffert() {
+  const q = S.data.quote;
+  if (!confirm(`Ta bort ${q.quote_no}? Det går inte att ångra.`)) return;
+  await api(`/quotes/${q.id}`, { method: "DELETE" });
+  toast("Offerten borttagen");
+  if (q.customer_id) go("kund", q.customer_id + "/offerter");
+  else go("besok", q.visit_id);
+}
+
+function skickaOffert() {
+  const q = S.data.quote;
+  const box = $("#sendbox");
+  if (box.innerHTML) return (box.innerHTML = "");
+  box.innerHTML = `
+  <div class="card" style="margin-bottom:16px;border-color:#C9DFE3">
+    <div class="hd" style="background:#F4F9FA"><h2>Mejla offerten</h2></div>
+    <div class="pad">
+      <p class="lead" style="margin-top:0">PDF:en bifogas, sparas bland kundens dokument och
+        journalförs. Skickas från din egen server.</p>
+      <div class="fgrid">
+        ${fld("sq_to", "Mottagare", q.recipient_email || "", "email")}
+        ${fld("sq_amne", "Ämne", `Offert ${q.quote_no}${q.title ? " – " + q.title : ""}`)}
+      </div>
+      <label class="f" for="sq_msg">Meddelande</label>
+      <textarea id="sq_msg" placeholder="Lämna tomt så skrivs ett standardmeddelande med summa och giltighetstid."></textarea>
+      <div class="row" style="margin-top:12px">
+        <button class="btn pri sm" onclick="genomforSkick()">Skicka</button>
+        <button class="btn ghost sm" onclick="document.getElementById('sendbox').innerHTML=''">Avbryt</button>
+      </div>
+    </div></div>`;
+}
+
+async function genomforSkick() {
+  try {
+    const r = await api(`/quotes/${S.data.quote.id}/send`, {
+      method: "POST",
+      body: { recipient: val("sq_to"), subject: val("sq_amne"), message: val("sq_msg") },
+    });
+    toast(
+      r.saved_to_customer
+        ? `Skickad till ${r.recipient} och sparad bland dokumenten`
+        : `Skickad till ${r.recipient}`
+    );
+    viewQuote();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function skapaOrderFranOffert() {
+  const q = S.data.quote;
+  try {
+    const o = await api("/work-orders", {
+      method: "POST",
+      body: {
+        customer_id: q.customer_id,
+        facility_id: q.facility_id,
+        quote_id: q.id,
+        title: q.title,
+        copy_quote_lines: true,
+      },
+    });
+    toast(`${o.order_no} skapad med ${o.lines.length} rader från offerten`);
+    go("order", o.id);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/* ---------------- arbetsorder ---------------- */
+async function viewOrder() {
+  const token = claim();
+  mountShell(`<div class="skel" style="width:35%"></div><div class="skel"></div>`);
+  const o = await api(`/work-orders/${S.id}`);
+  if (!current(token)) return;
+  S.data.order = o;
+  const [text, klass] = ORDER_STATUS[o.status] || [o.status, "n"];
+  const laser = S.user.role === "lasare";
+  const kanRedigera = !laser && ["oppen", "utford"].includes(o.status);
+
+  $("#view").innerHTML = `
+  <button class="back" onclick="go('kund','${o.customer_id}/order')">← Tillbaka till kunden</button>
+  <div class="chead">
+    <div class="spread" style="margin-bottom:0">
+      <div><div class="eyebrow">${esc(o.order_no)} · skapad ${dt(o.created_at, false)}</div>
+        <h1>${esc(o.title || "Arbetsorder")}</h1>
+        <p class="lead">${esc(o.customer_name)}</p></div>
+      <div class="row"><span class="tag ${klass}">${esc(text)}</span>
+        <span class="mono" style="font-size:19px;font-weight:600">${kr(o.totals.brutto)} kr</span></div>
+    </div>
+    <div class="facts">
+      <div class="fact"><div class="k">Material</div><div class="v mono">${kr(o.material_total)} kr</div></div>
+      <div class="fact"><div class="k">Arbete</div><div class="v mono">${kr(o.labour_total)} kr</div></div>
+      <div class="fact"><div class="k">Utförd</div><div class="v mono">${esc(o.performed_at || "—")}</div></div>
+      <div class="fact"><div class="k">Fakturerad</div><div class="v mono">${esc(o.invoiced_at || "—")}</div></div>
+      <div class="fact"><div class="k">Fakturanr</div><div class="v mono">${esc(o.invoice_no || "—")}</div></div>
+      <div class="fact"><div class="k">Betald</div><div class="v mono">${esc(o.paid_at || "—")}</div></div>
+    </div>
+  </div>
+
+  ${
+    laser
+      ? ""
+      : `<div class="card" style="margin-bottom:16px"><div class="hd"><h2>Status</h2>
+      ${o.stock_deducted ? `<span class="tag ok">Lagret draget</span>` : `<span class="tag n">Lagret ej draget</span>`}</div>
+    <div class="pad">
+      <div class="row">
+        ${Object.entries(ORDER_STATUS)
+          .filter(([k]) => k !== "makulerad")
+          .map(
+            ([k, [l, kl]]) =>
+              `<button class="btn ${o.status === k ? "pri" : "ghost"} sm"
+                onclick="orderStatus('${k}')">${l}</button>`
+          )
+          .join("")}
+      </div>
+      <p class="hint">Materialet dras från lagret när ordern markeras utförd, en gång.
+        Fakturerad och betald sätter datum automatiskt om de är tomma.</p>
+      <div class="fgrid" style="margin-top:8px">
+        ${fld("o_faktnr", "Fakturanummer", o.invoice_no || "")}
+        ${fld("o_utford", "Utförd datum", o.performed_at || "", "date")}
+        ${fld("o_av", "Utförd av", o.performed_by || "")}
+      </div>
+      <button class="btn ghost sm" style="margin-top:12px" onclick="sparaOrder()">Spara uppgifter</button>
+    </div></div>`
+  }
+
+  <div class="row" style="margin-bottom:16px">
+    <button class="btn ghost" onclick="oppnaPdf('/api/work-orders/${o.id}/pdf')">Visa PDF</button>
+    <button class="btn ghost" onclick="skrivUt('/api/work-orders/${o.id}/pdf')">Skriv ut</button>
+    ${laser ? "" : `<button class="btn ghost" onclick="sparaOrderPdf()">Spara bland dokumenten</button>`}
+  </div>
+
+  <div class="card">
+    <div class="hd"><h2>Material och arbete</h2><span class="tag n">${o.lines.length} rader</span></div>
+    ${
+      o.lines.length
+        ? radTabell(o, laser, kanRedigera)
+        : `<div class="empty"><div class="big">Inga rader än</div>
+           <p>Fyll i vad som gick åt, så syns det vid faktureringen.</p></div>`
+    }
+    <div class="pad" id="radform"></div>
+  </div>
+
+  ${
+    laser
+      ? ""
+      : `<div class="card" style="margin-top:16px"><div class="hd"><h2>Beskrivning</h2></div>
+    <div class="pad">
+      ${fld("o_titel", "Rubrik", o.title || "")}
+      <label class="f" for="o_beskr">Vad som gjordes</label>
+      <textarea id="o_beskr">${esc(o.description || "")}</textarea>
+      <div class="row" style="margin-top:12px">
+        <button class="btn pri sm" onclick="sparaOrder()">Spara</button>
+        ${
+          ["fakturerad", "betald"].includes(o.status)
+            ? ""
+            : `<button class="btn danger sm" style="margin-left:auto" onclick="taBortOrder()">Ta bort</button>`
+        }
+      </div>
+    </div></div>`
+  }`;
+
+  if (kanRedigera) $("#radform").innerHTML = await radFormular(o.id, "order");
+}
+
+async function orderStatus(status) {
+  const o = S.data.order;
+  if (status === "utford" && !o.stock_deducted) {
+    const material = o.lines.filter((r) => r.kind === "material" && r.article_id).length;
+    if (
+      material &&
+      !confirm(`Markera som utförd? ${material} materialrader dras från lagret. Det görs bara en gång.`)
+    )
+      return;
+  }
+  try {
+    const r = await api(`/work-orders/${o.id}`, { method: "PATCH", body: { status } });
+    toast(
+      r.stock_lines_deducted
+        ? `${ORDER_STATUS[status][0]}. ${r.stock_lines_deducted} rader drogs från lagret.`
+        : ORDER_STATUS[status][0]
+    );
+    viewOrder();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function sparaOrder() {
+  try {
+    await api(`/work-orders/${S.data.order.id}`, {
+      method: "PATCH",
+      body: {
+        title: val("o_titel") || S.data.order.title,
+        description: val("o_beskr") ?? S.data.order.description,
+        invoice_no: val("o_faktnr") ?? "",
+        performed_at: val("o_utford") ?? "",
+        performed_by: val("o_av") ?? "",
+      },
+    });
+    toast("Sparad");
+    viewOrder();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function sparaOrderPdf() {
+  try {
+    await api(`/work-orders/${S.data.order.id}/save-pdf`, { method: "POST" });
+    toast("Sparad bland kundens dokument");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function taBortOrder() {
+  const o = S.data.order;
+  if (!confirm(`Ta bort ${o.order_no}?`)) return;
+  try {
+    await api(`/work-orders/${o.id}`, { method: "DELETE" });
+    toast("Borttagen");
+    go("kund", o.customer_id + "/order");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+
+/* ---------------- artikelregister ---------------- */
+async function viewArticles() {
+  const token = claim();
+  mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
+  const q = S.filter.artQ || "";
+  const [artiklar, sum] = await Promise.all([
+    api(`/articles?${new URLSearchParams({ q, ...(S.filter.artLow ? { low_stock: "true" } : {}) })}`),
+    api("/articles/summary"),
+  ]);
+  if (!current(token)) return;
+  S.data.articles = artiklar;
+
+  $("#view").innerHTML = `
+  <div class="spread">
+    <div><div class="eyebrow">Lager och prislista</div><h1>Artiklar</h1>
+      <p class="lead">Det du har hemma och det du säljer. Artiklar härifrån fyller i pris och enhet
+      på offerter och arbetsorder, och lagret dras när en order markeras utförd.</p></div>
+    ${S.user.role === "lasare" ? "" : `<button class="btn pri" onclick="nyArtikel()">+ Ny artikel</button>`}
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="v">${sum.antal}</div><div class="l">Artiklar</div></div>
+    <div class="stat"><div class="v">${krRund(sum.lagervarde)}</div><div class="l">Lagervärde, kr</div></div>
+    <div class="stat ${sum.laga_saldon.length ? "warn" : ""}"><div class="v">${sum.laga_saldon.length}</div>
+      <div class="l">Under min-nivå</div></div>
+    <div class="stat"><div class="v">${sum.kategorier.length}</div><div class="l">Kategorier</div></div>
+  </div>
+
+  <div id="artform"></div>
+
+  <div class="card">
+    <div class="hd"><h2>Register</h2>
+      <input id="artsok" placeholder="Sök artikel, nummer eller leverantör" value="${esc(q)}"
+        style="max-width:260px;margin-left:auto" oninput="artikelSok(this.value)">
+      <button class="btn ghost sm" onclick="S.filter.artLow=!S.filter.artLow;viewArticles()">
+        ${S.filter.artLow ? "Visa alla" : "Bara låga saldon"}</button></div>
+    <table><thead><tr><th>Nr</th><th>Benämning</th><th>Kategori</th><th>Inpris</th>
+      <th>Utpris</th><th>Marginal</th><th>Lager</th><th></th></tr></thead>
+    <tbody>${artiklar
+      .map(
+        (a) => `<tr>
+      <td data-l="Nr" class="tid">${esc(a.article_no)}</td>
+      <td data-l="Benämning"><span class="tname">${esc(a.name)}</span>
+        ${a.supplier ? `<div class="tsub">${esc(a.supplier)}</div>` : ""}</td>
+      <td data-l="Kategori">${esc(a.category || "—")}</td>
+      <td data-l="Inpris" class="tid">${krRund(a.purchase_price)}</td>
+      <td data-l="Utpris" class="tid">${krRund(a.sales_price)}</td>
+      <td data-l="Marginal" class="tid">${
+        a.margin_percent === null ? "—" : `${krRund(a.margin)} kr · ${a.margin_percent} %`
+      }</td>
+      <td data-l="Lager">${
+        a.track_stock
+          ? `<span class="${a.low_stock ? "tag soon" : "tid"}">${a.stock} ${esc(a.unit)}${
+              a.min_stock ? ` (min ${a.min_stock})` : ""
+            }</span>`
+          : `<span class="tsub">lagerförs ej</span>`
+      }</td>
+      <td><div class="row" style="gap:4px">
+        ${
+          S.user.role === "lasare"
+            ? ""
+            : `${a.track_stock ? `<button class="btn ghost sm" onclick="justeraLager('${a.id}','${esc(a.name)}',${a.stock})">Lager</button>` : ""}
+               <button class="btn ghost sm" onclick="redigeraArtikel('${a.id}')">Ändra</button>`
+        }</div></td></tr>`
+      )
+      .join("")}</tbody></table>
+    ${
+      artiklar.length
+        ? ""
+        : `<div class="empty"><div class="big">Inga artiklar</div>
+           <p>Lägg upp det du har hemma i lager och det du brukar debitera.</p></div>`
+    }
+  </div>`;
+}
+
+let artTimer;
+function artikelSok(v) {
+  clearTimeout(artTimer);
+  artTimer = setTimeout(() => {
+    S.filter.artQ = v;
+    viewArticles();
+  }, 300);
+}
+
+function artikelFormular(a) {
+  return `<div class="fgrid">
+      ${fld("a_namn", "Benämning", a ? a.name : "")}
+      ${fld("a_nr", "Artikelnummer", a ? a.article_no : "", "text", 'placeholder="Sätts automatiskt"')}
+      ${fld("a_kat", "Kategori", a ? a.category : "", "text", 'placeholder="Rör, Pumpar, El, Arbete"')}
+      ${fld("a_enhet", "Enhet", a ? a.unit : "st")}
+      ${fld("a_in", "Inköpspris", a ? a.purchase_price : "", "number")}
+      ${fld("a_ut", "Försäljningspris", a ? a.sales_price : "", "number")}
+      ${fld("a_moms", "Moms %", a ? a.vat_percent : 25, "number")}
+      ${fld("a_lev", "Leverantör", a ? a.supplier : "")}
+      ${a ? "" : fld("a_saldo", "Ingående saldo", "", "number")}
+      ${fld("a_min", "Min-nivå för varning", a ? a.min_stock : "", "number")}
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label style="display:flex;gap:8px;align-items:center;font-size:14px;width:auto">
+        <input type="checkbox" id="a_lager" ${!a || a.track_stock ? "checked" : ""} style="width:auto">
+        Lagerförs, saldot dras vid utförd order</label>
+    </div>`;
+}
+
+function nyArtikel() {
+  const box = $("#artform");
+  if (box.innerHTML) return (box.innerHTML = "");
+  box.innerHTML = `<div class="card" style="margin-bottom:16px;border-color:#C9DFE3">
+    <div class="hd" style="background:#F4F9FA"><h2>Ny artikel</h2></div>
+    <div class="pad">${artikelFormular(null)}
+      <div class="row" style="margin-top:14px">
+        <button class="btn pri sm" onclick="sparaNyArtikel()">Spara</button>
+        <button class="btn ghost sm" onclick="document.getElementById('artform').innerHTML=''">Avbryt</button>
+      </div></div></div>`;
+}
+
+async function sparaNyArtikel() {
+  if (!val("a_namn").trim()) return toast("Artikeln behöver ett namn", true);
+  try {
+    await api("/articles", {
+      method: "POST",
+      body: {
+        name: val("a_namn").trim(),
+        article_no: val("a_nr").trim(),
+        category: val("a_kat"),
+        unit: val("a_enhet") || "st",
+        purchase_price: numVal("a_in") ?? 0,
+        sales_price: numVal("a_ut") ?? 0,
+        vat_percent: numVal("a_moms") ?? 25,
+        supplier: val("a_lev"),
+        stock: numVal("a_saldo") ?? 0,
+        min_stock: numVal("a_min") ?? 0,
+        track_stock: $("#a_lager").checked,
+      },
+    });
+    toast("Artikeln sparad");
+    S.data.articles = null;
+    viewArticles();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function redigeraArtikel(id) {
+  const a = (S.data.articles || []).find((x) => x.id === id);
+  const box = $("#artform");
+  if (!a) return;
+  box.innerHTML = `<div class="card" style="margin-bottom:16px;border-color:#C9DFE3">
+    <div class="hd" style="background:#F4F9FA"><h2>${esc(a.article_no)} ${esc(a.name)}</h2></div>
+    <div class="pad">${artikelFormular(a)}
+      <p class="hint">Saldot ändras inte här, utan under Lager, så att varje förändring går att
+        förklara i efterhand.</p>
+      <div class="row" style="margin-top:14px">
+        <button class="btn pri sm" onclick="sparaArtikel('${a.id}')">Spara</button>
+        <button class="btn ghost sm" onclick="visaRorelser('${a.id}')">Lagerhistorik</button>
+        <button class="btn ghost sm" onclick="document.getElementById('artform').innerHTML=''">Avbryt</button>
+        <button class="btn danger sm" style="margin-left:auto" onclick="avaktiveraArtikel('${a.id}')">Avaktivera</button>
+      </div>
+      <div id="rorelser"></div></div></div>`;
+  scrollTill(box);
+}
+
+async function sparaArtikel(id) {
+  try {
+    await api(`/articles/${id}`, {
+      method: "PATCH",
+      body: {
+        name: val("a_namn").trim(),
+        article_no: val("a_nr").trim(),
+        category: val("a_kat"),
+        unit: val("a_enhet"),
+        purchase_price: numVal("a_in") ?? 0,
+        sales_price: numVal("a_ut") ?? 0,
+        vat_percent: numVal("a_moms") ?? 25,
+        supplier: val("a_lev"),
+        min_stock: numVal("a_min") ?? 0,
+        track_stock: $("#a_lager").checked,
+      },
+    });
+    toast("Sparad");
+    S.data.articles = null;
+    viewArticles();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function avaktiveraArtikel(id) {
+  if (!confirm("Avaktivera artikeln? Den försvinner ur listan men står kvar på gamla order.")) return;
+  await api(`/articles/${id}`, { method: "DELETE" });
+  toast("Avaktiverad");
+  S.data.articles = null;
+  viewArticles();
+}
+
+async function justeraLager(id, namn, saldo) {
+  const svar = prompt(`Nytt saldo för ${namn} (nu ${saldo}). Skriv +12 för inleverans.`, "");
+  if (svar === null || !svar.trim()) return;
+  const text = svar.trim().replace(",", ".");
+  const body = text.startsWith("+") || text.startsWith("-")
+    ? { change: parseFloat(text), reason: parseFloat(text) > 0 ? "inkop" : "justering" }
+    : { set_to: parseFloat(text), reason: "justering" };
+  if (isNaN(body.change ?? body.set_to)) return toast("Kunde inte tolka talet", true);
+  const anteckning = prompt("Anteckning, till exempel leverantör eller följesedel:", "") || "";
+  try {
+    await api(`/articles/${id}/stock`, { method: "POST", body: { ...body, note: anteckning } });
+    toast("Saldot uppdaterat");
+    S.data.articles = null;
+    viewArticles();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function visaRorelser(id) {
+  const box = $("#rorelser");
+  if (box.innerHTML) return (box.innerHTML = "");
+  const rader = await api(`/articles/${id}/movements`);
+  box.innerHTML = `<div style="margin-top:14px">
+    <div class="eyebrow">Lagerhistorik</div>
+    ${
+      rader.length
+        ? rader
+            .map(
+              (r) => `<div class="filerow">
+        <div class="ftype" style="background:${r.change > 0 ? "#2E7D5B" : "#A6402F"}">
+          ${r.change > 0 ? "+" : ""}${r.change}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:500">${esc(r.reason)} · saldo efter ${r.balance_after}</div>
+          <div class="fmeta">${dt(r.at)} · ${esc(r.by_user)}${r.note ? " · " + esc(r.note) : ""}</div></div>
+      </div>`
+            )
+            .join("")
+        : `<p class="hint">Inga rörelser än.</p>`
+    }</div>`;
+}
+
+/* ---------------- ekonomiöversikt ---------------- */
+async function viewEconomy() {
+  const token = claim();
+  mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
+  const filter = S.filter.ekStatus || "aktiva";
+  const [sum, order, offerter] = await Promise.all([
+    api("/work-orders/summary"),
+    api(`/work-orders?status=${filter}`),
+    api("/quotes?status=aktiva"),
+  ]);
+  if (!current(token)) return;
+
+  const orderRad = (o) => {
+    const [text, klass] = ORDER_STATUS[o.status] || [o.status, "n"];
+    return `<tr class="clickable" onclick="go('order','${o.id}')">
+      <td data-l="Nr" class="tid">${esc(o.order_no)}</td>
+      <td data-l="Kund"><span class="tname">${esc(o.customer_name)}</span>
+        <div class="tsub">${esc(o.title || "")}</div></td>
+      <td data-l="Utförd" class="tid">${esc(o.performed_at || "—")}</td>
+      <td data-l="Fakturanr" class="tid">${esc(o.invoice_no || "—")}</td>
+      <td data-l="Belopp" class="tid"><strong>${kr(o.totals.brutto)}</strong></td>
+      <td data-l="Status"><span class="tag ${klass}">${text}</span></td></tr>`;
+  };
+
+  $("#view").innerHTML = `
+  <div class="spread">
+    <div><div class="eyebrow">Uppföljning</div><h1>Att fakturera</h1>
+      <p class="lead">Arbetsorder som är utförda men inte fakturerade, och fakturor som väntar på
+      betalning. Det är här saker annars glöms bort.</p></div>
+    <select style="width:auto" onchange="S.filter.ekStatus=this.value;viewEconomy()">
+      ${[["aktiva", "Pågående"], ["att_fakturera", "Att fakturera"], ["obetalda", "Obetalda"],
+         ["betald", "Betalda"], ["", "Alla"]]
+        .map(([v, l]) => `<option value="${v}"${filter === v ? " selected" : ""}>${l}</option>`)
+        .join("")}
+    </select>
+  </div>
+
+  <div class="stats">
+    <div class="stat ${sum.att_fakturera ? "warn" : ""}"><div class="v">${sum.att_fakturera}</div>
+      <div class="l">Att fakturera</div></div>
+    <div class="stat ${sum.att_fakturera ? "warn" : ""}"><div class="v">${krRund(sum.att_fakturera_belopp)}</div>
+      <div class="l">Kronor att fakturera</div></div>
+    <div class="stat ${sum.obetalda ? "bad" : ""}"><div class="v">${sum.obetalda}</div>
+      <div class="l">Obetalda fakturor</div></div>
+    <div class="stat"><div class="v">${krRund(sum.obetalda_belopp)}</div>
+      <div class="l">Kronor utestående</div></div>
+  </div>
+
+  <div class="card" style="margin-bottom:18px">
+    <div class="hd"><h2>Arbetsorder</h2><span class="tag n">${order.length}</span></div>
+    <table><thead><tr><th>Nr</th><th>Kund</th><th>Utförd</th><th>Fakturanr</th>
+      <th>Belopp</th><th>Status</th></tr></thead>
+    <tbody>${order.map(orderRad).join("")}</tbody></table>
+    ${order.length ? "" : `<div class="empty"><div class="big">Inget här</div><p>Byt filter för att se fler.</p></div>`}
+  </div>
+
+  <div class="card">
+    <div class="hd"><h2>Öppna offerter</h2><span class="tag n">${offerter.length}</span></div>
+    <table><thead><tr><th>Nr</th><th>Mottagare</th><th>Rubrik</th><th>Giltig till</th>
+      <th>Belopp</th><th>Status</th></tr></thead>
+    <tbody>${offerter
+      .map((q) => {
+        const [text, klass] = OFFERT_STATUS[q.status] || [q.status, "n"];
+        return `<tr class="clickable" onclick="go('offert','${q.id}')">
+        <td data-l="Nr" class="tid">${esc(q.quote_no)}</td>
+        <td data-l="Mottagare"><span class="tname">${esc(q.recipient_name)}</span></td>
+        <td data-l="Rubrik">${esc(q.title || "—")}</td>
+        <td data-l="Giltig till" class="tid">${esc(q.valid_until || "—")}</td>
+        <td data-l="Belopp" class="tid"><strong>${kr(q.totals.brutto)}</strong></td>
+        <td data-l="Status"><span class="tag ${klass}">${text}</span></td></tr>`;
+      })
+      .join("")}</tbody></table>
+    ${offerter.length ? "" : `<div class="empty"><div class="big">Inga öppna offerter</div></div>`}
+  </div>`;
 }
 
 /* ---------------- mitt konto ---------------- */
@@ -2810,6 +3861,7 @@ function routeLink(origin, stops) {
 
 function nearbyRow(h, selectable = true) {
   const prio = h.priority === 3 ? "action" : h.priority === 2 ? "soon" : "n";
+  const arBesok = h.typ === "besok";
   return `<div class="filerow">
     ${
       selectable
@@ -2817,17 +3869,30 @@ function nearbyRow(h, selectable = true) {
              ${h.priority > 0 ? "checked" : ""} aria-label="Ta med ${esc(h.customer_name)} i rundan">`
         : ""
     }
-    <div class="ftype" style="background:${h.priority === 3 ? "#A6402F" : h.priority === 2 ? "#B3801F" : "var(--stone)"}">
+    <div class="ftype" style="background:${
+      arBesok
+        ? "#155F6E"
+        : h.priority === 3
+          ? "#A6402F"
+          : h.priority === 2
+            ? "#B3801F"
+            : "var(--stone)"
+    }">
       ${h.distance_km < 10 ? h.distance_km.toFixed(1) : Math.round(h.distance_km)}<br>km</div>
     <div style="flex:1;min-width:0">
-      <div style="font-weight:600">${esc(h.customer_name)}</div>
-      <div class="fmeta">${esc(h.facility_no)} · ${esc(h.bearing)} · ${esc(h.property_designation || "")} ${esc(h.municipality || "")}</div>
-      <div class="tsub" style="margin-top:2px"><span class="tag ${prio}" style="margin-right:6px">${esc(h.reason)}</span></div>
+      <div style="font-weight:600">${esc(h.customer_name)}
+        ${arBesok ? `<span class="tag n" style="margin-left:6px">Besök</span>` : ""}</div>
+      <div class="fmeta">${esc(arBesok ? h.visit_no : h.facility_no)} · ${esc(h.bearing)} ·
+        ${esc(h.property_designation || "")} ${esc(h.municipality || "")}</div>
+      <div class="tsub" style="margin-top:2px"><span class="tag ${prio}" style="margin-right:6px">${esc(h.reason)}</span>
+        ${arBesok && h.errand ? esc(h.errand) : ""}</div>
     </div>
     <div class="row" style="gap:6px">
       ${h.phone ? `<a class="btn ghost sm" href="tel:${esc(h.phone)}">Ring</a>` : ""}
       <a class="btn ghost sm" href="${mapLink(h.latitude, h.longitude)}" target="_blank" rel="noopener">Karta</a>
-      <button class="btn ghost sm" onclick="go('kund','${h.customer_id}')">Öppna</button>
+      <button class="btn ghost sm" onclick="${
+        arBesok ? `go('besok','${h.visit_id}')` : `go('kund','${h.customer_id}')`
+      }">Öppna</button>
     </div>
   </div>`;
 }
@@ -2859,6 +3924,11 @@ async function viewNearby() {
         <select id="oj" onchange="S.filter.onlyJobs=this.value==='1';runNearby()">
           <option value="1"${onlyJobs ? " selected" : ""}>Bara sådant som behöver något</option>
           <option value="0"${!onlyJobs ? " selected" : ""}>Alla anläggningar</option>
+        </select></div>
+      <div><label class="f" for="ib">Inbokade besök</label>
+        <select id="ib" onchange="S.filter.medBesok=this.value==='1';runNearby()">
+          <option value="1"${S.filter.medBesok !== false ? " selected" : ""}>Ta med</option>
+          <option value="0"${S.filter.medBesok === false ? " selected" : ""}>Bara anläggningar</option>
         </select></div>
     </div>
     <div id="geohint" class="hint">${
@@ -2910,7 +3980,8 @@ async function runNearby() {
   const radius = S.filter.radius || 25;
   const onlyJobs = S.filter.onlyJobs !== false;
   const r = await api(
-    `/nearby?lat=${S.origin.latitude}&lon=${S.origin.longitude}&radius_km=${radius}&only_jobs=${onlyJobs}`
+    `/nearby?lat=${S.origin.latitude}&lon=${S.origin.longitude}&radius_km=${radius}` +
+      `&only_jobs=${onlyJobs}&include_visits=${S.filter.medBesok !== false}`
   );
   S.data.nearby = r.results;
   if (!current(token) || !$("#nearres")) return;
@@ -2968,15 +4039,18 @@ function planFrom(facilityId) {
 async function viewAdmin() {
   const token = claim();
   const tab =
-    S.tab && ["konton", "notiser", "sgu", "backup", "logg"].includes(S.tab) ? S.tab : "konton";
+    S.tab && ["konton", "foretag", "notiser", "sgu", "backup", "logg"].includes(S.tab)
+      ? S.tab
+      : "konton";
   const T = (id, label) =>
     `<button class="${tab === id ? "on" : ""}" onclick="go('admin','${id}')">${label}</button>`;
   mountShell(`
     <div class="spread"><div><div class="eyebrow">Administration</div><h1>Inställningar</h1></div></div>
-    <div class="tabs">${T("konton", "Konton")}${T("notiser", "Notiser")}${T("sgu", "SGU")}${T("backup", "Backup")}${T("logg", "Logg")}</div>
+    <div class="tabs">${T("konton", "Konton")}${T("foretag", "Företag")}${T("notiser", "Notiser")}${T("sgu", "SGU")}${T("backup", "Backup")}${T("logg", "Logg")}</div>
     <div id="adminbody"><div class="skel"></div><div class="skel"></div></div>`);
 
   if (tab === "konton") await adminUsers();
+  else if (tab === "foretag") await adminCompany();
   else if (tab === "sgu") await adminSgu();
   else if (tab === "notiser") await adminNotifications();
   else if (tab === "backup") await adminBackup();
@@ -3277,8 +4351,50 @@ async function adminBackup() {
       }</p>
     <div class="row">
       <button class="btn pri" id="bnow">Skapa backup nu</button>
-      <span class="hint" style="margin:0">Upptaget av backuper: ${bytes(data.usage.backup_bytes)} · ledigt på disk: ${bytes(data.usage.free_bytes)}</span>
+      <label style="display:flex;gap:8px;align-items:center;font-size:14px;width:auto">
+        <input type="checkbox" id="b_filer" checked style="width:auto">
+        Ta med dokument och bilder</label>
     </div>
+    <div class="hint" style="margin-top:8px">
+      Upptaget av backuper: ${bytes(data.usage.backup_bytes)} · ledigt på disk: ${bytes(data.usage.free_bytes)}<br>
+      Lagras i <code>${esc(data.backup_dir)}</code>${
+        data.backup_dir_extern
+          ? ` <span class="tag ok" style="margin-left:6px">egen plats</span>`
+          : ` <span class="tag soon" style="margin-left:6px">samma volym som filerna</span>`
+      }
+    </div>
+    ${
+      data.backup_dir_extern
+        ? ""
+        : `<p class="hint">Backuperna ligger på samma volym som det de skyddar. Det räcker mot
+           misstag i databasen, men inte mot att disken går sönder. Sätt <code>BACKUP_DIR</code>
+           i <code>.env</code> till en monterad nätverksdisk eller extern volym, till exempel
+           <code>BACKUP_DIR=/backup</code> med en rad
+           <code>- /mnt/nas/borrjournal:/backup</code> under volumes i compose.</p>`
+    }
+  </div></div>
+
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Kundpaket</h2></div><div class="pad">
+    <p class="lead" style="margin-top:0">Ett kundpaket innehåller allt om en eller alla kunder:
+      uppgifter, anläggningar, journal, påminnelser, dokument och bilder med läsbara filnamn.
+      Till skillnad från en backup kan det läsas in i ett system som redan har data, utan att
+      röra det som finns där. Det är vad du vill ha om servern ska byggas om, eller om en enskild
+      kund råkat raderas.</p>
+    <div class="row">
+      <button class="btn sm" onclick="exportPaket()">Exportera alla kunder</button>
+      <button class="btn ghost sm" onclick="valjKundExport()">Exportera en kund</button>
+    </div>
+    <div id="exportval"></div>
+    <label class="f" style="margin-top:16px">Läs in kundpaket</label>
+    <div class="row">
+      <input type="file" id="paketfil" accept=".gz,.tar,application/gzip" style="flex:1;min-width:200px">
+      <label style="display:flex;gap:8px;align-items:center;font-size:14px;width:auto">
+        <input type="checkbox" id="paket_ersatt" style="width:auto">
+        Skriv över kunder med samma kundnummer</label>
+      <button class="btn sm" onclick="importPaket()">Läs in</button>
+    </div>
+    <div class="hint">Utan överskrivning hoppas kunder som redan finns över, och du får veta vilka.</div>
+    <div id="importresultat"></div>
   </div></div>
 
   <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Schema</h2>
@@ -3307,7 +4423,14 @@ async function adminBackup() {
       <td data-l="Skapad" class="tid">${dt(b.created_at)}<div class="tsub">${esc(b.created_by)}</div></td>
       <td data-l="Typ">${esc(b.trigger)}</td>
       <td data-l="Motor" class="mono" style="font-size:12.5px">${esc(b.engine || "—")}</td>
-      <td data-l="Storlek" class="tid">${bytes(b.size_bytes)}</td>
+      <td data-l="Storlek" class="tid">${bytes(b.size_bytes)}
+        <div class="tsub">${
+          b.file_count === null || b.file_count === undefined
+            ? ""
+            : b.file_count
+              ? `${b.file_count} filer, ${bytes(b.file_bytes)}`
+              : "utan filer"
+        }</div></td>
       <td data-l="Status">${b.status === "klar" ? `<span class="tag ok">Klar</span>` : `<span class="tag action">Fel</span>`}
         ${b.status !== "klar" ? `<div class="tsub">${esc((b.detail || "").slice(0, 90))}</div>` : ""}</td>
       <td data-l=""><div class="row" style="gap:6px">
@@ -3326,8 +4449,15 @@ async function adminBackup() {
     e.target.disabled = true;
     e.target.textContent = "Skapar backup…";
     try {
-      const r = await api("/backups", { method: "POST" });
-      toast(`Backup klar, ${bytes(r.size_bytes)}`);
+      const r = await api("/backups", {
+        method: "POST",
+        body: { include_files: $("#b_filer").checked },
+      });
+      toast(
+        r.file_count
+          ? `Backup klar, ${bytes(r.size_bytes)} med ${r.file_count} filer`
+          : `Backup klar, ${bytes(r.size_bytes)}`
+      );
     } catch (err) {
       toast(err.message, true);
     }
@@ -3351,6 +4481,88 @@ async function adminBackup() {
       toast(e.message, true);
     }
   };
+}
+
+
+/* ---------------- kundpaket ---------------- */
+async function laddaNer(path, filnamn) {
+  const res = await fetch(path, { headers: { Authorization: `Bearer ${S.token}` } });
+  if (!res.ok) {
+    let d = `Fel ${res.status}`;
+    try {
+      d = (await res.json()).detail || d;
+    } catch (_) {}
+    return toast(d, true);
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(await res.blob());
+  a.download = filnamn;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast("Nedladdat");
+}
+
+async function exportPaket(customerId) {
+  const q = customerId ? `?customer_ids=${customerId}` : "";
+  const datum = new Date().toISOString().slice(0, 10);
+  toast("Bygger paketet, det kan ta en stund…");
+  await laddaNer(
+    `/api/backups/packages/export${q}`,
+    customerId ? `kund-${datum}.tar.gz` : `alla-kunder-${datum}.tar.gz`
+  );
+}
+
+async function valjKundExport() {
+  const box = $("#exportval");
+  if (box.innerHTML) return (box.innerHTML = "");
+  const kunder = S.data.customers || (await api("/customers"));
+  S.data.customers = kunder;
+  box.innerHTML = `<div class="row" style="margin-top:10px">
+    <select id="expkund" style="flex:1;min-width:200px">
+      ${kunder.map((c) => `<option value="${c.id}">${esc(c.customer_no)} ${esc(c.name)}</option>`).join("")}
+    </select>
+    <button class="btn sm" onclick="exportPaket(val('expkund'))">Exportera</button>
+    <button class="btn ghost sm" onclick="document.getElementById('exportval').innerHTML=''">Avbryt</button>
+  </div>`;
+}
+
+async function importPaket() {
+  const input = $("#paketfil");
+  const fil = input.files && input.files[0];
+  if (!fil) return toast("Välj en paketfil först", true);
+  const ersatt = $("#paket_ersatt").checked;
+  if (
+    ersatt &&
+    !confirm(
+      "Kunder med samma kundnummer raderas och ersätts av innehållet i paketet. Det går inte att ångra. Fortsätt?"
+    )
+  )
+    return;
+
+  const box = $("#importresultat");
+  box.innerHTML = `<div class="skel"></div>`;
+  const fd = new FormData();
+  fd.append("file", fil);
+  fd.append("replace", ersatt ? "true" : "false");
+  try {
+    const r = await api("/backups/packages/import", { method: "POST", body: fd });
+    box.innerHTML = `<div class="card" style="margin-top:12px;border-color:#B6D6C6">
+      <div class="pad">
+        <strong>${r.skapade.length} kunder inlästa</strong>, ${r.filer} filer.
+        ${r.skapade.length ? `<ul style="margin:8px 0 0;padding-left:20px">${r.skapade.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+        ${
+          r.hoppade.length
+            ? `<p class="hint" style="margin-top:10px">Hoppade över ${r.hoppade.length} som redan
+               fanns: ${r.hoppade.map(esc).join(", ")}. Kryssa i överskrivning om de ska ersättas.</p>`
+            : ""
+        }
+        ${r.ersatta.length ? `<p class="hint">Ersatte: ${r.ersatta.map(esc).join(", ")}</p>` : ""}
+      </div></div>`;
+    toast(`${r.skapade.length} kunder inlästa`);
+    S.data.customers = null;
+  } catch (e) {
+    box.innerHTML = `<div class="err" style="margin-top:12px">${esc(e.message)}</div>`;
+  }
 }
 
 async function downloadBackup(id, filename) {
@@ -3399,6 +4611,50 @@ function copySteps(json) {
     .writeText(steps.join("\n"))
     .then(() => toast("Kommandona kopierade"))
     .catch(() => toast("Kunde inte kopiera, markera texten i stället", true));
+}
+
+async function adminCompany() {
+  const token = claim();
+  const f = await api("/company");
+  if (!current(token) || !$("#adminbody")) return;
+  $("#adminbody").innerHTML = `
+  <div class="card"><div class="hd"><h2>Uppgifter på offerter och arbetsorder</h2></div><div class="pad">
+    <p class="lead" style="margin-top:0">Det här står överst på varje PDF som skickas till kund.</p>
+    <div class="fgrid">
+      ${fld("f_namn", "Företagsnamn", f.namn || "")}
+      ${fld("f_orgnr", "Organisationsnummer", f.orgnr || "")}
+      ${fld("f_adress", "Adress", f.adress || "")}
+      ${fld("f_postnr", "Postnummer", f.postnr || "")}
+      ${fld("f_ort", "Ort", f.ort || "")}
+      ${fld("f_tel", "Telefon", f.telefon || "")}
+      ${fld("f_mail", "E-post", f.epost || "", "email")}
+      ${fld("f_giltig", "Offert giltig, dagar", f.offert_giltig_dagar ?? 30, "number")}
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label style="display:flex;gap:8px;align-items:center;font-size:14px;width:auto">
+        <input type="checkbox" id="f_fskatt" ${f.f_skatt ? "checked" : ""} style="width:auto">
+        Godkänd för F-skatt, visas på offerten</label>
+    </div>
+    <label class="f" for="f_villkor">Standardvillkor på offerter</label>
+    <textarea id="f_villkor">${esc(f.villkor || "")}</textarea>
+    <button class="btn pri sm" style="margin-top:14px" id="f_spara">Spara</button>
+  </div></div>`;
+  $("#f_spara").onclick = async () => {
+    try {
+      await api("/company", {
+        method: "PUT",
+        body: {
+          namn: val("f_namn"), orgnr: val("f_orgnr"), adress: val("f_adress"),
+          postnr: val("f_postnr"), ort: val("f_ort"), telefon: val("f_tel"),
+          epost: val("f_mail"), f_skatt: $("#f_fskatt").checked, villkor: val("f_villkor"),
+          offert_giltig_dagar: parseInt(val("f_giltig"), 10) || 30,
+        },
+      });
+      toast("Företagsuppgifterna sparade");
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
 }
 
 async function adminSgu() {
@@ -3559,6 +4815,10 @@ function render() {
     nara: viewNearby,
     ny: viewNewFacility,
     konto: viewAccount,
+    offert: viewQuote,
+    order: viewOrder,
+    artiklar: viewArticles,
+    ekonomi: viewEconomy,
     besok: (S.id ? viewVisit : viewVisits),
     admin: viewAdmin,
   };
@@ -3584,26 +4844,56 @@ try {
 
 applyHash();
 
-// Varnar om gränssnittet är nyare än servern. Frontend-katalogen är monterad live
-// i containern medan backend bakas in i imagen, så en uppdatering utan --build
-// ger nytt gränssnitt mot gammalt API. Symptomet blir annars "Method not allowed".
+// Varnar om gränssnittet och servern inte är i takt. Beror nästan alltid på att
+// webbläsaren håller kvar en gammal app.js, inte på att backend är gammal.
 (async () => {
   try {
-    const r = await fetch("/api/version");
+    const r = await fetch("/api/version", { cache: "no-store" });
     const { version } = await r.json();
-    if (version !== UI_VERSION) {
-      const bar = document.createElement("div");
-      bar.style.cssText =
-        "position:fixed;left:0;right:0;top:0;z-index:300;background:#B3801F;color:#fff;" +
-        "padding:8px 14px;font:13px/1.4 system-ui,sans-serif;text-align:center";
-      bar.innerHTML =
-        `Servern kör version ${version} men gränssnittet är ${UI_VERSION}. ` +
-        `Kör <code style="background:rgba(0,0,0,.2);padding:1px 5px;border-radius:2px">docker compose up -d --build</code> ` +
-        `så att backend uppdateras också.`;
-      document.body.appendChild(bar);
-    }
+    if (version === UI_VERSION) return;
+
+    const bar = document.createElement("div");
+    bar.style.cssText =
+      "position:fixed;left:0;right:0;top:0;z-index:300;background:#B3801F;color:#fff;" +
+      "padding:9px 14px;font:13.5px/1.5 system-ui,sans-serif;text-align:center;" +
+      "display:flex;gap:12px;align-items:center;justify-content:center;flex-wrap:wrap";
+    bar.innerHTML =
+      `<span>Servern kör ${esc(version)}, den här sidan är ${UI_VERSION}. ` +
+      `Sidan behöver hämtas om.</span>`;
+    const knapp = document.createElement("button");
+    knapp.textContent = "Hämta om nu";
+    knapp.style.cssText =
+      "background:#fff;color:#7A5712;border:none;border-radius:3px;padding:6px 14px;" +
+      "font:inherit;font-weight:600;cursor:pointer";
+    knapp.onclick = () => hamtaOmAppen(knapp);
+    bar.appendChild(knapp);
+    document.body.appendChild(bar);
   } catch (_) {}
 })();
+
+/* Rensar allt som kan hålla kvar gammal kod och laddar om.
+   Service workern och webbläsarens cache är de två som brukar ligga kvar. */
+async function hamtaOmAppen(knapp) {
+  if (knapp) {
+    knapp.disabled = true;
+    knapp.textContent = "Hämtar…";
+  }
+  try {
+    if ("caches" in window) {
+      const nycklar = await caches.keys();
+      await Promise.all(nycklar.map((k) => caches.delete(k)));
+    }
+  } catch (_) {}
+  try {
+    const regs = await navigator.serviceWorker?.getRegistrations?.();
+    for (const reg of regs || []) {
+      if (reg.waiting) reg.waiting.postMessage("ta-over");
+      await reg.unregister();
+    }
+  } catch (_) {}
+  // Ny adress tvingar förbi allt som ändå ligger kvar
+  location.replace(location.pathname + "?uppdaterad=" + Date.now() + location.hash);
+}
 
 if (S.token) {
   PUSH.ready();

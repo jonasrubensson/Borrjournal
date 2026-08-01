@@ -1,7 +1,10 @@
 /* Service worker. Två uppgifter: ta emot push och öppna rätt vy vid klick.
    Medvetet ingen offline-cache av API-svar - fel data i fält är värre än ingen data. */
-const SHELL = "borrjournal-shell-v1";
-const SHELL_FILES = ["/", "/static/styles.css", "/static/app.js", "/static/manifest.json"];
+// Versionen sätts in av servern när filen levereras, så att en ny version
+// får en egen cache och den gamla städas bort automatiskt.
+const VERSION = "__VERSION__";
+const SHELL = `borrjournal-shell-${VERSION}`;
+const SHELL_FILES = ["/"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(SHELL).then((c) => c.addAll(SHELL_FILES)).then(() => self.skipWaiting()));
@@ -9,9 +12,16 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== SHELL).map((k) => caches.delete(k))))
+    caches
+      .keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== SHELL).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
+});
+
+// Låter sidan be en väntande service worker att ta över direkt
+self.addEventListener("message", (event) => {
+  if (event.data === "ta-over") self.skipWaiting();
 });
 
 self.addEventListener("fetch", (event) => {
