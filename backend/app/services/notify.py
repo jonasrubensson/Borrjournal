@@ -66,7 +66,13 @@ def public_smtp(conf: dict) -> dict:
 
 
 # ---------------- e-post ----------------
-async def send_email(conf: dict, subject: str, body: str, recipients: list[str] | None = None) -> None:
+async def send_email(
+    conf: dict,
+    subject: str,
+    body: str,
+    recipients: list[str] | None = None,
+    attachments: list[tuple[str, bytes, str]] | None = None,
+) -> None:
     import aiosmtplib
 
     to = recipients or conf.get("recipients") or []
@@ -78,6 +84,13 @@ async def send_email(conf: dict, subject: str, body: str, recipients: list[str] 
     message["To"] = ", ".join(to)
     message["Subject"] = subject
     message.set_content(body)
+
+    for filnamn, data, typ in attachments or []:
+        huvudtyp, _, undertyp = typ.partition("/")
+        message.add_attachment(
+            data, maintype=huvudtyp or "application", subtype=undertyp or "octet-stream",
+            filename=filnamn,
+        )
 
     security = conf.get("security", "starttls")
     kwargs = {

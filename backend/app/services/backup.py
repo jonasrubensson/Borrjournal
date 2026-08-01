@@ -26,7 +26,7 @@ from ..db import Base
 from ..models import BackupRecord
 from ..schemas import iso_utc
 
-BACKUP_DIR = os.path.join(settings.data_dir, "backups")
+BACKUP_DIR = settings.backup_dir or os.path.join(settings.data_dir, "backups")
 FILE_DIR = os.path.join(settings.data_dir, "files")
 THUMB_DIR = os.path.join(settings.data_dir, "thumbs")
 
@@ -90,8 +90,35 @@ async def _dump_json(db: AsyncSession, target: str) -> tuple[str, dict]:
     return "json", counts
 
 
+def _lasbart_namn(kund: str, filnamn: str, stored: str) -> str:
+    """Namn i arkivet som går att förstå utan att öppna databasen.
+
+    Filerna lagras med slumpade namn på disk för att undvika krockar, men i en
+    backup vill man kunna se vad som är vad utan att läsa db.json.
+    """
+    trygg = lambda t: "".join(c if c.isalnum() or c in " .-_()" else "_" for c in t).strip()[:80]  # noqa: E731
+    return f"filer/{trygg(kund) or 'okand-kund'}/{stored[:8]}-{trygg(filnamn) or 'fil'}"
+
+
+async def _filkarta(db: AsyncSession) -> dict:
+    """stored_name -> läsbar sökväg i arkivet."""
+    from ..models import Customer, StoredFile
+
+    rader = (
+        await db.execute(
+            select(StoredFile.stored_name, StoredFile.filename, Customer.name)
+            .join(Customer, Customer.id == StoredFile.customer_id, isouter=True)
+        )
+    ).all()
+    return {r[0]: _lasbart_namn(r[2] or "", r[1], r[0]) for r in rader}
+
+
 async def create_backup(
-    db: AsyncSession, *, trigger: str = "manuell", actor: str = ""
+    db: AsyncSession,
+    *,
+    trigger: str = "manuell",
+    actor: str = "",
+    include_files: bool = True,
 ) -> BackupRecord:
     os.makedirs(BACKUP_DIR, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
@@ -116,15 +143,34 @@ async def create_backup(
                 engine, counts = await _dump_json(db, inner)
                 db_member = "db.json"
 
+            # Räkna filerna först, så att manifestet stämmer med innehållet
+            karta = await _filkarta(db) if include_files else {}
+            att_ta_med = []
+            if include_files and os.path.isdir(FILE_DIR):
+                for namn in sorted(os.listdir(FILE_DIR)):
+                    kalla = os.path.join(FILE_DIR, namn)
+                    if os.path.isfile(kalla):
+                        att_ta_med.append((kalla, namn, os.path.getsize(kalla)))
+            antal_filer = len(att_ta_med)
+            filbytes = sum(x[2] for x in att_ta_med)
+
             manifest = {
                 "app": "borrjournal",
-                "version": 1,
+                "version": 2,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "engine": engine,
                 "database_member": db_member,
                 "trigger": trigger,
                 "created_by": actor or "system",
                 "counts": counts,
+                "files_included": include_files,
+                "file_count": antal_filer,
+                "file_bytes": filbytes,
+                "innehall": (
+                    "Katalogen 'filer' innehåller uppladdade dokument och bilder med läsbara "
+                    "namn, grupperade per kund. Katalogen 'files' innehåller samma filer med de "
+                    "lagrade namnen, och är den som används vid återläsning."
+                ),
                 "restore": (
                     "pg_restore -h <host> -U borrjournal -d borrjournal --clean --if-exists db.dump"
                     if engine == "pg_dump"
@@ -138,14 +184,23 @@ async def create_backup(
             with tarfile.open(final_path, "w:gz") as tar:
                 tar.add(inner, arcname=db_member)
                 tar.add(manifest_path, arcname="manifest.json")
-                if os.path.isdir(FILE_DIR):
+                for kalla, namn, _storlek in att_ta_med:
+                    # Läsbart namn, grupperat per kund
+                    tar.add(kalla, arcname=karta.get(namn, f"filer/losa/{namn}"))
+                if att_ta_med:
+                    # Originalnamnen behövs för att kunna läsa tillbaka maskinellt
                     tar.add(FILE_DIR, arcname="files")
-                if os.path.isdir(THUMB_DIR):
-                    tar.add(THUMB_DIR, arcname="thumbs")
+                    if os.path.isdir(THUMB_DIR):
+                        tar.add(THUMB_DIR, arcname="thumbs")
 
         record.engine = engine
         record.size_bytes = os.path.getsize(final_path)
+        counts["_filer"] = antal_filer
+        counts["_filbytes"] = filbytes
         record.counts = json.dumps(counts, ensure_ascii=False)
+        record.detail = (
+            f"{antal_filer} filer" if include_files else "utan filer, endast databas"
+        )
         record.status = "klar"
     except Exception as exc:  # noqa: BLE001 - felet ska synas i listan, inte krascha jobbet
         record.status = "fel"
