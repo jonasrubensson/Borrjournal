@@ -260,9 +260,45 @@ async def convert_visit(
 
 
 # ---------- SGU ----------
+SGU_INSTALLNING = {"lan": [], "auto": True, "dagar": 7}
+
+
 @router.get("/sgu/status")
 async def sgu_status(_: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    return await sgu.status(db)
+    from ..services.notify import get_setting
+
+    data = await sgu.status(db)
+    data["installning"] = await get_setting(db, "sgu", SGU_INSTALLNING)
+    return data
+
+
+@router.put("/sgu/settings")
+async def sgu_settings(
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Vilka län som ska hållas uppdaterade automatiskt."""
+    from ..services.notify import get_setting, save_setting
+
+    conf = await get_setting(db, "sgu", SGU_INSTALLNING)
+    if "lan" in payload:
+        valda = [str(k).zfill(2) for k in payload["lan"] if str(k).zfill(2) in sgu.LAN_NAMN]
+        conf["lan"] = sorted(set(valda))
+    if "auto" in payload:
+        conf["auto"] = bool(payload["auto"])
+    if "dagar" in payload:
+        conf["dagar"] = max(1, min(90, int(payload["dagar"])))
+    await save_setting(db, "sgu", conf)
+    await log_action(
+        db,
+        "SGU_SETTINGS",
+        actor=user.username,
+        request=request,
+        detail=f"län: {', '.join(conf['lan']) or 'inga'}, auto: {conf['auto']}",
+    )
+    return conf
 
 
 @router.post("/sgu/sync")
@@ -323,18 +359,42 @@ async def sgu_briefing(
 # ---------- dela med extern borrare ----------
 FALT = {
     "plats": "Fastighet, adress och koordinat",
+    "kontakt": "Namn och telefon till kontaktpersonen",
+    "arende": "Vad ärendet gäller",
     "atkomst": "Åtkomst och förutsättningar",
     "borrning": "Borrdata: djup, jorddjup, foderrör, kapacitet",
     "berg": "Bergarter och lagerföljd",
     "pump": "Pumpuppgifter",
-    "kontakt": "Kundens namn och telefon",
     "grannar": "Underlag från SGU om grannbrunnar",
 }
 
+# Ett platsbesök har ingen borrning gjord än, så de fälten erbjuds inte.
+# Att visa dem hade gett kryssrutor som tyst inte producerar någonting.
+FALT_BESOK = ["plats", "kontakt", "arende", "atkomst", "grannar"]
+FALT_ANLAGGNING = ["plats", "kontakt", "atkomst", "borrning", "berg", "pump", "grannar"]
+FORVALDA_BESOK = ["plats", "arende", "atkomst"]
+FORVALDA_ANLAGGNING = ["plats", "atkomst", "borrning"]
+
 
 @router.get("/share/fields")
-async def share_fields(_: User = Depends(current_user)):
-    return {"fields": [{"key": k, "label": v} for k, v in FALT.items()]}
+async def share_fields(
+    visit_id: str | None = None,
+    facility_id: str | None = None,
+    _: User = Depends(current_user),
+):
+    """Vilka fält som går att dela beror på om det är ett besök eller en anläggning."""
+    if visit_id:
+        nycklar, forvalda = FALT_BESOK, FORVALDA_BESOK
+        etiketter = {**FALT, "atkomst": "Anteckningar från platsen"}
+    else:
+        nycklar, forvalda = FALT_ANLAGGNING, FORVALDA_ANLAGGNING
+        etiketter = FALT
+    return {
+        "fields": [
+            {"key": k, "label": etiketter[k], "default": k in forvalda} for k in nycklar
+        ],
+        "kind": "visit" if visit_id else "facility",
+    }
 
 
 @router.post("/share")
@@ -353,9 +413,18 @@ async def share(
     mottagare = (payload.get("recipient") or "").strip()
     if "@" not in mottagare:
         raise HTTPException(status_code=400, detail="Ange en giltig e-postadress")
-    valda = [f for f in payload.get("fields", []) if f in FALT]
+    tillatna = FALT_BESOK if payload.get("visit_id") else FALT_ANLAGGNING
+    onskade = payload.get("fields", [])
+    valda = [f for f in onskade if f in tillatna]
     if not valda:
         raise HTTPException(status_code=400, detail="Välj minst en uppgift att dela")
+    ogiltiga = [f for f in onskade if f in FALT and f not in tillatna]
+    if ogiltiga:
+        raise HTTPException(
+            status_code=400,
+            detail="Ett platsbesök har inga borrdata att dela: "
+            + ", ".join(FALT[f].split(":")[0].lower() for f in ogiltiga),
+        )
 
     facility = None
     visit = None
@@ -414,14 +483,15 @@ async def share(
                 f"  Fastighet: {visit.property_designation or '—'}",
                 f"  Adress: {visit.address or '—'}, {visit.municipality or ''}".rstrip(", "),
                 f"  Koordinat: {visit.coordinates or '—'}",
+                *( [f"  Planerat besök: {visit.planned_at}"] if visit.planned_at else [] ),
                 "",
             ]
         if "kontakt" in valda:
             rader += ["KONTAKT", f"  {visit.contact_name or '—'}", f"  {visit.phone or '—'}", ""]
-        if "atkomst" in valda and visit.notes:
-            rader += ["ANTECKNINGAR", f"  {visit.notes}", ""]
-        if visit.errand:
+        if "arende" in valda and visit.errand:
             rader += ["ÄRENDE", f"  {visit.errand}", ""]
+        if "atkomst" in valda and visit.notes:
+            rader += ["ANTECKNINGAR FRÅN PLATSEN", f"  {visit.notes}", ""]
         lat, lon = visit.latitude, visit.longitude
     else:
         raise HTTPException(status_code=400, detail="Ange anläggning eller besök att dela")
