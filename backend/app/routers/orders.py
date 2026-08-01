@@ -424,13 +424,24 @@ async def create_quote(
     """Skapar en offert på en kund eller ett platsbesök."""
     customer_id = payload.get("customer_id")
     visit_id = payload.get("visit_id")
-    if not customer_id and not visit_id:
-        raise HTTPException(status_code=400, detail="Ange kund eller platsbesök")
+    # En offert kan stå för sig själv. Ringer någon och vill ha ett pris ska man
+    # slippa lägga upp en kund först, för det blir kanske aldrig någon affär.
+    if not customer_id and not visit_id and not (payload.get("recipient_name") or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Ange kund, platsbesök eller åtminstone vem offerten ska till",
+        )
 
     foretag = await _foretag(db)
     mottagare = {"namn": "", "adress": "", "epost": ""}
 
-    if customer_id:
+    if not customer_id and not visit_id:
+        mottagare = {
+            "namn": payload.get("recipient_name", ""),
+            "adress": payload.get("recipient_address", ""),
+            "epost": payload.get("recipient_email", ""),
+        }
+    elif customer_id:
         c = (
             await db.execute(select(Customer).where(Customer.id == customer_id))
         ).unique().scalar_one_or_none()
@@ -576,6 +587,74 @@ async def update_quote(
     return quote_ut(q, await _rader(db, quote_id=q.id))
 
 
+@router.post("/quotes/{quote_id}/to-customer", status_code=201)
+async def quote_to_customer(
+    quote_id: str,
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Gör en kund av en fristående offert när den lett till affär."""
+    from .customers import next_no
+
+    q = await _hamta_offert(db, quote_id)
+    if q.customer_id:
+        raise HTTPException(status_code=409, detail="Offerten hör redan till en kund")
+
+    kund = Customer(
+        customer_no=await next_no(db, Customer, Customer.customer_no, "K", 1000),
+        name=payload.get("name") or q.recipient_name or "Ny kund",
+        customer_type=payload.get("customer_type", "Privat"),
+        email=q.recipient_email or "",
+        phone=payload.get("phone", ""),
+        address=q.recipient_address or "",
+        property_designation=payload.get("property_designation", ""),
+        municipality=payload.get("municipality", ""),
+    )
+    db.add(kund)
+    await db.flush()
+
+    anlaggning = None
+    if payload.get("create_facility", True):
+        anlaggning = Facility(
+            facility_no=await next_no(db, Facility, Facility.facility_no, "B", 2000),
+            customer_id=kund.id,
+            facility_type=payload.get("facility_type", "Bergborrad brunn"),
+            pump_status="Ska installeras",
+        )
+        db.add(anlaggning)
+        await db.flush()
+
+    q.customer_id = kund.id
+    if anlaggning is not None:
+        q.facility_id = anlaggning.id
+
+    db.add(
+        JournalEntry(
+            customer_id=kund.id,
+            facility_id=anlaggning.id if anlaggning else None,
+            entry_type="Registrering",
+            title=f"Kund skapad från offert {q.quote_no}",
+            body=(q.title or "") + (f"\nSkickad till {q.sent_to}" if q.sent_to else ""),
+            author_id=user.id,
+            author_name=user.full_name or user.username,
+        )
+    )
+    await db.commit()
+    await db.refresh(kund)
+    await log_action(
+        db, "QUOTE_TO_CUSTOMER", actor=user.username, object_type="quote", object_id=q.id,
+        request=request, detail=f"{q.quote_no} -> {kund.customer_no}",
+    )
+    from ..schemas import customer_out, facility_out
+
+    return {
+        "customer": customer_out(kund),
+        "facility": facility_out(anlaggning) if anlaggning else None,
+    }
+
+
 @router.delete("/quotes/{quote_id}", status_code=204)
 async def delete_quote(
     quote_id: str,
@@ -622,6 +701,50 @@ async def _lagg_rad(db: AsyncSession, payload: LineIn, *, quote_id=None, work_or
     await db.commit()
     await db.refresh(rad)
     return rad
+
+
+@router.get("/articles/match")
+async def matcha_artikel(
+    name: str,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Letar efter en artikel som liknar en fritextrad.
+
+    Används för att varna innan man skriver in något som redan finns, och för att
+    kunna erbjuda att lägga upp raden som artikel om den saknas.
+    """
+    import difflib
+
+    text = (name or "").strip().lower()
+    if len(text) < 3:
+        return {"traffar": []}
+
+    artiklar = (
+        await db.execute(select(Article).where(Article.is_active.is_(True)))
+    ).scalars().all()
+    traffar = []
+    for a in artiklar:
+        namn = (a.name or "").lower()
+        if not namn:
+            continue
+        likhet = difflib.SequenceMatcher(None, text, namn).ratio()
+        if text in namn or namn in text:
+            likhet = max(likhet, 0.9)
+        if likhet >= 0.62:
+            traffar.append(
+                {
+                    "id": a.id,
+                    "article_no": a.article_no,
+                    "name": a.name,
+                    "unit": a.unit,
+                    "sales_price": a.sales_price,
+                    "stock": a.stock if a.track_stock else None,
+                    "likhet": round(likhet, 2),
+                }
+            )
+    traffar.sort(key=lambda x: -x["likhet"])
+    return {"traffar": traffar[:4]}
 
 
 @router.post("/quotes/{quote_id}/lines", status_code=201)
