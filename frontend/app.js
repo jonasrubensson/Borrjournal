@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "3.2.0";
+const UI_VERSION = "3.3.0";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
@@ -460,7 +460,10 @@ async function viewDashboard() {
   <div class="spread">
     <div><div class="eyebrow">${dt(new Date().toISOString(), false)}</div><h1>Översikt</h1>
       <p class="lead">${d.counts.customers} kunder och ${d.counts.facilities} anläggningar i registret.</p></div>
-    <button class="btn pri" onclick="go('ny')">+ Ny brunn eller pump</button>
+    <div class="row">
+      ${S.user.role === "lasare" ? "" : `<button class="btn ghost" onclick="go('besok')">Offert på förfrågan</button>`}
+      <button class="btn pri" onclick="go('ny')">+ Ny brunn eller pump</button>
+    </div>
   </div>
   <div class="stats">
     <div class="stat"><div class="v">${d.counts.customers}</div><div class="l">Kunder</div></div>
@@ -1080,9 +1083,15 @@ async function viewVisits() {
           .map(([v, l]) => `<option value="${v}"${filter === v ? " selected" : ""}>${l}</option>`)
           .join("")}
       </select>
-      ${S.user.role === "lasare" ? "" : `<button class="btn pri" onclick="newVisit()">+ Nytt besök</button>`}
+      ${
+        S.user.role === "lasare"
+          ? ""
+          : `<button class="btn ghost" onclick="nyForfragan()">Offert på förfrågan</button>
+             <button class="btn pri" onclick="newVisit()">+ Nytt besök</button>`
+      }
     </div>
   </div>
+  <div id="forfraganform"></div>
   <div id="visitform"></div>
   <div class="card">
     <table><thead><tr><th>Nr</th><th>Kontakt</th><th>Fastighet</th><th>Planerat</th>
@@ -2112,7 +2121,7 @@ function tabEconomy(c, offerter, order) {
 /* Någon ringer och vill ha ett pris. Ingen kund, inget besök, bara ett namn.
    Blir det affär gör man kund av offerten med ett klick. */
 async function nyForfragan() {
-  const box = $("#forfraganform") || $("#view");
+  const box = $("#forfraganform") || $("#visitform") || $("#view");
   if (document.getElementById("forfragankort")) {
     document.getElementById("forfragankort").remove();
     return;
@@ -3203,7 +3212,6 @@ async function viewEconomy() {
       <p class="lead">Arbetsorder som är utförda men inte fakturerade, och fakturor som väntar på
       betalning. Det är här saker annars glöms bort.</p></div>
     <div class="row">
-    ${S.user.role === "lasare" ? "" : `<button class="btn pri" onclick="nyForfragan()">+ Offert på förfrågan</button>`}
     <select style="width:auto" onchange="S.filter.ekStatus=this.value;viewEconomy()">
       ${[["aktiva", "Pågående"], ["att_fakturera", "Att fakturera"], ["obetalda", "Obetalda"],
          ["betald", "Betalda"], ["", "Alla"]]
@@ -3339,7 +3347,33 @@ async function viewAccount() {
       <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Lägg till på hemskärmen</h2></div>
         <div class="pad" id="installbox">${installHtml()}</div></div>
 
-      <div class="card"><div class="hd"><h2>Notiser</h2></div><div class="pad">
+      <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Vad du blir påmind om</h2></div>
+        <div class="pad">
+          <p class="lead" style="margin-top:0">Påminnelser knyts till den som senast var på jobbet,
+            skrev offerten eller lade upp besöket.</p>
+          ${[
+            ["mina", "Mina egna", "Det jag ansvarar för, plus sådant ingen tagit"],
+            ["alla", "Allas", "Allt som händer i företaget"],
+            ["inga", "Inga", "Notiser stängda, påminnelserna finns kvar i appen"],
+          ]
+            .map(
+              ([v, rubrik, text]) => `<label style="display:flex;gap:10px;align-items:flex-start;
+              padding:9px 0;border-bottom:1px solid #E9EEEE;font-size:14.5px">
+              <input type="radio" name="scope" value="${v}" style="width:auto;margin-top:4px"
+                ${(me.notify_scope || "mina") === v ? "checked" : ""} onchange="sattOmfang('${v}')">
+              <span><strong>${rubrik}</strong><span class="hint" style="display:block;margin:0">${text}</span></span>
+            </label>`
+            )
+            .join("")}
+          ${
+            me.role === "admin"
+              ? `<p class="hint">Som administratör står du på Allas från början, så att inget faller
+                 mellan stolarna när någon är sjuk eller slutar.</p>`
+              : ""
+          }
+        </div></div>
+
+      <div class="card"><div class="hd"><h2>Notiser på den här enheten</h2></div><div class="pad">
         <div id="pushbanner"></div>
         <p class="hint">Notiser hör till enheten, inte kontot. Varje telefon och dator slås på en gång.</p>
         ${
@@ -3380,6 +3414,22 @@ function totpBoxHtml(me) {
       Authenticator, Aegis, 1Password eller liknande. Utan den räcker lösenordet för att komma in
       i hela kundregistret.</p>
     <button class="btn pri sm" onclick="totpStart()">Slå på tvåfaktor</button>`;
+}
+
+async function sattOmfang(scope) {
+  try {
+    await api("/me/notify-scope", { method: "PUT", body: { scope } });
+    S.user.notify_scope = scope;
+    toast(
+      scope === "alla"
+        ? "Du får påminnelser om allt"
+        : scope === "mina"
+          ? "Du får bara dina egna påminnelser"
+          : "Notiser om påminnelser avstängda"
+    );
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 async function changePassword() {
@@ -4358,6 +4408,8 @@ function reminderRow(r) {
       <div class="fmeta">${esc(r.due_date)}${r.due_time ? " " + esc(r.due_time) : ""} · ${esc(left)}${
         r.customer_name ? " · " + esc(r.customer_name) : ""
       }${
+        r.assigned_name && !r.mine ? " · " + esc(r.assigned_name) : r.mine ? " · du" : " · ingen ansvarig"
+      }${
         r.remind_at && !r.notified_at
           ? " · påminner " + dt(r.remind_at)
           : r.notified_channels
@@ -4388,8 +4440,9 @@ async function viewReminders() {
   const token = claim();
   mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
   const status = S.filter.reminderStatus || "open";
+  const scope = S.filter.reminderScope || (S.user.role === "admin" ? "alla" : "mina");
   const [items, sum, customers] = await Promise.all([
-    api(`/reminders?status=${status}`),
+    api(`/reminders?status=${status}&scope=${scope}`),
     api("/reminders/summary"),
     S.data.customers ? Promise.resolve(S.data.customers) : api("/customers"),
   ]);
@@ -4409,9 +4462,17 @@ async function viewReminders() {
   $("#view").innerHTML = `
   <div class="spread">
     <div><div class="eyebrow">Bevakning</div><h1>Påminnelser</h1>
-      <p class="lead">Service, vattenprov, intyg och uppföljningar. Automatiska påminnelser skapas från
-      anläggningarnas datum, egna lägger du till själv.</p></div>
+      <p class="lead">Service, vattenprov, intyg, obetalda fakturor, offerter utan besked och
+      besök utan återkoppling. ${
+        scope === "mina"
+          ? "Visar dina egna och sådana ingen tagit ansvar för."
+          : "Visar allas."
+      }</p></div>
     <div class="row">
+      <select style="width:auto" onchange="S.filter.reminderScope=this.value;viewReminders()">
+        <option value="mina"${scope === "mina" ? " selected" : ""}>Mina</option>
+        <option value="alla"${scope === "alla" ? " selected" : ""}>Allas</option>
+      </select>
       <select style="width:auto" onchange="S.filter.reminderStatus=this.value;viewReminders()">
         <option value="open"${status === "open" ? " selected" : ""}>Öppna</option>
         <option value="done"${status === "done" ? " selected" : ""}>Kvitterade</option>
