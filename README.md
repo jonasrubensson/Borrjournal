@@ -80,6 +80,40 @@ inte förhandsvisas och får en tydlig typmarkering i stället.
 
 Bilder tagna med telefonen får kameran direkt via bildfliken.
 
+## Så är appen upplagd
+
+Navigeringen följer dagen, inte databasen. Fem ställen räcker för det mesta:
+
+| | Vad du gör där |
+|---|---|
+| **Idag** | Vad som behöver hanteras: förfallna serviceärenden, senaste händelser |
+| **Kunder** | Sök upp en kund, se allt om den |
+| **Besök** | Inbokade platsbesök, med underlag om grannbrunnar |
+| **Fakturera** | Utfört men ofakturerat, fakturerat men obetalt |
+| **Mer** | Artiklar, mallar, pumpflotta, påminnelser, inställningar |
+
+**Kundkortet** har fem flikar, och öppnas på **Översikt** som svarar på vad som är läget:
+vad som behöver göras, senaste journalanteckningarna och de senaste bilderna, med knappar för
+det man oftast vill göra härnäst.
+
+| Flik | Innehåll |
+|---|---|
+| Översikt | Att göra, senaste händelser, snabbknappar |
+| Journal | Alla anteckningar |
+| Ekonomi | Offerter och arbetsorder, samma flöde |
+| Filer | Foton och dokument med filter |
+| Anläggning | Brunnsdata, pump, service |
+
+Dokument och bilder låg tidigare på var sin flik trots att de är samma sak, och offerter och order
+på var sin trots att de är ett flöde. Det blev sju flikar som tvingade fram klickande för att få
+ihop bilden. Nu är de fyra plus en översikt.
+
+### I fält och på kontoret
+
+Samma app, olika ingångar. Ute används **Besök** för att förbereda, kameraknappen på filfliken för
+att dokumentera, och arbetsordern för att fylla i vad som gick åt medan man minns det. På kontoret
+används **Fakturera** för att se vad som ska ut, och **Kunder** för att söka.
+
 ## Offert, arbetsorder och artiklar
 
 ### Varför inte bara journalen?
@@ -107,6 +141,27 @@ att gamla order står kvar oförändrade.
 
 Tjänster som borrning och etablering läggs upp med **lagerförs ej**. De prissätts som allt annat
 men rör inte lagret.
+
+### Logotyp och företagsnamn
+
+**Inställningar → Företag**: ladda upp en logotyp, så visas den i appen, på inloggningssidan och
+överst på varje offert och arbetsorder. PNG med genomskinlig bakgrund blir bäst. Bilden skalas
+automatiskt och genomskinligheten bevaras, så ingen vit ruta hamnar runt den i PDF:en.
+
+Företagsnamnet ersätter "Borrjournal" i gränssnittet.
+
+### Offertmallar
+
+Tre mallar finns från start: bergborrad brunn med pump, energibrunn för bergvärme, och pumpbyte.
+Varje mall har rubrik, inledande text, villkor och färdiga rader.
+
+När du skapar en offert väljer du mall, och allt fylls i. **Raderna matchas mot artikelregistret
+på namn och nummer**, så dagens pris används där artikeln finns. Rader som inte matchar behåller
+mallens pris i stället för att tyst försvinna.
+
+Allt går att ändra efteråt. Ändrar du en standardmall blir den er egen. Har du gjort en offert du
+är nöjd med finns **Spara som mall** på offerten, vilket är det enklaste sättet att få egna mallar.
+Mallarna hanteras under **Mer → Offertmallar**.
 
 ### Offert
 
