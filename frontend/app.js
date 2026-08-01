@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "3.1.0";
+const UI_VERSION = "3.2.0";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
@@ -1854,6 +1854,7 @@ async function visaMall(id) {
         därifrån när offerten skapas.</p>
       <div class="row" style="margin-top:12px">
         <button class="btn pri sm" onclick="sparaMall('${m.id}')">Spara ändringar</button>
+        <button class="btn ghost sm" onclick="kopieraMall('${m.id}')">Spara som ny mall</button>
         <button class="btn ghost sm" onclick="document.getElementById('malldetalj').innerHTML=''">Stäng</button>
       </div>
     </div></div>`;
@@ -1871,6 +1872,26 @@ async function sparaMall(id) {
     },
   });
   toast("Mallen sparad");
+  viewTemplates();
+}
+
+async function kopieraMall(id) {
+  const m = (await api("/quote-templates")).find((x) => x.id === id);
+  const namn = prompt("Vad ska den nya mallen heta?", `${m.name} (kopia)`);
+  if (namn === null || !namn.trim()) return;
+  await api("/quote-templates", {
+    method: "POST",
+    body: {
+      name: namn.trim(),
+      description: m.description,
+      title: val("m_titel") || m.title,
+      intro: val("m_intro") || m.intro,
+      terms: val("m_villkor") || m.terms,
+      valid_days: m.valid_days,
+      lines: m.lines,
+    },
+  });
+  toast("Ny mall sparad");
   viewTemplates();
 }
 
@@ -2086,6 +2107,170 @@ function tabEconomy(c, offerter, order) {
   }`;
 }
 
+
+
+/* Någon ringer och vill ha ett pris. Ingen kund, inget besök, bara ett namn.
+   Blir det affär gör man kund av offerten med ett klick. */
+async function nyForfragan() {
+  const box = $("#forfraganform") || $("#view");
+  if (document.getElementById("forfragankort")) {
+    document.getElementById("forfragankort").remove();
+    return;
+  }
+  const mallar = await api("/quote-templates");
+  const holder = document.createElement("div");
+  holder.innerHTML = `
+  <div class="card" id="forfragankort" style="margin-bottom:16px;border-color:#C9DFE3">
+    <div class="hd" style="background:#F4F9FA"><h2>Offert på telefonförfrågan</h2></div>
+    <div class="pad">
+      <p class="lead" style="margin-top:0">För den som ringer och vill ha ett pris. Ingen kund läggs
+        upp, inget besök bokas. Blir det affär gör du kund av offerten med ett klick.</p>
+      <div class="fgrid">
+        ${fld("ff_namn", "Vem gäller det", "", "text", 'placeholder="Namn eller företag"')}
+        ${fld("ff_mail", "E-post", "", "email")}
+        ${fld("ff_adr", "Adress eller fastighet", "")}
+        <div><label class="f" for="ff_mall">Mall</label><select id="ff_mall">
+          <option value="">Tom offert</option>
+          ${mallar.map((m) => `<option value="${m.id}">${esc(m.name)}</option>`).join("")}
+        </select></div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="btn pri sm" onclick="skapaForfragan()">Skapa offert</button>
+        <button class="btn ghost sm" onclick="document.getElementById('forfragankort').remove()">Avbryt</button>
+      </div>
+    </div></div>`;
+  box.prepend(holder.firstElementChild);
+  scrollTill(document.getElementById("forfragankort"));
+  if ($("#ff_namn")) $("#ff_namn").focus();
+}
+
+async function skapaForfragan() {
+  const namn = val("ff_namn").trim();
+  if (!namn) return toast("Ange åtminstone vem offerten ska till", true);
+  try {
+    const body = {
+      recipient_name: namn,
+      recipient_email: val("ff_mail"),
+      recipient_address: val("ff_adr"),
+    };
+    if (val("ff_mall")) body.template_id = val("ff_mall");
+    const q = await api("/quotes", { method: "POST", body });
+    toast(`${q.quote_no} skapad`);
+    go("offert", q.id);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function offertTillKund() {
+  const q = S.data.quote;
+  const namn = prompt("Vad ska kunden heta i registret?", q.recipient_name || "");
+  if (namn === null || !namn.trim()) return;
+  const telefon = prompt("Telefonnummer (kan lämnas tomt):", "") || "";
+  try {
+    const r = await api(`/quotes/${q.id}/to-customer`, {
+      method: "POST",
+      body: { name: namn.trim(), phone: telefon, create_facility: true },
+    });
+    toast(`${r.customer.customer_no} skapad från ${q.quote_no}`);
+    S.data.customers = null;
+    go("kund", r.customer.id);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/* ---------------- förhandsgranskning ---------------- */
+/* PDF:en renderas av servern, samma kod som skickas till kund. Alternativet vore
+   att härma layouten i HTML, men då visar förhandsgranskningen något annat än det
+   kunden får, vilket är värre än ingen förhandsgranskning alls. */
+let forhandTimer = null;
+let forhandUrl = null;
+
+function forhandsPanel(path) {
+  return `<div class="card" id="forhandskort" style="margin-top:16px">
+    <div class="hd"><h2>Förhandsgranskning</h2>
+      <span class="hint" id="forhandstatus" style="margin:0"></span>
+      <button class="btn ghost sm" style="margin-left:auto" onclick="doljForhand()">Dölj</button>
+    </div>
+    <div class="pad" style="padding:0">
+      <iframe id="forhandsram" title="Förhandsgranskning av dokumentet"
+        style="width:100%;height:70vh;min-height:420px;border:0;display:block;background:#EFF2F1"></iframe>
+    </div>
+    <div class="pad" style="border-top:1px solid var(--line)">
+      <p class="hint" style="margin:0">Uppdateras automatiskt när du ändrar rader eller texter.
+        Det här är exakt det kunden får.</p>
+    </div></div>`;
+}
+
+async function uppdateraForhand(path, direkt = false) {
+  const ram = document.getElementById("forhandsram");
+  if (!ram) return;
+  clearTimeout(forhandTimer);
+  const status = document.getElementById("forhandstatus");
+
+  const kor = async () => {
+    if (status) status.textContent = "Uppdaterar…";
+    try {
+      const res = await fetch(path, { headers: { Authorization: `Bearer ${S.token}` } });
+      if (!res.ok) throw new Error("kunde inte hämta");
+      const blob = await res.blob();
+      if (forhandUrl) URL.revokeObjectURL(forhandUrl);
+      forhandUrl = URL.createObjectURL(blob);
+      const ram2 = document.getElementById("forhandsram");
+      if (ram2) ram2.src = forhandUrl + "#toolbar=0&navpanes=0";
+      if (status) status.textContent = `Uppdaterad ${new Date().toLocaleTimeString("sv-SE").slice(0, 5)}`;
+    } catch (_) {
+      if (status) status.textContent = "Kunde inte visa";
+    }
+  };
+  if (direkt) return kor();
+  // Kort fördröjning, annars byggs en PDF per tangenttryckning
+  forhandTimer = setTimeout(kor, 700);
+}
+
+function visaForhand(path) {
+  S.forhand = path;
+  try {
+    localStorage.setItem("bj_forhand", "1");
+  } catch (_) {}
+  const knapp = document.getElementById("forhandsknapp");
+  if (knapp) knapp.remove();
+  const holder = document.createElement("div");
+  holder.innerHTML = forhandsPanel(path);
+  $("#view").appendChild(holder.firstElementChild);
+  uppdateraForhand(path, true);
+}
+
+function doljForhand() {
+  S.forhand = null;
+  try {
+    localStorage.removeItem("bj_forhand");
+  } catch (_) {}
+  const kort = document.getElementById("forhandskort");
+  if (kort) kort.remove();
+  if (forhandUrl) {
+    URL.revokeObjectURL(forhandUrl);
+    forhandUrl = null;
+  }
+}
+
+/* Kopplar in panelen på offert- och ordervyn */
+function kopplaForhand(path) {
+  let pa = false;
+  try {
+    pa = localStorage.getItem("bj_forhand") === "1";
+  } catch (_) {}
+  if (pa) visaForhand(path);
+  else {
+    const holder = document.createElement("div");
+    holder.innerHTML = `<div class="row" id="forhandsknapp" style="margin-top:16px">
+      <button class="btn ghost" onclick="visaForhand('${path}')">Visa förhandsgranskning</button>
+      <span class="hint" style="margin:0">Uppdateras medan du bygger dokumentet.</span></div>`;
+    $("#view").appendChild(holder.firstElementChild);
+  }
+}
+
 /* ---------------- pengar: gemensamt ---------------- */
 const kr = (v) =>
   (v ?? 0).toLocaleString("sv-SE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -2210,6 +2395,11 @@ function laddaOmDokument() {
   else if (S.route === "order") viewOrder();
 }
 
+/* Anropas när något ändrats som syns i dokumentet */
+function forhandUppdatera() {
+  if (S.forhand) uppdateraForhand(S.forhand);
+}
+
 /* Radväljare med artiklar, används av både offert och order */
 async function radFormular(malId, typ) {
   const artiklar = S.data.articles || (await api("/articles"));
@@ -2232,7 +2422,9 @@ async function radFormular(malId, typ) {
             )
             .join("")}
         </select></div>
-      ${fld("ln_namn", "Benämning", "")}
+      <div><label class="f" for="ln_namn">Benämning</label>
+        <input id="ln_namn" oninput="kollaArtikelnamn(this.value)">
+        <div class="hint" id="ln_match"></div></div>
       <div><label class="f" for="ln_typ">Typ</label><select id="ln_typ">
         <option value="material">Material</option><option value="arbete">Arbete</option>
         <option value="ovrigt">Övrigt</option></select></div>
@@ -2244,6 +2436,52 @@ async function radFormular(malId, typ) {
     ${fld("ln_note", "Anteckning på raden", "")}
     <button class="btn pri sm" style="margin-top:12px" onclick="laggRad('${malId}','${typ}')">Lägg till</button>
   </div>`;
+}
+
+/* Letar upp liknande artiklar medan man skriver, så att samma sak inte läggs in
+   under fem olika namn. Träffen går att använda direkt. */
+let matchTimer;
+function kollaArtikelnamn(text) {
+  clearTimeout(matchTimer);
+  const ruta = $("#ln_match");
+  if (!ruta) return;
+  if ($("#ln_art") && $("#ln_art").value) {
+    ruta.textContent = "";
+    return;
+  }
+  if (!text || text.trim().length < 3) {
+    ruta.textContent = "";
+    return;
+  }
+  matchTimer = setTimeout(async () => {
+    try {
+      const r = await api(`/articles/match?name=${encodeURIComponent(text)}`);
+      if (!r.traffar.length) {
+        ruta.innerHTML = `<span class="muted">Ny benämning. Du får frågan om att lägga upp den
+          som artikel när raden sparas.</span>`;
+        return;
+      }
+      ruta.innerHTML =
+        `<span style="color:var(--brass)">Liknande finns redan:</span> ` +
+        r.traffar
+          .map(
+            (t) =>
+              `<button class="linkbtn" style="color:var(--water-dark);text-decoration:underline"
+            onclick="valjMatchning('${t.id}','${esc(t.name)}',${t.sales_price},'${esc(t.unit)}')">
+            ${esc(t.article_no)} ${esc(t.name)} · ${krRund(t.sales_price)} kr/${esc(t.unit)}</button>`
+          )
+          .join(" · ");
+    } catch (_) {}
+  }, 350);
+}
+
+function valjMatchning(id, namn, pris, enhet) {
+  const val_ = $("#ln_art");
+  if (val_) val_.value = id;
+  $("#ln_namn").value = namn;
+  $("#ln_pris").value = pris;
+  $("#ln_enhet").value = enhet;
+  $("#ln_match").innerHTML = `<span class="muted">Använder artikeln ur registret.</span>`;
 }
 
 function artikelVald() {
@@ -2267,11 +2505,48 @@ async function laggRad(malId, typ) {
     note: val("ln_note"),
   };
   if (!body.article_id && !body.name) return toast("Välj artikel eller skriv en benämning", true);
+  const fritext = !body.article_id;
   try {
     const vag = typ === "quote" ? `/quotes/${malId}/lines` : `/work-orders/${malId}/lines`;
     await api(vag, { method: "POST", body });
     toast("Raden tillagd");
+    forhandUppdatera();
+
+    // Fritext som inte finns i registret: erbjud att lägga upp den, så att den
+    // går att välja nästa gång och räknas med i lagret.
+    if (fritext && body.name.length > 2 && body.unit_price > 0) {
+      const r = await api(`/articles/match?name=${encodeURIComponent(body.name)}`);
+      const exakt = r.traffar.some((t) => t.name.toLowerCase() === body.name.toLowerCase());
+      if (!exakt && confirm(`Lägg upp "${body.name}" som artikel i registret?\n\nDå kan du välja den nästa gång, och den räknas med i lagret.`)) {
+        await sparaRadSomArtikel(body);
+      }
+    }
     laddaOmDokument();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function sparaRadSomArtikel(rad) {
+  const lagerfors = rad.kind === "material";
+  try {
+    const a = await api("/articles", {
+      method: "POST",
+      body: {
+        name: rad.name,
+        category: rad.kind === "arbete" ? "Arbete" : "",
+        unit: rad.unit,
+        sales_price: rad.unit_price,
+        track_stock: lagerfors,
+        stock: 0,
+      },
+    });
+    S.data.articles = null;
+    toast(
+      lagerfors
+        ? `${a.article_no} upplagd. Fyll i inköpspris och saldo under Artiklar.`
+        : `${a.article_no} upplagd i registret.`
+    );
   } catch (e) {
     toast(e.message, true);
   }
@@ -2295,7 +2570,12 @@ async function viewQuote() {
     <div class="spread" style="margin-bottom:0">
       <div><div class="eyebrow">${esc(q.quote_no)} · skapad ${dt(q.created_at, false)} av ${esc(q.created_by)}</div>
         <h1>${esc(q.title || "Offert")}</h1>
-        <p class="lead">${esc(q.recipient_name)}${q.customer_name ? ` · ${esc(q.customer_name)}` : ""}</p></div>
+        <p class="lead">${esc(q.recipient_name)}${q.customer_name ? ` · ${esc(q.customer_name)}` : ""}
+          ${
+            !q.customer_id && !q.visit_id
+              ? `<span class="tag n" style="margin-left:8px">Förfrågan, ingen kund än</span>`
+              : ""
+          }</p></div>
       <div class="row"><span class="tag ${klass}">${esc(text)}</span>
         <span class="mono" style="font-size:19px;font-weight:600">${kr(q.totals.brutto)} kr</span></div>
     </div>
@@ -2314,7 +2594,12 @@ async function viewQuote() {
     <button class="btn ghost" onclick="skrivUt('/api/quotes/${q.id}/pdf')">Skriv ut</button>
     <button class="btn ghost" onclick="laddaNer('/api/quotes/${q.id}/pdf?ladda_ner=true','${esc(q.quote_no)}.pdf')">Ladda ner</button>
     ${laser ? "" : `<button class="btn pri" onclick="skickaOffert()">Mejla till kund</button>`}
-    ${laser || !q.lines.length ? "" : `<button class="btn ghost" onclick="sparaSomMall()">Spara som mall</button>`}
+    ${laser ? "" : `<button class="btn ghost" onclick="sparaSomMall()">Spara som mall</button>`}
+    ${
+      !laser && !q.customer_id && !q.visit_id
+        ? `<button class="btn pri" onclick="offertTillKund()">Blev kund</button>`
+        : ""
+    }
     ${
       !laser && q.status === "skickad"
         ? `<button class="btn ghost" onclick="offertBesked('accepterad')">Accepterad</button>
@@ -2354,9 +2639,9 @@ async function viewQuote() {
         ${fld("q_rabatt", "Rabatt på hela offerten %", q.discount_percent || "", "number")}
       </div>
       <label class="f" for="q_intro">Inledande text</label>
-      <textarea id="q_intro">${esc(q.intro || "")}</textarea>
+      <textarea id="q_intro" oninput="forhandUtkast()"></textarea>
       <label class="f" for="q_villkor">Villkor</label>
-      <textarea id="q_villkor">${esc(q.terms || "")}</textarea>
+      <textarea id="q_villkor" oninput="forhandUtkast()"></textarea>
       <div class="row" style="margin-top:14px">
         <button class="btn pri sm" onclick="sparaOffert()">Spara</button>
         <button class="btn danger sm" style="margin-left:auto" onclick="taBortOffert()">Ta bort offerten</button>
@@ -2365,6 +2650,10 @@ async function viewQuote() {
   }`;
 
   if (kanRedigera) $("#radform").innerHTML = await radFormular(q.id, "quote");
+  // Textrutorna fylls efter renderingen, så att innehållet inte behöver escapas två gånger
+  if ($("#q_intro")) $("#q_intro").value = q.intro || "";
+  if ($("#q_villkor")) $("#q_villkor").value = q.terms || "";
+  kopplaForhand(`/api/quotes/${q.id}/pdf`);
 }
 
 async function sparaOffert() {
@@ -2387,6 +2676,22 @@ async function sparaOffert() {
   } catch (e) {
     toast(e.message, true);
   }
+}
+
+/* Sparar tyst och uppdaterar förhandsgranskningen medan man skriver texten */
+let utkastTimer;
+function forhandUtkast() {
+  if (!S.forhand) return;
+  clearTimeout(utkastTimer);
+  utkastTimer = setTimeout(async () => {
+    try {
+      await api(`/quotes/${S.data.quote.id}`, {
+        method: "PATCH",
+        body: { intro: val("q_intro"), terms: val("q_villkor"), title: val("q_titel") },
+      });
+      forhandUppdatera();
+    } catch (_) {}
+  }, 900);
 }
 
 async function offertBesked(status) {
@@ -2559,6 +2864,7 @@ async function viewOrder() {
   }`;
 
   if (kanRedigera) $("#radform").innerHTML = await radFormular(o.id, "order");
+  kopplaForhand(`/api/work-orders/${o.id}/pdf`);
 }
 
 async function orderStatus(status) {
@@ -2739,6 +3045,11 @@ function nyArtikel() {
         <button class="btn pri sm" onclick="sparaNyArtikel()">Spara</button>
         <button class="btn ghost sm" onclick="document.getElementById('artform').innerHTML=''">Avbryt</button>
       </div></div></div>`;
+  // Utan detta hamnar formuläret nedanför statistikrutorna, alltså utanför
+  // skärmen på telefon, och det ser ut som att knappen inte gör något.
+  scrollTill(box);
+  const f = $("#a_namn");
+  if (f) f.focus();
 }
 
 async function sparaNyArtikel() {
@@ -2891,13 +3202,16 @@ async function viewEconomy() {
     <div><div class="eyebrow">Uppföljning</div><h1>Att fakturera</h1>
       <p class="lead">Arbetsorder som är utförda men inte fakturerade, och fakturor som väntar på
       betalning. Det är här saker annars glöms bort.</p></div>
+    <div class="row">
+    ${S.user.role === "lasare" ? "" : `<button class="btn pri" onclick="nyForfragan()">+ Offert på förfrågan</button>`}
     <select style="width:auto" onchange="S.filter.ekStatus=this.value;viewEconomy()">
       ${[["aktiva", "Pågående"], ["att_fakturera", "Att fakturera"], ["obetalda", "Obetalda"],
          ["betald", "Betalda"], ["", "Alla"]]
         .map(([v, l]) => `<option value="${v}"${filter === v ? " selected" : ""}>${l}</option>`)
         .join("")}
-    </select>
+    </select></div>
   </div>
+  <div id="forfraganform"></div>
 
   <div class="stats">
     <div class="stat ${sum.att_fakturera ? "warn" : ""}"><div class="v">${sum.att_fakturera}</div>
