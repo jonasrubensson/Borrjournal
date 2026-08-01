@@ -62,76 +62,146 @@ def _text(v) -> str:
     return "" if v is None else str(v).strip()
 
 
+# Kolumnnamn i SGU:s bulkfiler. Läses efter namn, inte position, så en ändrad
+# kolumnordning hos SGU inte tyst förskjuter alla värden.
+KOLUMNER = {
+    "brunnsid": ("BRUNNS_ID",),
+    "n": ("N",),
+    "e": ("E",),
+    "lagesnoggrannhet": ("LAGESNOGGRANNHET",),
+    "kommunkod": ("KOMMUNKOD",),
+    "fastighet": ("FASTIGHETSBETECKNING",),
+    "ort": ("ORT",),
+    "borrdatum": ("BORRDATUM",),
+    "vattenmangd": ("VATTENMANGD",),
+    "grundvattenniva": ("GRUNDVATTENNIVA",),
+    "totaldjup": ("TOTALDJUP",),
+    "djup_till_berg": ("DJUP_TILL_BERG",),
+    # SGU stavar den här med ett R i bulkfilen, håll båda
+    "foderror_till": ("STALFODERROR_TILL", "RORBORRNING_TILL", "PLASTFODEROR_TILL"),
+    "tatning": ("TATNING",),
+    "anvandning": ("ANVANDNING",),
+    "anmarkning": ("ANMARKNING",),
+}
+
+
+def normalisera_datum(varde: str) -> str:
+    """SGU skriver datum som 20120427, 199307 eller bara 1963."""
+    siffror = "".join(c for c in varde if c.isdigit())
+    if len(siffror) >= 8:
+        return f"{siffror[:4]}-{siffror[4:6]}-{siffror[6:8]}"
+    if len(siffror) == 6:
+        return f"{siffror[:4]}-{siffror[4:6]}"
+    if len(siffror) == 4:
+        return siffror
+    return ""
+
+
 async def sync_lan(db: AsyncSession, lanskod: str, progress=None) -> dict:
-    """Hämtar samtliga brunnar i ett län och ersätter det som fanns sedan tidigare."""
+    """Hämtar hela länets bulkfil och ersätter det som fanns sedan tidigare.
+
+    Bulkfilen används i stället för det paginerade JSON-API:et: en enda begäran,
+    ingen paginering som kan tappa sidor, och formatet är verifierat mot skarp data.
+    Filerna är teckenkodade i cp1252, inte UTF-8.
+    """
+    import csv
+    import io
+
     import httpx
 
-    bas = settings.sgu_base_url.rstrip("/")
-    url = f"{bas}/lan/{lanskod}"
-    hamtade: list[dict] = []
-    sida = 1
+    from sqlalchemy import insert
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        while True:
-            r = await client.get(
-                url,
-                params={"format": "json", "limit": 10000, "page": sida},
-                headers={"User-Agent": settings.geocoder_user_agent},
-            )
-            r.raise_for_status()
-            data = r.json()
-            poster = data.get("brunnar") if isinstance(data, dict) else data
-            if isinstance(data, dict) and poster is None:
-                # Fältnamnet kan variera, ta första listan som finns
-                poster = next((v for v in data.values() if isinstance(v, list)), [])
-            if not poster:
-                break
-            hamtade.extend(poster)
-            if progress:
-                progress(len(hamtade))
-            if len(poster) < 10000:
-                break
-            sida += 1
-            if sida > 60:  # skyddsnät mot oändlig loop
-                break
+    url = f"{settings.sgu_bulk_url.rstrip('/')}/brunnar_lan{lanskod}.csv"
+    started = datetime.now(timezone.utc)
 
-    rader = []
-    for p in hamtade:
-        n = _tal(p.get("n"))
-        e = _tal(p.get("e"))
-        if n is None or e is None:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=600.0), follow_redirects=True) as client:
+        r = await client.get(url, headers={"User-Agent": settings.geocoder_user_agent})
+        if r.status_code == 404:
+            raise RuntimeError(f"SGU har ingen fil för län {lanskod} ({url})")
+        r.raise_for_status()
+        text = r.content.decode("cp1252", errors="replace")
+
+    lasare = csv.reader(io.StringIO(text), delimiter=";")
+    try:
+        rubriker = next(lasare)
+    except StopIteration:
+        raise RuntimeError("Filen från SGU var tom") from None
+
+    index = {namn.strip().upper(): i for i, namn in enumerate(rubriker)}
+
+    def plocka(rad: list[str], falt: str) -> str:
+        for namn in KOLUMNER[falt]:
+            i = index.get(namn)
+            if i is not None and i < len(rad) and rad[i].strip():
+                return rad[i].strip().strip('"')
+        return ""
+
+    saknade = [f for f, namn in KOLUMNER.items() if not any(n in index for n in namn)]
+    if "brunnsid" in saknade or "n" in saknade:
+        raise RuntimeError(
+            f"Oväntad kolumnuppsättning från SGU. Hittade: {', '.join(list(index)[:8])}"
+        )
+
+    rader: list[dict] = []
+    lasta = 0
+    utan_koordinat = 0
+    sedda: set[str] = set()
+
+    for rad in lasare:
+        if not rad:
             continue
+        lasta += 1
+        brunnsid = plocka(rad, "brunnsid")
+        n = _tal(plocka(rad, "n"))
+        e = _tal(plocka(rad, "e"))
+        if not brunnsid or n is None or e is None:
+            utan_koordinat += 1
+            continue
+        if brunnsid in sedda:
+            continue
+        sedda.add(brunnsid)
         lat, lon = sweref99tm_to_wgs84(n, e)
         rader.append(
             {
-                "brunnsid": _text(p.get("brunnsid")),
+                "brunnsid": brunnsid[:30],
                 "lanskod": lanskod,
-                "kommunkod": _text(p.get("kommunkod")),
+                "kommunkod": plocka(rad, "kommunkod")[:6],
                 "n": n,
                 "e": e,
                 "latitude": round(lat, 6),
                 "longitude": round(lon, 6),
-                "lagesnoggrannhet": _text(p.get("lagesnoggrannhet")),
-                "fastighet": _text(p.get("fastighet"))[:120],
-                "ort": _text(p.get("ort"))[:80],
-                "borrdatum": _text(p.get("borrdatum"))[:10],
-                "totaldjup": _tal(p.get("totaldjup")),
-                "djup_till_berg": _tal(p.get("djupTillBerg")),
-                "vattenmangd": _tal(p.get("vattenmangd")),
-                "grundvattenniva": _tal(p.get("grundvattenniva")),
-                "foderror_till": _tal(p.get("stalfoderrorTill")) or _tal(p.get("rorborrningTill")),
-                "anvandning": _text(p.get("anvandning"))[:10].upper(),
-                "tatning": _text(p.get("tatning"))[:10],
-                "anmarkning": _text(p.get("anmarkning"))[:255],
+                "lagesnoggrannhet": plocka(rad, "lagesnoggrannhet")[:4],
+                "fastighet": plocka(rad, "fastighet")[:120],
+                "ort": plocka(rad, "ort")[:80],
+                "borrdatum": normalisera_datum(plocka(rad, "borrdatum")),
+                "totaldjup": _tal(plocka(rad, "totaldjup")),
+                "djup_till_berg": _tal(plocka(rad, "djup_till_berg")),
+                "vattenmangd": _tal(plocka(rad, "vattenmangd")),
+                "grundvattenniva": _tal(plocka(rad, "grundvattenniva")),
+                "foderror_till": _tal(plocka(rad, "foderror_till")),
+                "anvandning": plocka(rad, "anvandning")[:10].upper(),
+                "tatning": plocka(rad, "tatning")[:10],
+                "anmarkning": plocka(rad, "anmarkning")[:255],
+                "hamtad_at": started,
             }
         )
+        if progress and len(rader) % 5000 == 0:
+            progress(len(rader))
 
     await db.execute(delete(SguWell).where(SguWell.lanskod == lanskod))
-    for i in range(0, len(rader), 1000):
-        db.add_all(SguWell(**rad) for rad in rader[i : i + 1000])
-        await db.flush()
+    for i in range(0, len(rader), 2000):
+        await db.execute(insert(SguWell), rader[i : i + 2000])
     await db.commit()
-    return {"lanskod": lanskod, "hamtade": len(hamtade), "sparade": len(rader)}
+
+    return {
+        "lanskod": lanskod,
+        "namn": LAN_NAMN.get(lanskod, lanskod),
+        "lasta": lasta,
+        "sparade": len(rader),
+        "utan_koordinat": utan_koordinat,
+        "sekunder": round((datetime.now(timezone.utc) - started).total_seconds(), 1),
+        "kalla": url,
+    }
 
 
 async def neighbours(
