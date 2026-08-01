@@ -1,0 +1,924 @@
+import os
+import uuid
+from datetime import date, datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
+from pydantic import BaseModel
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..config import settings
+from ..db import get_db
+from ..models import (
+    Article,
+    Customer,
+    Facility,
+    JournalEntry,
+    LineItem,
+    Quote,
+    StockMovement,
+    StoredFile,
+    User,
+    Visit,
+    WorkOrder,
+)
+from ..schemas import iso_utc
+from ..security import current_user, log_action, require_admin, require_write
+from ..services.pdf import bygg_pdf, kr as belopp_text, summera
+
+router = APIRouter(prefix="/api", tags=["offert och order"])
+
+QUOTE_STATUS = ["utkast", "skickad", "accepterad", "avslagen", "utgangen"]
+ORDER_STATUS = ["oppen", "utford", "fakturerad", "betald", "makulerad"]
+
+FORETAG_STANDARD = {
+    "namn": "",
+    "adress": "",
+    "postnr": "",
+    "ort": "",
+    "telefon": "",
+    "epost": "",
+    "orgnr": "",
+    "f_skatt": True,
+    "villkor": (
+        "Betalningsvillkor 30 dagar netto. Dröjsmålsränta enligt räntelagen. "
+        "Priset förutsätter framkomlighet för borrigg."
+    ),
+    "offert_giltig_dagar": 30,
+}
+
+
+class LineIn(BaseModel):
+    name: str = ""
+    article_id: str | None = None
+    kind: str = "material"
+    article_no: str = ""
+    note: str = ""
+    unit: str = "st"
+    quantity: float = 1.0
+    unit_price: float = 0.0
+    vat_percent: float = 25.0
+    discount_percent: float = 0.0
+    position: int = 0
+
+
+def rad_ut(r: LineItem) -> dict:
+    radsumma = r.quantity * r.unit_price * (1 - (r.discount_percent or 0) / 100)
+    return {
+        "id": r.id,
+        "article_id": r.article_id,
+        "position": r.position,
+        "kind": r.kind,
+        "article_no": r.article_no,
+        "name": r.name,
+        "note": r.note,
+        "unit": r.unit,
+        "quantity": r.quantity,
+        "unit_price": r.unit_price,
+        "vat_percent": r.vat_percent,
+        "discount_percent": r.discount_percent,
+        "line_total": round(radsumma, 2),
+    }
+
+
+async def _rader(db: AsyncSession, *, quote_id=None, work_order_id=None) -> list[LineItem]:
+    stmt = select(LineItem).order_by(LineItem.position, LineItem.name)
+    stmt = (
+        stmt.where(LineItem.quote_id == quote_id)
+        if quote_id
+        else stmt.where(LineItem.work_order_id == work_order_id)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def _foretag(db: AsyncSession) -> dict:
+    from ..services.notify import get_setting
+
+    return await get_setting(db, "foretag", FORETAG_STANDARD)
+
+
+async def _nasta(db: AsyncSession, model, kolumn, prefix: str) -> str:
+    antal = (await db.execute(select(func.count()).select_from(model))).scalar() or 0
+    kandidat = antal + 1
+    while True:
+        nummer = f"{prefix}-{1000 + kandidat}"
+        if not (await db.execute(select(model.id).where(kolumn == nummer))).first():
+            return nummer
+        kandidat += 1
+
+
+# ---------------- företagsuppgifter ----------------
+@router.get("/company")
+async def read_company(_: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    return await _foretag(db)
+
+
+@router.put("/company")
+async def write_company(
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from ..services.notify import save_setting
+
+    conf = await _foretag(db)
+    for nyckel in FORETAG_STANDARD:
+        if nyckel in payload:
+            conf[nyckel] = payload[nyckel]
+    await save_setting(db, "foretag", conf)
+    await log_action(db, "COMPANY_UPDATE", actor=user.username, request=request)
+    return conf
+
+
+# ---------------- offerter ----------------
+def quote_ut(q: Quote, rader: list[LineItem], kundnamn: str = "") -> dict:
+    r = [rad_ut(x) for x in rader]
+    total = summera(r, q.discount_percent)
+    return {
+        "id": q.id,
+        "quote_no": q.quote_no,
+        "status": q.status,
+        "title": q.title,
+        "intro": q.intro,
+        "terms": q.terms,
+        "customer_id": q.customer_id,
+        "customer_name": kundnamn,
+        "facility_id": q.facility_id,
+        "visit_id": q.visit_id,
+        "recipient_name": q.recipient_name,
+        "recipient_address": q.recipient_address,
+        "recipient_email": q.recipient_email,
+        "valid_until": q.valid_until,
+        "discount_percent": q.discount_percent,
+        "rot_deduction": q.rot_deduction,
+        "sent_at": iso_utc(q.sent_at),
+        "sent_to": q.sent_to,
+        "decided_at": q.decided_at,
+        "created_at": iso_utc(q.created_at),
+        "created_by": q.created_by,
+        "lines": r,
+        "totals": total,
+    }
+
+
+@router.get("/quotes")
+async def list_quotes(
+    customer_id: str | None = None,
+    visit_id: str | None = None,
+    status: str | None = None,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = select(Quote).order_by(Quote.created_at.desc())
+    if customer_id:
+        stmt = stmt.where(Quote.customer_id == customer_id)
+    if visit_id:
+        stmt = stmt.where(Quote.visit_id == visit_id)
+    if status == "aktiva":
+        stmt = stmt.where(Quote.status.in_(["utkast", "skickad"]))
+    elif status:
+        stmt = stmt.where(Quote.status == status)
+
+    offerter = (await db.execute(stmt)).scalars().all()
+    namn = {}
+    if offerter:
+        rader = (
+            await db.execute(
+                select(Customer.id, Customer.name).where(
+                    Customer.id.in_([q.customer_id for q in offerter if q.customer_id])
+                )
+            )
+        ).all()
+        namn = {r[0]: r[1] for r in rader}
+    return [
+        quote_ut(q, await _rader(db, quote_id=q.id), namn.get(q.customer_id, ""))
+        for q in offerter
+    ]
+
+
+@router.post("/quotes", status_code=201)
+async def create_quote(
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Skapar en offert på en kund eller ett platsbesök."""
+    customer_id = payload.get("customer_id")
+    visit_id = payload.get("visit_id")
+    if not customer_id and not visit_id:
+        raise HTTPException(status_code=400, detail="Ange kund eller platsbesök")
+
+    foretag = await _foretag(db)
+    mottagare = {"namn": "", "adress": "", "epost": ""}
+
+    if customer_id:
+        c = (
+            await db.execute(select(Customer).where(Customer.id == customer_id))
+        ).unique().scalar_one_or_none()
+        if c is None:
+            raise HTTPException(status_code=404, detail="Kunden finns inte")
+        mottagare = {
+            "namn": c.name,
+            "adress": c.invoice_address or c.address or "",
+            "epost": c.email or "",
+        }
+    else:
+        v = (await db.execute(select(Visit).where(Visit.id == visit_id))).scalar_one_or_none()
+        if v is None:
+            raise HTTPException(status_code=404, detail="Besöket finns inte")
+        mottagare = {
+            "namn": v.contact_name or v.property_designation or "",
+            "adress": v.address or "",
+            "epost": v.email or "",
+        }
+
+    giltig = payload.get("valid_until")
+    if not giltig:
+        dagar = int(foretag.get("offert_giltig_dagar") or 30)
+        giltig = date.fromordinal(date.today().toordinal() + dagar).isoformat()
+
+    q = Quote(
+        quote_no=await _nasta(db, Quote, Quote.quote_no, "OFF"),
+        customer_id=customer_id,
+        visit_id=visit_id,
+        facility_id=payload.get("facility_id"),
+        title=payload.get("title", ""),
+        intro=payload.get("intro", ""),
+        terms=payload.get("terms") or foretag.get("villkor", ""),
+        recipient_name=payload.get("recipient_name") or mottagare["namn"],
+        recipient_address=payload.get("recipient_address") or mottagare["adress"],
+        recipient_email=payload.get("recipient_email") or mottagare["epost"],
+        valid_until=giltig,
+        created_by=user.full_name or user.username,
+    )
+    db.add(q)
+    await db.commit()
+    await db.refresh(q)
+    await log_action(
+        db, "QUOTE_CREATE", actor=user.username, object_type="quote", object_id=q.id,
+        request=request, detail=q.quote_no,
+    )
+    return quote_ut(q, [])
+
+
+async def _hamta_offert(db: AsyncSession, quote_id: str) -> Quote:
+    q = (await db.execute(select(Quote).where(Quote.id == quote_id))).scalar_one_or_none()
+    if q is None:
+        raise HTTPException(status_code=404, detail="Offerten finns inte")
+    return q
+
+
+@router.get("/quotes/{quote_id}")
+async def read_quote(
+    quote_id: str, _: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+):
+    q = await _hamta_offert(db, quote_id)
+    namn = ""
+    if q.customer_id:
+        namn = (
+            await db.execute(select(Customer.name).where(Customer.id == q.customer_id))
+        ).scalar() or ""
+    return quote_ut(q, await _rader(db, quote_id=q.id), namn)
+
+
+@router.patch("/quotes/{quote_id}")
+async def update_quote(
+    quote_id: str,
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    q = await _hamta_offert(db, quote_id)
+    if payload.get("status") and payload["status"] not in QUOTE_STATUS:
+        raise HTTPException(status_code=400, detail="Okänd status")
+    for falt in (
+        "status", "title", "intro", "terms", "recipient_name", "recipient_address",
+        "recipient_email", "valid_until", "discount_percent", "rot_deduction", "facility_id",
+    ):
+        if falt in payload:
+            setattr(q, falt, payload[falt])
+    if payload.get("status") in ("accepterad", "avslagen") and not q.decided_at:
+        q.decided_at = date.today().isoformat()
+    await db.commit()
+    await db.refresh(q)
+    await log_action(
+        db, "QUOTE_UPDATE", actor=user.username, object_type="quote", object_id=q.id,
+        request=request, detail=f"{q.quote_no} {q.status}",
+    )
+    return quote_ut(q, await _rader(db, quote_id=q.id))
+
+
+@router.delete("/quotes/{quote_id}", status_code=204)
+async def delete_quote(
+    quote_id: str,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    q = await _hamta_offert(db, quote_id)
+    nummer = q.quote_no
+    await db.delete(q)
+    await db.commit()
+    await log_action(
+        db, "QUOTE_DELETE", actor=user.username, object_type="quote", object_id=quote_id,
+        request=request, detail=nummer,
+    )
+
+
+# ---------------- rader ----------------
+async def _lagg_rad(db: AsyncSession, payload: LineIn, *, quote_id=None, work_order_id=None):
+    data = payload.model_dump()
+    artikel_id = data.pop("article_id", None)
+
+    if artikel_id:
+        a = (
+            await db.execute(select(Article).where(Article.id == artikel_id))
+        ).scalar_one_or_none()
+        if a is None:
+            raise HTTPException(status_code=404, detail="Artikeln finns inte")
+        # Kopiera från artikeln. Ändrat pris senare ska inte ändra gamla order.
+        data["name"] = data["name"] or a.name
+        data["article_no"] = data["article_no"] or a.article_no
+        data["unit"] = data["unit"] if data["unit"] != "st" else a.unit
+        if not data["unit_price"]:
+            data["unit_price"] = a.sales_price
+        data["vat_percent"] = a.vat_percent
+        if not data["kind"] or data["kind"] == "material":
+            data["kind"] = "arbete" if (a.category or "").lower().startswith("arbete") else "material"
+
+    if not (data.get("name") or "").strip():
+        raise HTTPException(status_code=400, detail="Raden behöver en benämning")
+
+    rad = LineItem(quote_id=quote_id, work_order_id=work_order_id, article_id=artikel_id, **data)
+    db.add(rad)
+    await db.commit()
+    await db.refresh(rad)
+    return rad
+
+
+@router.post("/quotes/{quote_id}/lines", status_code=201)
+async def add_quote_line(
+    quote_id: str,
+    payload: LineIn,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    await _hamta_offert(db, quote_id)
+    return rad_ut(await _lagg_rad(db, payload, quote_id=quote_id))
+
+
+@router.patch("/lines/{line_id}")
+async def update_line(
+    line_id: str,
+    payload: dict,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    rad = (await db.execute(select(LineItem).where(LineItem.id == line_id))).scalar_one_or_none()
+    if rad is None:
+        raise HTTPException(status_code=404, detail="Raden finns inte")
+    for falt in LineIn.model_fields:
+        if falt in payload and falt != "article_id":
+            setattr(rad, falt, payload[falt])
+    await db.commit()
+    await db.refresh(rad)
+    return rad_ut(rad)
+
+
+@router.delete("/lines/{line_id}", status_code=204)
+async def delete_line(
+    line_id: str, user: User = Depends(require_write), db: AsyncSession = Depends(get_db)
+):
+    rad = (await db.execute(select(LineItem).where(LineItem.id == line_id))).scalar_one_or_none()
+    if rad is None:
+        raise HTTPException(status_code=404, detail="Raden finns inte")
+    await db.delete(rad)
+    await db.commit()
+
+
+# ---------------- PDF ----------------
+async def _bygg_dokument(db: AsyncSession, *, offert: Quote = None, order: WorkOrder = None) -> bytes:
+    foretag = await _foretag(db)
+    if offert is not None:
+        rader = [rad_ut(r) for r in await _rader(db, quote_id=offert.id)]
+        fastighet = ""
+        if offert.facility_id:
+            f = (
+                await db.execute(select(Facility).where(Facility.id == offert.facility_id))
+            ).unique().scalar_one_or_none()
+            if f is not None and f.customer is not None:
+                fastighet = f"Fastighet: {f.customer.property_designation}"
+        return bygg_pdf(
+            typ="Offert",
+            nummer=offert.quote_no,
+            titel=offert.title,
+            foretag=foretag,
+            mottagare={
+                "namn": offert.recipient_name,
+                "adress": offert.recipient_address,
+                "fastighet": fastighet,
+                "epost": offert.recipient_email,
+            },
+            rader=rader,
+            intro=offert.intro,
+            villkor=offert.terms,
+            datum=iso_utc(offert.created_at)[:10] if offert.created_at else "",
+            giltig_till=offert.valid_until,
+            rabatt_procent=offert.discount_percent,
+        )
+
+    rader = [rad_ut(r) for r in await _rader(db, work_order_id=order.id)]
+    c = (
+        await db.execute(select(Customer).where(Customer.id == order.customer_id))
+    ).unique().scalar_one_or_none()
+    anlaggning = ""
+    if order.facility_id:
+        f = (
+            await db.execute(select(Facility).where(Facility.id == order.facility_id))
+        ).unique().scalar_one_or_none()
+        if f is not None:
+            anlaggning = f"{f.facility_no} {f.facility_type}"
+    return bygg_pdf(
+        typ="Arbetsorder",
+        nummer=order.order_no,
+        titel=order.title,
+        foretag=foretag,
+        mottagare={
+            "namn": c.name if c else "",
+            "adress": (c.invoice_address or c.address) if c else "",
+            "fastighet": f"Fastighet: {c.property_designation}" if c and c.property_designation else "",
+            "telefon": c.phone if c else "",
+        },
+        rader=rader,
+        intro=order.description,
+        villkor="",
+        datum=order.performed_at or (iso_utc(order.created_at)[:10] if order.created_at else ""),
+        referens=anlaggning,
+        rabatt_procent=order.discount_percent,
+        fotnot=(
+            f"Utförd {order.performed_at} av {order.performed_by}."
+            if order.performed_at
+            else ""
+        ),
+    )
+
+
+@router.get("/quotes/{quote_id}/pdf")
+async def quote_pdf(
+    quote_id: str,
+    ladda_ner: bool = False,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    q = await _hamta_offert(db, quote_id)
+    pdf = await _bygg_dokument(db, offert=q)
+    disp = "attachment" if ladda_ner else "inline"
+    return Response(
+        pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'{disp}; filename="{q.quote_no}.pdf"'},
+    )
+
+
+async def _spara_som_dokument(
+    db: AsyncSession, *, customer_id: str, filnamn: str, pdf: bytes, user: User,
+    facility_id: str | None = None, caption: str = "",
+) -> StoredFile | None:
+    """Lägger PDF:en bland kundens dokument, så att det som skickades finns kvar."""
+    if not customer_id:
+        return None
+    os.makedirs(os.path.join(settings.data_dir, "files"), exist_ok=True)
+    lagrat = f"{uuid.uuid4()}.pdf"
+    with open(os.path.join(settings.data_dir, "files", lagrat), "wb") as fh:
+        fh.write(pdf)
+
+    from ..routers.files import make_pdf_thumb
+
+    post = StoredFile(
+        customer_id=customer_id,
+        facility_id=facility_id,
+        filename=filnamn,
+        stored_name=lagrat,
+        thumb_name=make_pdf_thumb(pdf, lagrat),
+        content_type="application/pdf",
+        kind="dokument",
+        size_bytes=len(pdf),
+        caption=caption,
+        uploaded_by=user.full_name or user.username,
+    )
+    db.add(post)
+    return post
+
+
+@router.post("/quotes/{quote_id}/send")
+async def send_quote(
+    quote_id: str,
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mejlar offerten som PDF och sparar den bland kundens dokument."""
+    from ..services.notify import DEFAULT_SMTP, SMTP_KEY, get_setting, send_email
+
+    q = await _hamta_offert(db, quote_id)
+    mottagare = (payload.get("recipient") or q.recipient_email or "").strip()
+    if "@" not in mottagare:
+        raise HTTPException(status_code=400, detail="Ange en giltig e-postadress")
+    rader = await _rader(db, quote_id=q.id)
+    if not rader:
+        raise HTTPException(status_code=400, detail="Offerten har inga rader att skicka")
+
+    pdf = await _bygg_dokument(db, offert=q)
+    foretag = await _foretag(db)
+    total = summera([rad_ut(r) for r in rader], q.discount_percent)
+
+    # Vanligt bindestreck i ämnesraden. Tankstreck tvingar fram MIME-kodning av
+    # hela raden, vilket ser konstigt ut i vissa klienter.
+    amne = payload.get("subject") or f"Offert {q.quote_no} - {q.title or 'brunnsborrning'}"
+    brodtext = payload.get("message") or (
+        f"Hej,\n\nBifogat finner ni offert {q.quote_no}"
+        + (f" avseende {q.title}" if q.title else "")
+        + f".\n\nSumma inklusive moms: {total['brutto']:,.2f} kr".replace(",", " ")
+        + (f"\nOfferten gäller till {q.valid_until}." if q.valid_until else "")
+        + f"\n\nHör gärna av er vid frågor.\n\nMed vänlig hälsning\n{foretag.get('namn', '')}\n"
+    )
+
+    smtp = await get_setting(db, SMTP_KEY, DEFAULT_SMTP)
+    try:
+        await send_email(
+            {**smtp, "enabled": True},
+            amne,
+            brodtext,
+            [mottagare],
+            attachments=[(f"{q.quote_no}.pdf", pdf, "application/pdf")],
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"Kunde inte skicka: {exc}. Kontrollera e-postinställningarna."
+        ) from exc
+
+    q.status = "skickad" if q.status == "utkast" else q.status
+    q.sent_at = datetime.now(timezone.utc)
+    q.sent_to = mottagare
+
+    sparad = await _spara_som_dokument(
+        db,
+        customer_id=q.customer_id,
+        filnamn=f"{q.quote_no} offert.pdf",
+        pdf=pdf,
+        user=user,
+        facility_id=q.facility_id,
+        caption=f"Offert skickad till {mottagare}",
+    )
+    if q.customer_id:
+        db.add(
+            JournalEntry(
+                customer_id=q.customer_id,
+                facility_id=q.facility_id,
+                entry_type="Offert",
+                title=f"Offert {q.quote_no} skickad",
+                body=f"Skickad till {mottagare}. Summa inkl. moms {belopp_text(total['brutto'])} kr."
+                + (f" Gäller till {q.valid_until}." if q.valid_until else ""),
+                author_id=user.id,
+                author_name=user.full_name or user.username,
+            )
+        )
+    await db.commit()
+    await log_action(
+        db, "QUOTE_SENT", actor=user.username, object_type="quote", object_id=q.id,
+        request=request, detail=f"{q.quote_no} till {mottagare}",
+    )
+    return {
+        "ok": True,
+        "recipient": mottagare,
+        "file_id": sparad.id if sparad else None,
+        "saved_to_customer": bool(sparad),
+    }
+
+
+# ---------------- arbetsorder ----------------
+def order_ut(o: WorkOrder, rader: list[LineItem], kundnamn: str = "") -> dict:
+    r = [rad_ut(x) for x in rader]
+    total = summera(r, o.discount_percent)
+    material = sum(x["line_total"] for x in r if x["kind"] == "material")
+    arbete = sum(x["line_total"] for x in r if x["kind"] == "arbete")
+    return {
+        "id": o.id,
+        "order_no": o.order_no,
+        "status": o.status,
+        "title": o.title,
+        "description": o.description,
+        "customer_id": o.customer_id,
+        "customer_name": kundnamn,
+        "facility_id": o.facility_id,
+        "quote_id": o.quote_id,
+        "performed_at": o.performed_at,
+        "performed_by": o.performed_by,
+        "invoiced_at": o.invoiced_at,
+        "invoice_no": o.invoice_no,
+        "paid_at": o.paid_at,
+        "discount_percent": o.discount_percent,
+        "rot_deduction": o.rot_deduction,
+        "stock_deducted": o.stock_deducted,
+        "created_at": iso_utc(o.created_at),
+        "created_by": o.created_by,
+        "lines": r,
+        "totals": total,
+        "material_total": round(material, 2),
+        "labour_total": round(arbete, 2),
+    }
+
+
+async def _hamta_order(db: AsyncSession, order_id: str) -> WorkOrder:
+    o = (await db.execute(select(WorkOrder).where(WorkOrder.id == order_id))).scalar_one_or_none()
+    if o is None:
+        raise HTTPException(status_code=404, detail="Arbetsordern finns inte")
+    return o
+
+
+@router.get("/work-orders")
+async def list_orders(
+    customer_id: str | None = None,
+    status: str | None = None,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = select(WorkOrder).order_by(WorkOrder.created_at.desc())
+    if customer_id:
+        stmt = stmt.where(WorkOrder.customer_id == customer_id)
+    if status == "att_fakturera":
+        stmt = stmt.where(WorkOrder.status == "utford")
+    elif status == "obetalda":
+        stmt = stmt.where(WorkOrder.status == "fakturerad")
+    elif status == "aktiva":
+        stmt = stmt.where(WorkOrder.status.in_(["oppen", "utford", "fakturerad"]))
+    elif status:
+        stmt = stmt.where(WorkOrder.status == status)
+
+    order = (await db.execute(stmt)).scalars().all()
+    namn = {}
+    if order:
+        rader = (
+            await db.execute(
+                select(Customer.id, Customer.name).where(
+                    Customer.id.in_([o.customer_id for o in order])
+                )
+            )
+        ).all()
+        namn = {r[0]: r[1] for r in rader}
+    return [
+        order_ut(o, await _rader(db, work_order_id=o.id), namn.get(o.customer_id, ""))
+        for o in order
+    ]
+
+
+@router.get("/work-orders/summary")
+async def order_summary(_: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Vad som väntar på fakturering och vad som väntar på betalning."""
+    alla = (await db.execute(select(WorkOrder))).scalars().all()
+    ut = {"att_fakturera": 0, "att_fakturera_belopp": 0.0, "obetalda": 0, "obetalda_belopp": 0.0,
+          "oppna": 0}
+    for o in alla:
+        rader = [rad_ut(r) for r in await _rader(db, work_order_id=o.id)]
+        belopp = summera(rader, o.discount_percent)["brutto"]
+        if o.status == "utford":
+            ut["att_fakturera"] += 1
+            ut["att_fakturera_belopp"] += belopp
+        elif o.status == "fakturerad":
+            ut["obetalda"] += 1
+            ut["obetalda_belopp"] += belopp
+        elif o.status == "oppen":
+            ut["oppna"] += 1
+    ut["att_fakturera_belopp"] = round(ut["att_fakturera_belopp"], 2)
+    ut["obetalda_belopp"] = round(ut["obetalda_belopp"], 2)
+    return ut
+
+
+@router.post("/work-orders", status_code=201)
+async def create_order(
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    customer_id = payload.get("customer_id")
+    if not customer_id:
+        raise HTTPException(status_code=400, detail="Ange kund")
+    c = (
+        await db.execute(select(Customer).where(Customer.id == customer_id))
+    ).unique().scalar_one_or_none()
+    if c is None:
+        raise HTTPException(status_code=404, detail="Kunden finns inte")
+
+    o = WorkOrder(
+        order_no=await _nasta(db, WorkOrder, WorkOrder.order_no, "AO"),
+        customer_id=customer_id,
+        facility_id=payload.get("facility_id"),
+        quote_id=payload.get("quote_id"),
+        title=payload.get("title", ""),
+        description=payload.get("description", ""),
+        performed_at=payload.get("performed_at", ""),
+        performed_by=payload.get("performed_by") or (user.full_name or user.username),
+        created_by=user.full_name or user.username,
+    )
+    db.add(o)
+    await db.flush()
+
+    # Raderna från en accepterad offert följer med, så inget skrivs in två gånger
+    if payload.get("quote_id") and payload.get("copy_quote_lines", True):
+        for r in await _rader(db, quote_id=payload["quote_id"]):
+            db.add(
+                LineItem(
+                    work_order_id=o.id,
+                    article_id=r.article_id,
+                    position=r.position,
+                    kind=r.kind,
+                    article_no=r.article_no,
+                    name=r.name,
+                    note=r.note,
+                    unit=r.unit,
+                    quantity=r.quantity,
+                    unit_price=r.unit_price,
+                    vat_percent=r.vat_percent,
+                    discount_percent=r.discount_percent,
+                )
+            )
+    await db.commit()
+    await db.refresh(o)
+    await log_action(
+        db, "ORDER_CREATE", actor=user.username, object_type="work_order", object_id=o.id,
+        request=request, detail=o.order_no,
+    )
+    return order_ut(o, await _rader(db, work_order_id=o.id), c.name)
+
+
+@router.get("/work-orders/{order_id}")
+async def read_order(
+    order_id: str, _: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+):
+    o = await _hamta_order(db, order_id)
+    namn = (
+        await db.execute(select(Customer.name).where(Customer.id == o.customer_id))
+    ).scalar() or ""
+    return order_ut(o, await _rader(db, work_order_id=o.id), namn)
+
+
+@router.post("/work-orders/{order_id}/lines", status_code=201)
+async def add_order_line(
+    order_id: str,
+    payload: LineIn,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    o = await _hamta_order(db, order_id)
+    if o.status in ("fakturerad", "betald"):
+        raise HTTPException(
+            status_code=400,
+            detail="Ordern är fakturerad. Ändra status först om något ska läggas till.",
+        )
+    return rad_ut(await _lagg_rad(db, payload, work_order_id=order_id))
+
+
+async def _dra_lager(db: AsyncSession, o: WorkOrder, user: User) -> int:
+    """Drar materialet från lagret när ordern markeras utförd. En gång."""
+    if o.stock_deducted:
+        return 0
+    antal = 0
+    for r in await _rader(db, work_order_id=o.id):
+        if not r.article_id or r.kind != "material":
+            continue
+        a = (
+            await db.execute(select(Article).where(Article.id == r.article_id))
+        ).scalar_one_or_none()
+        if a is None or not a.track_stock:
+            continue
+        a.stock = round((a.stock or 0) - r.quantity, 3)
+        db.add(
+            StockMovement(
+                article_id=a.id,
+                change=-r.quantity,
+                balance_after=a.stock,
+                reason="forbrukning",
+                work_order_id=o.id,
+                note=f"{o.order_no} {r.name}"[:255],
+                by_user=user.full_name or user.username,
+            )
+        )
+        antal += 1
+    o.stock_deducted = True
+    return antal
+
+
+@router.patch("/work-orders/{order_id}")
+async def update_order(
+    order_id: str,
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    o = await _hamta_order(db, order_id)
+    if payload.get("status") and payload["status"] not in ORDER_STATUS:
+        raise HTTPException(status_code=400, detail="Okänd status")
+
+    tidigare = o.status
+    for falt in (
+        "status", "title", "description", "performed_at", "performed_by",
+        "invoiced_at", "invoice_no", "paid_at", "discount_percent", "rot_deduction",
+        "facility_id",
+    ):
+        if falt in payload:
+            setattr(o, falt, payload[falt])
+
+    idag = date.today().isoformat()
+    dragna = 0
+    if o.status != tidigare:
+        if o.status in ("utford", "fakturerad", "betald"):
+            if not o.performed_at:
+                o.performed_at = idag
+            dragna = await _dra_lager(db, o, user)
+        if o.status in ("fakturerad", "betald") and not o.invoiced_at:
+            o.invoiced_at = idag
+        if o.status == "betald" and not o.paid_at:
+            o.paid_at = idag
+
+    await db.commit()
+    await db.refresh(o)
+    await log_action(
+        db, "ORDER_UPDATE", actor=user.username, object_type="work_order", object_id=o.id,
+        request=request, detail=f"{o.order_no} {tidigare} -> {o.status}",
+    )
+    svar = order_ut(o, await _rader(db, work_order_id=o.id))
+    svar["stock_lines_deducted"] = dragna
+    return svar
+
+
+@router.get("/work-orders/{order_id}/pdf")
+async def order_pdf(
+    order_id: str,
+    ladda_ner: bool = False,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    o = await _hamta_order(db, order_id)
+    pdf = await _bygg_dokument(db, order=o)
+    disp = "attachment" if ladda_ner else "inline"
+    return Response(
+        pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'{disp}; filename="{o.order_no}.pdf"'},
+    )
+
+
+@router.post("/work-orders/{order_id}/save-pdf")
+async def save_order_pdf(
+    order_id: str,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sparar arbetsordern som PDF bland kundens dokument."""
+    o = await _hamta_order(db, order_id)
+    pdf = await _bygg_dokument(db, order=o)
+    sparad = await _spara_som_dokument(
+        db,
+        customer_id=o.customer_id,
+        filnamn=f"{o.order_no} arbetsorder.pdf",
+        pdf=pdf,
+        user=user,
+        facility_id=o.facility_id,
+        caption=o.title or "Arbetsorder",
+    )
+    await db.commit()
+    await log_action(
+        db, "ORDER_PDF_SAVED", actor=user.username, object_type="work_order",
+        object_id=o.id, request=request, detail=o.order_no,
+    )
+    return {"ok": True, "file_id": sparad.id if sparad else None}
+
+
+@router.delete("/work-orders/{order_id}", status_code=204)
+async def delete_order(
+    order_id: str,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    o = await _hamta_order(db, order_id)
+    if o.status in ("fakturerad", "betald"):
+        raise HTTPException(
+            status_code=400,
+            detail="En fakturerad order raderas inte. Sätt status till makulerad i stället.",
+        )
+    nummer = o.order_no
+    await db.delete(o)
+    await db.commit()
+    await log_action(
+        db, "ORDER_DELETE", actor=user.username, object_type="work_order",
+        object_id=order_id, request=request, detail=nummer,
+    )

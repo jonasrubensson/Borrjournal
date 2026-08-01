@@ -284,6 +284,17 @@ async def convert_visit(
         )
     )
 
+    # Offerter som lagts på besöket ska följa med till kunden, annars tappas de
+    from ..models import Quote
+
+    offerter = (
+        await db.execute(select(Quote).where(Quote.visit_id == v.id))
+    ).scalars().all()
+    for q in offerter:
+        q.customer_id = customer.id
+        if facility is not None and not q.facility_id:
+            q.facility_id = facility.id
+
     v.customer_id = customer.id
     v.status = "vunnen"
     await db.commit()
@@ -296,6 +307,7 @@ async def convert_visit(
         "customer": customer_out(customer),
         "facility": facility_out(facility) if facility else None,
         "visit": visit_out(v),
+        "quotes_moved": len(offerter),
     }
 
 

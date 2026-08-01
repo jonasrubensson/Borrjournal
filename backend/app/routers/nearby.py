@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..models import Customer, Facility, Reminder, User
+from ..models import Customer, Facility, Reminder, User, Visit
 from ..schemas import derived_status, service_due
 from ..security import current_user
 from ..services.geo import bearing_label, haversine_km, parse_coordinates
@@ -86,6 +86,73 @@ def _serialise(f: Facility, distance: float, bearing: str, reminders: list[Remin
     }
 
 
+AKTIVA_BESOK = ("planerat", "genomfort", "offert")
+
+
+async def _visits_near(
+    db: AsyncSession,
+    lat: float,
+    lon: float,
+    radius_km: float,
+    exclude_visit: str | None = None,
+) -> list[dict]:
+    """Planerade och pågående besök i närheten.
+
+    Ett inbokat besök är precis lika mycket en anledning att åka åt ett håll som
+    en försenad service. Utan detta ser man bara sina anläggningar och missar att
+    två besök ligger på samma väg.
+    """
+    besok = (
+        await db.execute(
+            select(Visit).where(
+                Visit.latitude.isnot(None), Visit.status.in_(AKTIVA_BESOK)
+            )
+        )
+    ).scalars().all()
+
+    today = date.today().isoformat()
+    traffar = []
+    for v in besok:
+        if exclude_visit and v.id == exclude_visit:
+            continue
+        avstand = haversine_km(lat, lon, v.latitude, v.longitude)
+        if avstand > radius_km:
+            continue
+
+        # Inbokat och nära i tiden går före ett besök utan datum
+        if v.planned_at and v.planned_at < today:
+            skal, prio = f"Inbokat {v.planned_at}, passerat", 3
+        elif v.planned_at:
+            skal, prio = f"Inbokat {v.planned_at}", 2
+        elif v.status == "offert":
+            skal, prio = "Offert lämnad, väntar svar", 2
+        else:
+            skal, prio = "Besök utan datum", 1
+
+        traffar.append(
+            {
+                "typ": "besok",
+                "visit_id": v.id,
+                "visit_no": v.visit_no,
+                "customer_name": v.contact_name or v.property_designation or "Platsbesök",
+                "phone": v.phone,
+                "property_designation": v.property_designation,
+                "municipality": v.municipality,
+                "latitude": v.latitude,
+                "longitude": v.longitude,
+                "distance_km": round(avstand, 2),
+                "bearing": bearing_label(lat, lon, v.latitude, v.longitude),
+                "status": v.status,
+                "planned_at": v.planned_at,
+                "errand": (v.errand or "")[:80],
+                "reason": skal,
+                "priority": prio,
+                "open_reminders": 0,
+            }
+        )
+    return traffar
+
+
 async def _search(
     db: AsyncSession,
     lat: float,
@@ -115,6 +182,8 @@ async def _search(
 
     # Angelägenhet först, därefter närhet. En försenad service 20 km bort är mer
     # värd en avstickare än en fungerande brunn på samma gata.
+    for h in hits:
+        h.setdefault("typ", "anlaggning")
     hits.sort(key=lambda h: (-h["priority"], h["distance_km"]))
     return hits[:limit]
 
@@ -126,6 +195,7 @@ async def nearby(
     q: str | None = Query(None, description="Koordinat som text, t.ex. SWEREF 99 TM"),
     radius_km: float = 25,
     only_jobs: bool = False,
+    include_visits: bool = True,
     limit: int = 40,
     _: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
@@ -139,6 +209,10 @@ async def nearby(
         lat, lon = parsed
 
     hits = await _search(db, lat, lon, radius_km, only_jobs, limit)
+    if include_visits:
+        hits = hits + await _visits_near(db, lat, lon, radius_km)
+        hits.sort(key=lambda h: (-h["priority"], h["distance_km"]))
+        hits = hits[:limit]
     total = len(await _candidates(db))
     return {
         "origin": {"latitude": lat, "longitude": lon},
@@ -174,6 +248,9 @@ async def nearby_facility(
     hits = await _search(
         db, f.latitude, f.longitude, radius_km, only_jobs, limit, exclude_facility=f.id
     )
+    hits = hits + await _visits_near(db, f.latitude, f.longitude, radius_km)
+    hits.sort(key=lambda h: (-h["priority"], h["distance_km"]))
+    hits = hits[:limit]
     return {
         "origin": {
             "facility_no": f.facility_no,
@@ -208,6 +285,47 @@ async def geocode_address(
             "eller hämta din position när du står på plats.",
         )
     return hit
+
+
+@router.get("/visits/{visit_id}/nearby")
+async def nearby_visit(
+    visit_id: str,
+    radius_km: float = 30,
+    only_jobs: bool = True,
+    limit: int = 20,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Vad kan slås ihop med resan till det här besöket?
+
+    Både egna anläggningar som behöver något och andra inbokade besök.
+    """
+    from ..models import Visit as _Visit
+
+    v = (await db.execute(select(_Visit).where(_Visit.id == visit_id))).scalar_one_or_none()
+    if v is None:
+        raise HTTPException(status_code=404, detail="Besöket finns inte")
+    if v.latitude is None or v.longitude is None:
+        return {
+            "origin": None,
+            "missing_coordinates": True,
+            "results": [],
+            "hint": "Besöket saknar koordinat, så resan går inte att planera härifrån.",
+        }
+
+    hits = await _search(db, v.latitude, v.longitude, radius_km, only_jobs, limit)
+    hits = hits + await _visits_near(db, v.latitude, v.longitude, radius_km, exclude_visit=v.id)
+    hits.sort(key=lambda h: (-h["priority"], h["distance_km"]))
+    return {
+        "origin": {
+            "visit_no": v.visit_no,
+            "latitude": v.latitude,
+            "longitude": v.longitude,
+            "planned_at": v.planned_at,
+        },
+        "radius_km": radius_km,
+        "results": hits[:limit],
+    }
 
 
 @router.get("/coordinates/parse")

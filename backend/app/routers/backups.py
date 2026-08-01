@@ -1,6 +1,6 @@
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +16,15 @@ router = APIRouter(prefix="/api/backups", tags=["backup"])
 
 
 def out(r: BackupRecord) -> dict:
+    import json as _json
+
+    try:
+        rakning = _json.loads(r.counts or "{}")
+    except ValueError:
+        rakning = {}
     return {
+        "file_count": rakning.get("_filer"),
+        "file_bytes": rakning.get("_filbytes"),
         "id": r.id,
         "filename": r.filename,
         "size_bytes": r.size_bytes,
@@ -41,6 +49,8 @@ async def list_backups(_: User = Depends(require_admin), db: AsyncSession = Depe
         "backups": [out(r) for r in rows],
         "schedule": schedule,
         "usage": usage,
+        "backup_dir": svc.BACKUP_DIR,
+        "backup_dir_extern": bool(getattr(svc.settings, "backup_dir", "")),
         "engine": "pg_dump" if (svc.is_postgres() and svc.pg_dump_available()) else "json",
         "postgres": svc.is_postgres(),
         "pg_dump_available": svc.pg_dump_available(),
@@ -49,9 +59,15 @@ async def list_backups(_: User = Depends(require_admin), db: AsyncSession = Depe
 
 @router.post("", status_code=201)
 async def create_backup(
-    request: Request, user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)
+    request: Request,
+    payload: dict | None = None,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    record = await svc.create_backup(db, trigger="manuell", actor=user.username)
+    med_filer = True if payload is None else bool(payload.get("include_files", True))
+    record = await svc.create_backup(
+        db, trigger="manuell", actor=user.username, include_files=med_filer
+    )
     await log_action(
         db,
         "BACKUP_CREATE" if record.status == "klar" else "BACKUP_FAIL",
@@ -89,6 +105,76 @@ async def write_schedule(
     await save_setting(db, SCHEDULE_KEY, conf)
     await log_action(db, "BACKUP_SCHEDULE", actor=user.username, request=request, detail=str(conf))
     return conf
+
+
+@router.get("/packages/export")
+async def export_customers(
+    customer_ids: str = "",
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Kundpaket med allt: uppgifter, journal, dokument och bilder.
+
+    Utan customer_ids exporteras hela registret. Paketet är fristående och kan
+    läsas in i ett annat system utan att röra det som redan finns där.
+    """
+    from datetime import date
+
+    from fastapi.responses import Response
+
+    from ..models import Customer
+    from ..services.packages import bygg_paket
+
+    if customer_ids.strip():
+        ids = [x.strip() for x in customer_ids.split(",") if x.strip()]
+    else:
+        ids = list((await db.execute(select(Customer.id))).scalars().all())
+
+    if not ids:
+        raise HTTPException(status_code=404, detail="Inga kunder att exportera")
+
+    data = await bygg_paket(db, ids)
+    namn = (
+        f"borrjournal-kunder-{date.today().isoformat()}.tar.gz"
+        if len(ids) > 1
+        else f"borrjournal-kund-{date.today().isoformat()}.tar.gz"
+    )
+    return Response(
+        content=data,
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{namn}"'},
+    )
+
+
+@router.post("/packages/import")
+async def import_customers(
+    request: Request,
+    file: UploadFile = File(...),
+    replace: bool = Form(False),
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Läser in ett kundpaket. Rör inte kunder som inte finns i paketet."""
+    from ..services.packages import las_in_paket
+
+    data = await file.read()
+    if len(data) > 500 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Paketet är större än 500 MB")
+    try:
+        resultat = await las_in_paket(db, data, actor=user.username, ersatt=replace)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Inläsningen misslyckades: {exc}") from exc
+
+    await log_action(
+        db,
+        "PACKAGE_IMPORT",
+        actor=user.username,
+        request=request,
+        detail=f"{len(resultat['skapade'])} kunder, {resultat['filer']} filer",
+    )
+    return resultat
 
 
 @router.get("/{backup_id}/download")
