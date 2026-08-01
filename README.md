@@ -174,7 +174,7 @@ Mallarna hanteras under **Mer → Offertmallar**.
 |---|---|
 | Befintlig kund | Kundkortet, fliken Ekonomi, Ny offert |
 | Efter platsbesök | Besöket, Skapa offert |
-| Någon ringer och vill ha pris | Fakturera, **Offert på förfrågan** |
+| Någon ringer och vill ha pris | Besök, **Offert på förfrågan** |
 
 Den sista är för telefonsamtal. Ingen kund läggs upp, inget besök bokas, bara ett namn och
 gärna en e-postadress. Blir det affär trycker du **Blev kund** på offerten, så skapas kund och
@@ -347,6 +347,38 @@ Att ta emot borrprotokoll från externa borrare är inte byggt. När det blir ak
 vägen samma princip: en egen brevlåda som appen hämtar från utgående via IMAP, avsändare på
 godkänd lista, och allt som kommer in hamnar i en granskningskö där en människa godkänner innan
 något skrivs till registret.
+
+## Vem får vilken påminnelse
+
+Varje påminnelse har en ägare. Den sätts automatiskt utifrån vem som gjorde jobbet:
+
+| Påminnelse | Går till |
+|---|---|
+| Service, vattenprov, intyg | Den som senast skrev i journalen på anläggningen |
+| Obetald faktura | Den som skapade arbetsordern |
+| Offert utan besked | Den som skrev offerten |
+| Besök utan återkoppling | Den som lade upp besöket |
+| Egen påminnelse | Den som skapade den |
+
+Den som var där sist vet mest om vad som behöver göras, och känner igen kunden.
+
+I påminnelsevyn växlar du mellan **Mina** och **Allas**. Mina visar dina egna plus sådana ingen
+tagit ansvar för, så att inget blir liggande för att det saknar ägare.
+
+Under **Mitt konto** väljer var och en vad notiserna ska omfatta:
+
+| Val | Betyder |
+|---|---|
+| Mina egna | Det jag ansvarar för, plus herrelösa |
+| Allas | Allt som händer i företaget |
+| Inga | Notiser avstängda, påminnelserna finns kvar i appen |
+
+Administratörer står på **Allas** från början, så att inget faller mellan stolarna när någon är
+sjuk eller slutar. Det går att ändra själv.
+
+E-posten följer samma indelning: var och en får ett mejl med sina egna rader till adressen pa
+kontot. Påminnelser utan ägare går till den gemensamma listan under Inställningar, sa att de inte
+försvinner.
 
 ## Jobb i närheten
 
