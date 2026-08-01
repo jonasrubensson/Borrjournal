@@ -156,9 +156,19 @@ också i underlaget så att ingen tror något annat.
 
 ### Hämta SGU-data
 
-**Inställningar → SGU**, välj län och hämta. Data lagras lokalt, så uppslag går på millisekunder
-utan att ringa ut. SGU uppdaterar en gång i veckan och appen synkar om automatiskt när lokala data
-är äldre än sju dagar. Ett normalstort län tar någon minut första gången.
+**Inställningar → SGU**: kryssa i de län ni jobbar i, spara. Sedan sköter appen resten. Saknade län
+hämtas vid nästa uppstart och inom ett dygn, och de hålls uppdaterade när lokala data blivit äldre
+än inställt antal dagar. SGU uppdaterar sina öppna data en gång i veckan, så sju dagar är rimligt.
+**Hämta valda nu** finns kvar för den som inte vill vänta.
+
+Data hämtas från SGU:s bulkfiler per län, en fil per anrop. Det paginerade JSON-API:et användes
+först, men det svarar 404 utan formatparameter och kräver sidhantering som kan tappa poster.
+Bulkfilerna är teckenkodade i cp1252 och har kolumner som läses efter namn, inte position, så en
+ändrad kolumnordning hos SGU inte tyst förskjuter alla värden.
+
+Brunnar som saknar koordinat i SGU:s register hoppas över, de går inte att placera. Hur många som
+föll bort visas efter hämtningen. Datumen normaliseras: SGU skriver dem som `20120427`, `199307`
+eller bara `1963`.
 
 Licensen är Creative Commons Erkännande 4.0, vilket kräver att SGU anges som källa där uppgifterna
 visas. Det sker automatiskt i underlaget.
@@ -170,7 +180,20 @@ exakt var någon annans hål sitter.
 ## Dela med externa borrare
 
 **Dela**-knappen finns på en anläggning och på ett platsbesök. Du väljer mottagare och kryssar i
-vad som ska följa med: plats, åtkomst, borrdata, berg, pump, kontaktuppgifter, grannunderlag.
+vad som ska följa med. Valen skiljer sig åt:
+
+| | Platsbesök | Anläggning |
+|---|---|---|
+| Fastighet, adress, koordinat, planerat besök | ✓ | ✓ |
+| Kontaktperson och telefon | ✓ | ✓ |
+| Vad ärendet gäller | ✓ | |
+| Anteckningar från platsen / åtkomst | ✓ | ✓ |
+| Borrdata, berg, pump | | ✓ |
+| Grannbrunnar från SGU | ✓ | ✓ |
+
+Ett besök har inga borrdata, hålet är ju inte borrat än. De fälten erbjuds därför inte, och skickas
+de ändå via API:et avvisas de med ett begripligt fel i stället för att tyst ge tomma rader.
+Offertsumman delas aldrig, den är intern.
 Meddelandet skickas som e-post från din egen server via samma SMTP som påminnelserna.
 
 Ingenting öppnas utåt. Appen ansluter bara ut, precis som förut. Det som skickas loggas i kundens
@@ -195,10 +218,28 @@ fungerande brunn på samma gata, eftersom det är den avstickaren som faktiskt �
 Bocka i stoppen och tryck *Öppna rundan i kartan*, så byggs en Google Maps-rutt med din position
 som start och stoppen som delmål (högst tio, det är kartans gräns).
 
-### Koordinater från adressen
+### Koordinater hämtas av sig själva
 
-I registreringsformuläret och i anläggningens redigeringsvy finns **Hämta från adressen**, som slår
-upp koordinaten från adress, fastighetsbeteckning och kommun.
+Skriver du en adress eller fastighetsbeteckning slår servern upp koordinaten automatiskt, när ett
+platsbesök skapas, när adressen ändras, och när en anläggning läggs till på en kund. Du behöver
+inte trycka på något. Det betyder också att underlaget om grannbrunnar finns direkt när du öppnar
+besöket.
+
+Hittas ingen adress sparas posten ändå, utan koordinat och utan gissning. Tre vägar finns kvar:
+
+* **Hämta min position** när du står på plats, det exaktaste alternativet
+* **Slå upp adressen igen** efter att du rättat adressen
+* skriv koordinaten för hand, i decimalgrader eller SWEREF 99 TM
+
+En koordinat du satt själv skrivs aldrig över av ett automatiskt uppslag.
+
+Uppslaget trappar ner tills något träffar: adress med kommun, adress utan kommun, adressen utan
+husnummer, och till sist bara kommunen. Landar det på kommunnivå sägs det rakt ut att träffen är
+ungefärlig, så att ingen tror att den pekar på tomten.
+
+**Sätt `GEOCODER_USER_AGENT` i `.env`** till något som identifierar er, gärna med en kontaktadress.
+OpenStreetMaps villkor kräver det, och utan det riskerar uppslagen att avvisas. Appen säger till
+med just den instruktionen om tjänsten svarar 403.
 
 Det är det enda i appen som kräver internet. Det finns ingen rimlig väg att slå upp svenska
 adresser offline utan att packa in ett adressregister. Standard är OpenStreetMaps Nominatim, vars
