@@ -4,7 +4,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 
@@ -14,12 +14,14 @@ from .version import APP_VERSION
 from .db import SessionLocal, init_db
 from .models import User
 from .routers import (
+    articles,
     auth,
     backups,
     customers,
     files,
     journal,
     nearby,
+    orders,
     reminders,
     search,
     visits,
@@ -101,6 +103,8 @@ app.include_router(backups.router)
 app.include_router(settings_router.router)
 app.include_router(nearby.router)
 app.include_router(visits.router)
+app.include_router(articles.router)
+app.include_router(orders.router)
 
 
 @app.get("/api/health")
@@ -116,9 +120,42 @@ async def version():
 if os.path.isdir(FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
+    def _las_index() -> str:
+        """Läser index.html och stämplar versionsnumret på tillgångarna.
+
+        Utan versionsstämpel kan webbläsaren servera gammal app.js efter en
+        uppdatering, eftersom den har egna regler för hur länge en fil utan
+        cache-headers får återanvändas. Med ?v=<version> blir det en ny adress
+        varje gång versionen höjs, och då hämtas filen garanterat om.
+        """
+        with open(os.path.join(FRONTEND_DIR, "index.html"), encoding="utf-8") as fh:
+            html = fh.read()
+        for fil in ("app.js", "styles.css", "manifest.json"):
+            html = html.replace(f"/static/{fil}", f"/static/{fil}?v={APP_VERSION}")
+        return html
+
+    INGEN_CACHE = {
+        "Cache-Control": "no-cache, must-revalidate",
+        "Pragma": "no-cache",
+    }
+
     @app.get("/")
     async def index():
-        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+        return HTMLResponse(_las_index(), headers=INGEN_CACHE)
+
+    @app.get("/sw.js")
+    async def service_worker():
+        # Service workern måste alltid hämtas färsk, annars kan en gammal
+        # version fortsätta styra sidan efter en uppdatering.
+        sokvag = os.path.join(FRONTEND_DIR, "sw.js")
+        with open(sokvag, encoding="utf-8") as fh:
+            kod = fh.read()
+        kod = kod.replace("__VERSION__", APP_VERSION)
+        return Response(
+            kod,
+            media_type="text/javascript",
+            headers={**INGEN_CACHE, "Service-Worker-Allowed": "/"},
+        )
 
     @app.get("/{path:path}")
     async def spa(path: str):
@@ -129,4 +166,19 @@ if os.path.isdir(FRONTEND_DIR):
         candidate = os.path.join(FRONTEND_DIR, path)
         if path and os.path.isfile(candidate):
             return FileResponse(candidate)
-        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+        return HTMLResponse(_las_index(), headers=INGEN_CACHE)
+
+
+@app.middleware("http")
+async def cache_headers(request, call_next):
+    """Versionsstämplade tillgångar får cachas länge, resten aldrig utan kontroll."""
+    svar = await call_next(request)
+    vag = request.url.path
+    if vag.startswith("/static/"):
+        if request.url.query.startswith("v="):
+            svar.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            svar.headers["Cache-Control"] = "no-cache, must-revalidate"
+    elif vag.startswith("/api/"):
+        svar.headers.setdefault("Cache-Control", "no-store")
+    return svar

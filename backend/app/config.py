@@ -27,6 +27,9 @@ class Settings(BaseSettings):
 
     # Filer
     data_dir: str = "./data"
+    # Var backuperna hamnar. Peka mot en monterad nätverksdisk eller extern volym
+    # så att de inte ligger på samma disk som det de skyddar. Tom = data_dir/backups.
+    backup_dir: str = ""
     max_upload_mb: int = 25
 
     # Första administratören skapas vid start om databasen är tom

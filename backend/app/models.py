@@ -339,3 +339,158 @@ class ShareLog(Base):
     attachments: Mapped[str] = mapped_column(Text, default="")
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
     sent_by: Mapped[str] = mapped_column(String(120), default="")
+
+
+class Article(Base):
+    """Artikel i lagret eller på prislistan."""
+
+    __tablename__ = "articles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    article_no: Mapped[str] = mapped_column(String(30), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    category: Mapped[str] = mapped_column(String(60), default="", index=True)
+    unit: Mapped[str] = mapped_column(String(20), default="st")
+
+    purchase_price: Mapped[float] = mapped_column(Float, default=0.0)
+    sales_price: Mapped[float] = mapped_column(Float, default=0.0)
+    vat_percent: Mapped[float] = mapped_column(Float, default=25.0)
+
+    # Lager. track_stock av för tjänster och sådant som inte lagerhålls.
+    track_stock: Mapped[bool] = mapped_column(Boolean, default=True)
+    stock: Mapped[float] = mapped_column(Float, default=0.0)
+    min_stock: Mapped[float] = mapped_column(Float, default=0.0)
+    supplier: Mapped[str] = mapped_column(String(120), default="")
+
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class StockMovement(Base):
+    """Varje lagerförändring, så att ett saldo alltid går att förklara."""
+
+    __tablename__ = "stock_movements"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    article_id: Mapped[str] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), index=True
+    )
+    change: Mapped[float] = mapped_column(Float)
+    balance_after: Mapped[float] = mapped_column(Float, default=0.0)
+    reason: Mapped[str] = mapped_column(String(40), default="")  # inkop | forbrukning | justering
+    work_order_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    note: Mapped[str] = mapped_column(String(255), default="")
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    by_user: Mapped[str] = mapped_column(String(120), default="")
+
+
+class Quote(Base):
+    """Offert. Kan höra till ett platsbesök innan kunden finns."""
+
+    __tablename__ = "quotes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    quote_no: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+
+    customer_id: Mapped[str | None] = mapped_column(
+        ForeignKey("customers.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    facility_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    visit_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+
+    # utkast | skickad | accepterad | avslagen | utgangen
+    status: Mapped[str] = mapped_column(String(20), default="utkast", index=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    intro: Mapped[str] = mapped_column(Text, default="")
+    terms: Mapped[str] = mapped_column(Text, default="")
+
+    # Sparas på offerten, inte hämtas från kunden, så en gammal offert alltid
+    # visar det som faktiskt stod i den när den skickades
+    recipient_name: Mapped[str] = mapped_column(String(200), default="")
+    recipient_address: Mapped[str] = mapped_column(String(255), default="")
+    recipient_email: Mapped[str] = mapped_column(String(200), default="")
+
+    valid_until: Mapped[str] = mapped_column(String(10), default="")
+    rot_deduction: Mapped[bool] = mapped_column(Boolean, default=False)
+    discount_percent: Mapped[float] = mapped_column(Float, default=0.0)
+
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sent_to: Mapped[str] = mapped_column(String(255), default="")
+    decided_at: Mapped[str] = mapped_column(String(10), default="")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    created_by: Mapped[str] = mapped_column(String(120), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class WorkOrder(Base):
+    """Arbetsorder: vad som faktiskt gjordes och gick åt.
+
+    Journalen berättar vad som hände. Arbetsordern håller reda på vad det kostade,
+    så att inget glöms bort vid faktureringen.
+    """
+
+    __tablename__ = "work_orders"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    order_no: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+
+    customer_id: Mapped[str] = mapped_column(
+        ForeignKey("customers.id", ondelete="CASCADE"), index=True
+    )
+    facility_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    quote_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    journal_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+    # oppen | utford | fakturerad | betald | makulerad
+    status: Mapped[str] = mapped_column(String(20), default="oppen", index=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+
+    performed_at: Mapped[str] = mapped_column(String(10), default="")
+    performed_by: Mapped[str] = mapped_column(String(120), default="")
+
+    invoiced_at: Mapped[str] = mapped_column(String(10), default="")
+    invoice_no: Mapped[str] = mapped_column(String(40), default="")
+    paid_at: Mapped[str] = mapped_column(String(10), default="")
+
+    rot_deduction: Mapped[bool] = mapped_column(Boolean, default=False)
+    discount_percent: Mapped[float] = mapped_column(Float, default=0.0)
+    # Lagret dras när ordern markeras utförd, en gång
+    stock_deducted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    created_by: Mapped[str] = mapped_column(String(120), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class LineItem(Base):
+    """Rad på en offert eller arbetsorder.
+
+    Benämning och pris kopieras från artikeln vid tillägg. Ändras artikelns pris
+    senare påverkas inte gamla offerter och order, vilket är hela poängen.
+    """
+
+    __tablename__ = "line_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    quote_id: Mapped[str | None] = mapped_column(
+        ForeignKey("quotes.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    work_order_id: Mapped[str | None] = mapped_column(
+        ForeignKey("work_orders.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    article_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    kind: Mapped[str] = mapped_column(String(20), default="material")  # material | arbete | ovrigt
+    article_no: Mapped[str] = mapped_column(String(30), default="")
+    name: Mapped[str] = mapped_column(String(200))
+    note: Mapped[str] = mapped_column(String(255), default="")
+    unit: Mapped[str] = mapped_column(String(20), default="st")
+    quantity: Mapped[float] = mapped_column(Float, default=1.0)
+    unit_price: Mapped[float] = mapped_column(Float, default=0.0)
+    vat_percent: Mapped[float] = mapped_column(Float, default=25.0)
+    discount_percent: Mapped[float] = mapped_column(Float, default=0.0)
