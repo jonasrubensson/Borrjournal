@@ -344,3 +344,25 @@ img.laddar{background:linear-gradient(90deg,#E4EAEA,#F2F5F5,#E4EAEA);background-
   animation:sh 1.1s infinite}
 img.trasig{background:#FBEEEC;border:1px dashed #E0BAB2}
 img.qr{border:1px solid var(--line);border-radius:3px;background:#fff;padding:6px;display:block}
+
+/* företagslogotyp i sidopanelen */
+.brand .logo{max-width:170px;max-height:52px;object-fit:contain;display:block}
+@media (max-width:900px){ .brand .logo{max-height:34px} }
+
+/* mallkort */
+.mallkort{display:flex;flex-direction:column;gap:3px;text-align:left;padding:14px;
+  border:1px solid var(--line);border-radius:var(--r);background:#fff;cursor:pointer;min-height:92px}
+.mallkort:hover{border-color:var(--water);background:#F4F9FA}
+.mallkort strong{font-size:15px}
+.mallkort span{font-size:12.5px;color:var(--ink-2)}
+.mallkort .m{font-family:var(--mono);font-size:11px;color:var(--stone);margin-top:auto}
+
+/* Mer-listan */
+.merrad{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;
+  background:none;border:none;border-bottom:1px solid #E9EEEE;padding:14px 4px;text-align:left;
+  cursor:pointer;min-height:56px}
+.merrad:last-child{border-bottom:none}
+.merrad:hover{background:#F4F9FA}
+.merrad strong{display:block;font-size:15.5px;font-weight:600}
+.merrad .m{display:block;font-size:13px;color:var(--stone);margin-top:2px}
+.merrad .pil{color:var(--stone);font-size:16px}

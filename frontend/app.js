@@ -2,13 +2,14 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "3.0.0";
+const UI_VERSION = "3.1.0";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
   user: JSON.parse(localStorage.getItem("bj_user") || "null"),
   route: "oversikt",
   size: "normal",
+  company: null,
   id: null,
   tab: "journal",
   step: 0,
@@ -98,16 +99,26 @@ function logout(msg) {
 }
 
 /* ---------------- routing ---------------- */
+/* Fem i navigationen, valda efter hur dagen ser ut: vad ska jag göra, vem gäller det,
+   vad är inbokat, vad ska faktureras. Resten ligger under Mer, som öppnas vid behov. */
 const ROUTES = [
-  ["oversikt", "Översikt", "M3 10 L10 3 L17 10 M5 8 v9 h10 V8"],
+  ["oversikt", "Idag", "M3 10 L10 3 L17 10 M5 8 v9 h10 V8"],
   ["kunder", "Kunder", "M10 9 a3 3 0 1 0 0-6 a3 3 0 0 0 0 6 M3 17 c0-4 3-6 7-6 s7 2 7 6"],
   ["besok", "Besök", "M10 17 s6-5.3 6-10a6 6 0 1 0-12 0c0 4.7 6 10 6 10z M10 5 v4 M8 7 h4"],
-  ["paminnelser", "Påminnelser", "M10 3 a5 5 0 0 0-5 5 c0 4-2 5-2 5 h14 s-2-1-2-5 a5 5 0 0 0-5-5 M8 16 a2 2 0 0 0 4 0"],
-  ["journal", "Journal", "M5 3 h10 v14 H5z M8 7 h6 M8 10 h6 M8 13 h4"],
   ["ekonomi", "Fakturera", "M3 5 h14 v10 H3z M3 8 h14 M6 12 h4"],
-  ["artiklar", "Artiklar", "M3 6 l7-3 l7 3 v8 l-7 3 l-7-3z M3 6 l7 3 l7-3 M10 9 v8"],
-  ["pumpar", "Pumpar", "M6 3 h8 v5 h-8z M10 8 v9 M6 17 h8"],
-  ["ny", "Ny", "M10 4 v12 M4 10 h12"],
+  ["mer", "Mer", "M4 6 h12 M4 10 h12 M4 14 h12"],
+];
+
+const MER_POSTER = [
+  ["paminnelser", "Påminnelser", "Allt som ska bevakas"],
+  ["artiklar", "Artiklar och lager", "Prislista och saldon"],
+  ["mallar", "Offertmallar", "Underlag för vanliga jobb"],
+  ["journal", "Journal, alla kunder", "Vad som hänt den senaste tiden"],
+  ["pumpar", "Pumpar och modeller", "Hitta alla med en viss modell"],
+  ["anlaggningar", "Anläggningar", "Hela flottan med filter"],
+  ["nara", "Jobb i närheten", "Vad som ligger runt omkring"],
+  ["ny", "Registrera anläggning", "Ny brunn eller pump"],
+  ["konto", "Mitt konto", "Lösenord, tvåfaktor, textstorlek"],
 ];
 
 function go(route, id) {
@@ -120,7 +131,7 @@ function applyHash() {
   const parts = (location.hash || "#/oversikt").replace(/^#\/?/, "").split("/");
   S.route = parts[0] || "oversikt";
   S.id = parts[1] || null;
-  if (S.route === "kund") S.tab = parts[2] || "journal";
+  if (S.route === "kund") S.tab = parts[2] || "oversikt";
   if (S.route === "admin") S.tab = parts[1] || "konton";
   if (S.route === "ny" && !S.id) S.step = S.step || 0;
   window.scrollTo(0, 0);
@@ -132,10 +143,13 @@ window.addEventListener("hashchange", applyHash);
 let loginNeedsTotp = false;
 
 function viewLogin(error = "") {
+  // Namnet hämtas separat, kräver ingen inloggning via /api/version
+
   root().innerHTML = `
   <div class="login">
     <form class="box" id="loginform" autocomplete="on">
-      <div class="bn">Borrjournal</div><span class="bs">KUND &amp; ANLÄGGNING</span>
+      <img id="loginlogo" alt="" hidden style="max-width:180px;max-height:70px;display:block;margin-bottom:14px">
+      <div class="bn" id="loginnamn">Borrjournal</div><span class="bs">KUND &amp; ANLÄGGNING</span>
       ${error ? `<div class="err">${esc(error)}</div>` : ""}
       <label class="f" for="u">Användarnamn</label>
       <input id="u" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false">
@@ -170,6 +184,8 @@ async function doLogin() {
     localStorage.setItem("bj_user", JSON.stringify(res.user));
     loginNeedsTotp = false;
     if (res.totp_setup_required) return forceTotpSetup();
+    S.company = null;
+    await laddaForetag();
     go("oversikt");
     toast(`Inloggad som ${res.user.full_name || res.user.username}`);
   } catch (e) {
@@ -192,10 +208,12 @@ function shell(inner) {
     .slice(0, 2)
     .toUpperCase();
   const navHtml = ROUTES.map(([r, label, d]) => {
+    const iMer = MER_POSTER.some(([k]) => k === S.route);
     const on =
       S.route === r ||
-      (r === "kunder" && S.route === "kund") ||
-      (r === "pumpar" && S.route === "anlaggningar");
+      (r === "kunder" && ["kund", "offert", "order"].includes(S.route)) ||
+      (r === "besok" && S.route === "besok") ||
+      (r === "mer" && (iMer || S.route === "admin"));
     const badge = r === "paminnelser" && S.badge ? `<span class="cnt badge">${S.badge}</span>` : "";
     return `<a href="#/${r}" class="${on ? "on" : ""}">
       <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="${d}" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
@@ -206,16 +224,18 @@ function shell(inner) {
   <div class="app">
     <aside class="side">
       <div class="brand">
-        <svg width="20" height="26" viewBox="0 0 20 26" fill="none" aria-hidden="true">
+        ${
+          S.company && S.company.har_logotyp
+            ? `<img class="logo" data-auth-src="/api/company/logo" alt="${esc(S.company.namn || "Logotyp")}">`
+            : `<svg width="20" height="26" viewBox="0 0 20 26" fill="none" aria-hidden="true">
           <path d="M10 1 L10 25" stroke="#1F7A8C" stroke-width="2"/>
           <path d="M4 7h12M4 13h12M4 19h12" stroke="#5E7C87" stroke-width="1.4"/>
           <path d="M10 25 l-4-4 h8 z" fill="#1F7A8C"/></svg>
-        <span class="bn">Borrjournal<span class="bs">KUND &amp; ANLÄGGNING</span></span>
+        <span class="bn">${esc((S.company && S.company.namn) || "Borrjournal")}<span class="bs">KUND &amp; ANLÄGGNING</span></span>`
+        }
       </div>
       <div class="navgroup">Register</div>
-      <nav class="nav">${navHtml}
-        ${u.role === "admin" ? `<a href="#/admin/konton" class="${S.route === "admin" ? "on" : ""}"><svg width="18" height="18" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M10 2v3M10 15v3M2 10h3M15 10h3" stroke="currentColor" stroke-width="1.5"/></svg><span>Konton</span></a>` : ""}
-      </nav>
+      <nav class="nav">${navHtml}</nav>
       <div class="foot">
         <button onclick="go('konto')" style="text-align:left">${esc(u.full_name || u.username || "")}<br>${esc(u.role || "")}</button><br>
         <button onclick="logout()">Logga ut</button></div>
@@ -240,8 +260,19 @@ function shell(inner) {
   </div>`;
 }
 
+async function laddaForetag() {
+  if (S.company) return S.company;
+  try {
+    S.company = await api("/company");
+  } catch (_) {
+    S.company = { namn: "", har_logotyp: false };
+  }
+  return S.company;
+}
+
 function mountShell(inner) {
   root().innerHTML = shell(inner);
+  hydreraBilder(root());
   const q = $("#gq");
   q.value = S.gq || "";
   q.oninput = debounce(globalSearch, 250);
@@ -746,7 +777,7 @@ async function viewCustomer() {
   </div>
   <div class="grid2">
     <div>
-      <div class="tabs">${T("journal", "Journal", journal.length)}${T("dokument", "Dokument", docs.length)}${T("bilder", "Bilder", imgs.length)}${T("offerter", "Offerter", offerter.length)}${T("order", "Order", order.length)}${T("paminnelser", "Påminnelser", reminders.length)}${T("anlaggning", "Anläggning", c.facilities.length)}</div>
+      <div class="tabs">${T("oversikt", "Översikt")}${T("journal", "Journal", journal.length)}${T("ekonomi", "Ekonomi", offerter.length + order.length)}${T("filer", "Filer", files.length)}${T("anlaggning", "Anläggning", c.facilities.length)}</div>
       <div class="card"><div class="pad" id="tabbody"></div></div>
     </div>
     ${
@@ -790,12 +821,10 @@ function renderTab() {
   if (!body) return;
   slappBlobbar();
   if (S.tab === "journal") body.innerHTML = tabJournal(c, S.data.journal);
-  else if (S.tab === "paminnelser") body.innerHTML = tabReminders(c, S.data.reminders);
-  else if (S.tab === "offerter") body.innerHTML = tabQuotes(c, S.data.quotes);
-  else if (S.tab === "order") body.innerHTML = tabOrders(c, S.data.orders);
-  else if (S.tab === "dokument") body.innerHTML = tabFiles(c, S.data.files.filter((f) => f.kind === "dokument"));
-  else if (S.tab === "bilder") body.innerHTML = tabImages(c, S.data.files.filter((f) => f.kind === "bild"));
-  else body.innerHTML = tabFacilities(c);
+  else if (S.tab === "ekonomi") body.innerHTML = tabEconomy(c, S.data.quotes, S.data.orders);
+  else if (S.tab === "filer") body.innerHTML = tabFiler(c, S.data.files);
+  else if (S.tab === "anlaggning") body.innerHTML = tabFacilities(c);
+  else body.innerHTML = tabOversikt(c);
   wireUploads();
   hydreraBilder(body);
 }
@@ -1205,7 +1234,7 @@ async function viewVisit() {
         </div>
         <div class="row" style="margin-top:14px">
           <button class="btn pri sm" onclick="saveVisit()">Spara</button>
-          <button class="btn sm" onclick="nyOffert(null,'${v.id}')">Skapa offert</button>
+          <button class="btn sm" onclick="valjMall(null,'${v.id}')">Skapa offert</button>
           <button class="btn ghost sm" onclick="shareDialog({visit_id:'${v.id}'})">Dela med extern borrare</button>
           <button class="btn danger sm" style="margin-left:auto" onclick="removeVisit()">Ta bort</button>
         </div>
@@ -1589,7 +1618,7 @@ function tabQuotes(c, offerter) {
     laser
       ? ""
       : `<div class="row" style="margin-bottom:14px">
-    <button class="btn pri sm" onclick="nyOffert('${c.id}')">+ Ny offert</button>
+    <button class="btn pri sm" onclick="valjMall('${c.id}')">+ Ny offert</button>
     <span class="hint" style="margin:0">Skapar ett utkast du fyller med rader.</span></div>`
   }
   ${
@@ -1677,6 +1706,384 @@ async function nyOrder(customerId) {
   } catch (e) {
     toast(e.message, true);
   }
+}
+
+
+async function laddaUppLogo() {
+  const fil = ($("#logofil").files || [])[0];
+  if (!fil) return toast("Välj en bildfil först", true);
+  const fd = new FormData();
+  fd.append("file", fil);
+  try {
+    const r = await api("/company/logo", { method: "POST", body: fd });
+    toast(`Logotypen uppladdad, ${r.bredd}×${r.hojd} px`);
+    S.company = null;
+    await laddaForetag();
+    adminCompany();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function taBortLogo() {
+  if (!confirm("Ta bort logotypen?")) return;
+  await api("/company/logo", { method: "DELETE" });
+  S.company = null;
+  await laddaForetag();
+  toast("Logotypen borttagen");
+  adminCompany();
+}
+
+/* ---------------- offertmallar ---------------- */
+async function valjMall(customerId, visitId) {
+  const mallar = await api("/quote-templates");
+  const box = document.getElementById(customerId ? "tabbody" : "view");
+  const html = `
+  <div class="card" id="mallval" style="margin-bottom:16px;border-color:#C9DFE3">
+    <div class="hd" style="background:#F4F9FA"><h2>Vad gäller offerten?</h2></div>
+    <div class="pad">
+      <p class="lead" style="margin-top:0">Välj en mall så fylls rubrik, texter och rader i åt dig.
+        Allt går att ändra efteråt. Priser hämtas från artikelregistret där artikeln finns.</p>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px">
+        ${mallar
+          .map(
+            (m) => `<button class="mallkort" onclick="skapaUrMall('${m.id}','${customerId || ""}','${visitId || ""}')">
+          <strong>${esc(m.name)}</strong>
+          <span>${esc(m.description || "")}</span>
+          <span class="m">${m.line_count} rader · ca ${krRund(m.estimate)} kr</span></button>`
+          )
+          .join("")}
+        <button class="mallkort" onclick="skapaUrMall('','${customerId || ""}','${visitId || ""}')">
+          <strong>Tom offert</strong><span>Börja från noll och skriv allt själv</span></button>
+      </div>
+      <button class="btn ghost sm" style="margin-top:12px" onclick="document.getElementById('mallval').remove()">Avbryt</button>
+    </div></div>`;
+  const holder = document.createElement("div");
+  holder.innerHTML = html;
+  box.prepend(holder.firstElementChild);
+  scrollTill(document.getElementById("mallval"));
+}
+
+async function skapaUrMall(mallId, customerId, visitId) {
+  const titel = mallId ? null : prompt("Vad gäller offerten?", "");
+  if (titel === null && !mallId) return;
+  try {
+    const body = customerId ? { customer_id: customerId } : { visit_id: visitId };
+    if (mallId) body.template_id = mallId;
+    else body.title = titel;
+    const q = await api("/quotes", { method: "POST", body });
+    toast(`${q.quote_no} skapad${q.lines.length ? ` med ${q.lines.length} rader` : ""}`);
+    go("offert", q.id);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function sparaSomMall() {
+  const q = S.data.quote;
+  const namn = prompt("Vad ska mallen heta?", q.title || "");
+  if (namn === null || !namn.trim()) return;
+  try {
+    const m = await api("/quote-templates", {
+      method: "POST",
+      body: { name: namn.trim(), from_quote_id: q.id, description: "Sparad från " + q.quote_no },
+    });
+    toast(`Mallen "${m.name}" sparad med ${m.line_count} rader`);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function viewTemplates() {
+  const token = claim();
+  mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
+  const mallar = await api("/quote-templates");
+  if (!current(token)) return;
+  $("#view").innerHTML = `
+  <div class="spread">
+    <div><div class="eyebrow">Offerter</div><h1>Mallar</h1>
+      <p class="lead">Färdiga underlag för de jobb ni gör ofta. Tre finns från början och går att
+        skriva om. Egna mallar skapar du enklast genom att göra en offert som du är nöjd med och
+        välja Spara som mall.</p></div>
+  </div>
+  <div class="card"><div class="pad">
+    ${mallar
+      .map(
+        (m) => `<div class="filerow">
+      <div class="ftype ${m.is_builtin ? "other" : "doc"}">${m.is_builtin ? "STD" : "EGEN"}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600">${esc(m.name)}</div>
+        <div class="fmeta">${esc(m.description || "")} · ${m.line_count} rader · ca ${krRund(m.estimate)} kr</div>
+      </div>
+      ${
+        S.user.role === "lasare"
+          ? ""
+          : `<button class="btn ghost sm" onclick="visaMall('${m.id}')">Visa</button>
+             <button class="btn danger sm" onclick="taBortMall('${m.id}','${esc(m.name)}')">Ta bort</button>`
+      }</div>`
+      )
+      .join("")}
+  </div></div>
+  <div id="malldetalj"></div>`;
+}
+
+async function visaMall(id) {
+  const m = (await api("/quote-templates")).find((x) => x.id === id);
+  const box = $("#malldetalj");
+  if (!m) return;
+  box.innerHTML = `<div class="card" style="margin-top:16px">
+    <div class="hd"><h2>${esc(m.name)}</h2></div><div class="pad">
+      ${fld("m_namn", "Namn", m.name)}
+      ${fld("m_titel", "Rubrik på offerten", m.title)}
+      <label class="f" for="m_intro">Inledande text</label>
+      <textarea id="m_intro">${esc(m.intro)}</textarea>
+      <label class="f" for="m_villkor">Villkor</label>
+      <textarea id="m_villkor">${esc(m.terms)}</textarea>
+      <div class="eyebrow" style="margin-top:14px">Rader i mallen</div>
+      <table><thead><tr><th>Benämning</th><th>Typ</th><th>Antal</th><th>Enhet</th><th>À-pris</th></tr></thead>
+      <tbody>${m.lines
+        .map(
+          (r) => `<tr><td data-l="Benämning">${esc(r.name)}</td>
+        <td data-l="Typ">${esc(RAD_TYP[r.kind] || r.kind)}</td>
+        <td data-l="Antal" class="tid">${r.quantity}</td>
+        <td data-l="Enhet" class="tid">${esc(r.unit || "st")}</td>
+        <td data-l="À-pris" class="tid">${krRund(r.unit_price)}</td></tr>`
+        )
+        .join("")}</tbody></table>
+      <p class="hint">Priserna här är utgångsvärden. Finns artikeln i registret används dagens pris
+        därifrån när offerten skapas.</p>
+      <div class="row" style="margin-top:12px">
+        <button class="btn pri sm" onclick="sparaMall('${m.id}')">Spara ändringar</button>
+        <button class="btn ghost sm" onclick="document.getElementById('malldetalj').innerHTML=''">Stäng</button>
+      </div>
+    </div></div>`;
+  scrollTill(box);
+}
+
+async function sparaMall(id) {
+  await api(`/quote-templates/${id}`, {
+    method: "PATCH",
+    body: {
+      name: val("m_namn"),
+      title: val("m_titel"),
+      intro: val("m_intro"),
+      terms: val("m_villkor"),
+    },
+  });
+  toast("Mallen sparad");
+  viewTemplates();
+}
+
+async function taBortMall(id, namn) {
+  if (!confirm(`Ta bort mallen "${namn}"?`)) return;
+  await api(`/quote-templates/${id}`, { method: "DELETE" });
+  toast("Mallen borttagen");
+  viewTemplates();
+}
+
+
+/* Översikt: svarar på "vad är läget med den här kunden" utan att man klickar runt.
+   Byggd för att vara det första man ser, både på kontoret och i bilen. */
+function tabOversikt(c) {
+  const laser = S.user.role === "lasare";
+  const journal = S.data.journal || [];
+  const offerter = S.data.quotes || [];
+  const order = S.data.orders || [];
+  const paminnelser = S.data.reminders || [];
+  const filer = S.data.files || [];
+
+  const attGora = [
+    ...paminnelser.map((r) => ({
+      text: r.title,
+      under: `${r.due_date}${r.overdue ? " · försenad" : ""}`,
+      prio: r.overdue ? 3 : 2,
+      klick: `go('kund','${c.id}/oversikt')`,
+    })),
+    ...offerter
+      .filter((q) => q.status === "skickad")
+      .map((q) => ({
+        text: `${q.quote_no} väntar på besked`,
+        under: `${kr(q.totals.brutto)} kr${q.valid_until ? ` · gäller till ${q.valid_until}` : ""}`,
+        prio: 2,
+        klick: `go('offert','${q.id}')`,
+      })),
+    ...order
+      .filter((o) => o.status === "utford")
+      .map((o) => ({
+        text: `${o.order_no} är utförd men inte fakturerad`,
+        under: `${kr(o.totals.brutto)} kr`,
+        prio: 3,
+        klick: `go('order','${o.id}')`,
+      })),
+    ...order
+      .filter((o) => o.status === "fakturerad")
+      .map((o) => ({
+        text: `${o.order_no} väntar på betalning`,
+        under: `${kr(o.totals.brutto)} kr${o.invoice_no ? ` · faktura ${esc(o.invoice_no)}` : ""}`,
+        prio: 2,
+        klick: `go('order','${o.id}')`,
+      })),
+  ].sort((a, b) => b.prio - a.prio);
+
+  const anl = c.facilities[0];
+  const bilder = filer.filter((f) => f.kind === "bild").slice(0, 4);
+
+  return `
+  ${
+    laser
+      ? ""
+      : `<div class="row" style="margin-bottom:16px">
+    <button class="btn pri" onclick="go('kund','${c.id}/journal')">+ Journalanteckning</button>
+    <button class="btn" onclick="valjMall('${c.id}')">+ Offert</button>
+    <button class="btn" onclick="nyOrder('${c.id}')">+ Arbetsorder</button>
+    <button class="btn ghost" onclick="go('kund','${c.id}/filer')">+ Foto eller dokument</button>
+  </div>`
+  }
+
+  ${
+    attGora.length
+      ? `<div class="card" style="margin-bottom:16px">
+      <div class="hd"><h2>Att göra</h2><span class="tag ${attGora.some((x) => x.prio === 3) ? "action" : "soon"}">${attGora.length}</span></div>
+      <div class="pad" style="padding-top:2px">
+        ${attGora
+          .map(
+            (x) => `<div class="filerow" style="cursor:pointer" onclick="${x.klick}">
+          <div class="ftype" style="background:${x.prio === 3 ? "#A6402F" : "#B3801F"}">!</div>
+          <div style="flex:1;min-width:0"><div style="font-weight:600">${esc(x.text)}</div>
+            <div class="fmeta">${x.under}</div></div></div>`
+          )
+          .join("")}
+      </div></div>`
+      : `<div class="card" style="margin-bottom:16px"><div class="pad">
+      <p class="lead" style="margin:0">Inget öppet just nu. Inga obetalda fakturor, inga offerter
+      utan besked och inga påminnelser som förfallit.</p></div></div>`
+  }
+
+  <div class="card" style="margin-bottom:16px">
+    <div class="hd"><h2>Senast i journalen</h2>
+      <button class="btn ghost sm" style="margin-left:auto" onclick="go('kund','${c.id}/journal')">Hela journalen</button></div>
+    <div class="pad" style="padding-top:2px">
+      ${
+        journal.length
+          ? journal.slice(0, 3).map((j) => journalEntryHtml(j)).join("")
+          : `<p class="hint" style="margin:0">Inga anteckningar än.</p>`
+      }
+    </div></div>
+
+  ${
+    bilder.length
+      ? `<div class="card"><div class="hd"><h2>Senaste bilderna</h2>
+      <button class="btn ghost sm" style="margin-left:auto" onclick="go('kund','${c.id}/filer')">Alla filer</button></div>
+      <div class="pad"><div class="imgs">${bilder.map((f) => docCard(f, true)).join("")}</div></div></div>`
+      : ""
+  }`;
+}
+
+/* Dokument och bilder var samma sak delat på filtyp. Nu ett ställe med filter. */
+function tabFiler(c, filer) {
+  const laser = S.user.role === "lasare";
+  const filter = S.filter.filtyp || "alla";
+  const visade =
+    filter === "alla" ? filer : filer.filter((f) => f.kind === (filter === "bilder" ? "bild" : "dokument"));
+  const antalBilder = filer.filter((f) => f.kind === "bild").length;
+  const antalDok = filer.length - antalBilder;
+
+  return `
+  <div class="row" style="margin-bottom:14px">
+    ${[["alla", `Alla ${filer.length}`], ["bilder", `Bilder ${antalBilder}`], ["dokument", `Dokument ${antalDok}`]]
+      .map(
+        ([v, l]) =>
+          `<button class="btn ${filter === v ? "" : "ghost"} sm" onclick="S.filter.filtyp='${v}';renderTab()">${l}</button>`
+      )
+      .join("")}
+  </div>
+  ${
+    laser
+      ? ""
+      : `<div class="drop" id="drop">
+    <div class="big">Släpp filer här</div>
+    <p style="margin:6px 0 0">Foton, borrprotokoll, intyg och offerter. Kopplas till ${esc(c.name)}.</p>
+    <div class="row" style="justify-content:center;margin-top:10px">
+      <button class="btn ghost sm" onclick="document.getElementById('fin').click()">Välj filer</button>
+      <button class="btn ghost sm" onclick="document.getElementById('kamera').click()">Ta foto</button>
+    </div>
+    <input type="file" id="fin" multiple hidden accept=".pdf,.docx,.doc,.xlsx,.txt,image/*">
+    <input type="file" id="kamera" hidden accept="image/*" capture="environment">
+    <div class="progress" id="prog" hidden><i style="width:0"></i></div>
+  </div>`
+  }
+  <div class="imgs" style="margin-top:16px">${visade.map((f) => docCard(f, laser)).join("")}</div>
+  ${
+    visade.length
+      ? ""
+      : `<div class="empty"><div class="big">Inga filer här</div>
+         <p>Ladda upp foton från borrplatsen, borrprotokoll och intyg.</p></div>`
+  }`;
+}
+
+/* Offert och order är ett flöde, inte två register. */
+function tabEconomy(c, offerter, order) {
+  const laser = S.user.role === "lasare";
+  const summaObetalt = order
+    .filter((o) => ["utford", "fakturerad"].includes(o.status))
+    .reduce((s, o) => s + o.totals.brutto, 0);
+
+  return `
+  ${
+    laser
+      ? ""
+      : `<div class="row" style="margin-bottom:14px">
+    <button class="btn pri sm" onclick="valjMall('${c.id}')">+ Ny offert</button>
+    <button class="btn sm" onclick="nyOrder('${c.id}')">+ Ny arbetsorder</button>
+    ${
+      summaObetalt
+        ? `<span class="tag soon" style="margin-left:auto">${kr(summaObetalt)} kr väntar på betalning</span>`
+        : ""
+    }
+  </div>`
+  }
+
+  <div class="eyebrow">Arbetsorder</div>
+  ${
+    order.length
+      ? order
+          .map((o) => {
+            const [text, klass] = ORDER_STATUS[o.status] || [o.status, "n"];
+            return `<div class="filerow" style="cursor:pointer" onclick="go('order','${o.id}')">
+        <div class="ftype" style="background:${
+          o.status === "betald" ? "#2E7D5B" : o.status === "oppen" ? "var(--stone)" : "#B3801F"
+        }">AO</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600">${esc(o.title || o.order_no)}</div>
+          <div class="fmeta">${esc(o.order_no)}${o.performed_at ? ` · utförd ${o.performed_at}` : ""}${
+            o.invoice_no ? ` · faktura ${esc(o.invoice_no)}` : ""
+          } · material ${krRund(o.material_total)}, arbete ${krRund(o.labour_total)} kr</div></div>
+        <span class="mono" style="font-weight:600">${kr(o.totals.brutto)} kr</span>
+        <span class="tag ${klass}">${text}</span></div>`;
+          })
+          .join("")
+      : `<p class="hint">Inga arbetsorder. Journalen berättar vad som hände, arbetsordern håller
+         reda på vad som gick åt så att inget glöms bort vid faktureringen.</p>`
+  }
+
+  <div class="eyebrow" style="margin-top:20px">Offerter</div>
+  ${
+    offerter.length
+      ? offerter
+          .map((q) => {
+            const [text, klass] = OFFERT_STATUS[q.status] || [q.status, "n"];
+            return `<div class="filerow" style="cursor:pointer" onclick="go('offert','${q.id}')">
+        <div class="ftype pdf">OFF</div>
+        <div style="flex:1;min-width:0"><div style="font-weight:600">${esc(q.title || q.quote_no)}</div>
+          <div class="fmeta">${esc(q.quote_no)} · ${dt(q.created_at, false)}${
+            q.sent_at ? ` · skickad ${dt(q.sent_at, false)}` : ""
+          }</div></div>
+        <span class="mono" style="font-weight:600">${kr(q.totals.brutto)} kr</span>
+        <span class="tag ${klass}">${text}</span></div>`;
+          })
+          .join("")
+      : `<p class="hint">Inga offerter än.</p>`
+  }`;
 }
 
 /* ---------------- pengar: gemensamt ---------------- */
@@ -1907,6 +2314,7 @@ async function viewQuote() {
     <button class="btn ghost" onclick="skrivUt('/api/quotes/${q.id}/pdf')">Skriv ut</button>
     <button class="btn ghost" onclick="laddaNer('/api/quotes/${q.id}/pdf?ladda_ner=true','${esc(q.quote_no)}.pdf')">Ladda ner</button>
     ${laser ? "" : `<button class="btn pri" onclick="skickaOffert()">Mejla till kund</button>`}
+    ${laser || !q.lines.length ? "" : `<button class="btn ghost" onclick="sparaSomMall()">Spara som mall</button>`}
     ${
       !laser && q.status === "skickad"
         ? `<button class="btn ghost" onclick="offertBesked('accepterad')">Accepterad</button>
@@ -2530,6 +2938,37 @@ async function viewEconomy() {
   </div>`;
 }
 
+
+/* ---------------- mer ---------------- */
+async function viewMore() {
+  const token = claim();
+  mountShell("");
+  const sum = await api("/reminders/summary").catch(() => ({ overdue: 0, open: 0 }));
+  if (!current(token)) return;
+
+  const extra = { paminnelser: sum.open ? `${sum.open} öppna${sum.overdue ? `, ${sum.overdue} försenade` : ""}` : "" };
+
+  $("#view").innerHTML = `
+  <div class="spread"><div><div class="eyebrow">Allt annat</div><h1>Mer</h1></div></div>
+  <div class="card"><div class="pad" style="padding-top:6px">
+    ${MER_POSTER.map(
+      ([vag, namn, beskrivning]) => `<button class="merrad" onclick="go('${vag}')">
+      <span><strong>${namn}</strong><span class="m">${extra[vag] || beskrivning}</span></span>
+      <span class="pil">→</span></button>`
+    ).join("")}
+    ${
+      S.user.role === "admin"
+        ? `<button class="merrad" onclick="go('admin','konton')">
+        <span><strong>Inställningar</strong><span class="m">Konton, företag, notiser, backup</span></span>
+        <span class="pil">→</span></button>`
+        : ""
+    }
+    <button class="merrad" onclick="logout()">
+      <span><strong>Logga ut</strong><span class="m">${esc(S.user.full_name || S.user.username)}</span></span>
+      <span class="pil">→</span></button>
+  </div></div>`;
+}
+
 /* ---------------- mitt konto ---------------- */
 const ROLL_TEXT = {
   admin: "Administratör – kan allt, inklusive konton och backup",
@@ -3149,6 +3588,8 @@ async function removeCustomer() {
 
 /* ---------------- filer ---------------- */
 function wireUploads() {
+  const kamera = $("#kamera");
+  if (kamera) kamera.onchange = () => uploadFiles([...kamera.files]);
   const input = $("#fin");
   const drop = $("#drop");
   if (input) input.onchange = () => uploadFiles([...input.files]);
@@ -4618,6 +5059,42 @@ async function adminCompany() {
   const f = await api("/company");
   if (!current(token) || !$("#adminbody")) return;
   $("#adminbody").innerHTML = `
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Logotyp</h2>
+    <span class="tag ${f.har_logotyp ? "ok" : "n"}">${f.har_logotyp ? "Uppladdad" : "Saknas"}</span></div>
+    <div class="pad">
+      <p class="lead" style="margin-top:0">Visas i appen, på inloggningssidan och överst på varje
+        offert och arbetsorder. PNG med genomskinlig bakgrund ser bäst ut.</p>
+      <div class="row" style="align-items:center">
+        ${
+          f.har_logotyp
+            ? `<img data-auth-src="/api/company/logo" alt="Logotyp"
+                style="max-width:220px;max-height:80px;border:1px solid var(--line);
+                border-radius:3px;padding:8px;background:#fff">`
+            : ""
+        }
+        <div>
+          <input type="file" id="logofil" accept="image/png,image/jpeg,image/webp">
+          <div class="hint">Skalas automatiskt. Max 8 MB.</div>
+        </div>
+        <button class="btn pri sm" onclick="laddaUppLogo()">Ladda upp</button>
+        ${f.har_logotyp ? `<button class="btn danger sm" onclick="taBortLogo()">Ta bort</button>` : ""}
+      </div>
+    </div></div>
+
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Automatiska påminnelser</h2></div>
+    <div class="pad">
+      <p class="lead" style="margin-top:0">Systemet håller reda på tre saker som annars rinner ut i
+        sanden: obetalda fakturor, offerter utan besked och besök utan återkoppling. Påminnelsen
+        stängs av sig själv när saken är löst.</p>
+      <div class="fgrid">
+        ${fld("f_betalvillkor", "Betalningsvillkor, dagar", f.betalningsvillkor_dagar ?? 30, "number")}
+        ${fld("f_obetald", "Påminn om obetalt efter, dagar", f.paminn_obetald_efter_dagar ?? 7, "number")}
+        ${fld("f_offert", "Följ upp offert efter, dagar", f.paminn_offert_efter_dagar ?? 10, "number")}
+      </div>
+      <div class="hint">Fakturan förfaller efter betalningsvillkoren. Påminnelsen kommer så många
+        dagar därefter. Med 30 och 7 dyker den upp 37 dagar efter fakturadatum.</div>
+    </div></div>
+
   <div class="card"><div class="hd"><h2>Uppgifter på offerter och arbetsorder</h2></div><div class="pad">
     <p class="lead" style="margin-top:0">Det här står överst på varje PDF som skickas till kund.</p>
     <div class="fgrid">
@@ -4639,6 +5116,7 @@ async function adminCompany() {
     <textarea id="f_villkor">${esc(f.villkor || "")}</textarea>
     <button class="btn pri sm" style="margin-top:14px" id="f_spara">Spara</button>
   </div></div>`;
+  hydreraBilder($("#adminbody"));
   $("#f_spara").onclick = async () => {
     try {
       await api("/company", {
@@ -4648,9 +5126,14 @@ async function adminCompany() {
           postnr: val("f_postnr"), ort: val("f_ort"), telefon: val("f_tel"),
           epost: val("f_mail"), f_skatt: $("#f_fskatt").checked, villkor: val("f_villkor"),
           offert_giltig_dagar: parseInt(val("f_giltig"), 10) || 30,
+          betalningsvillkor_dagar: parseInt(val("f_betalvillkor"), 10) || 30,
+          paminn_obetald_efter_dagar: parseInt(val("f_obetald"), 10) || 7,
+          paminn_offert_efter_dagar: parseInt(val("f_offert"), 10) || 10,
         },
       });
       toast("Företagsuppgifterna sparade");
+      S.company = null;
+      await laddaForetag();
     } catch (e) {
       toast(e.message, true);
     }
@@ -4812,12 +5295,14 @@ function render() {
     anlaggningar: viewFacilities,
     journal: viewJournalAll,
     paminnelser: viewReminders,
+    mer: viewMore,
     nara: viewNearby,
     ny: viewNewFacility,
     konto: viewAccount,
     offert: viewQuote,
     order: viewOrder,
     artiklar: viewArticles,
+    mallar: viewTemplates,
     ekonomi: viewEconomy,
     besok: (S.id ? viewVisit : viewVisits),
     admin: viewAdmin,
@@ -4842,7 +5327,12 @@ try {
   S.size = "normal";
 }
 
-applyHash();
+// Företagsnamn och logotyp behövs innan skalet ritas, annars hinner
+// standardnamnet blinka förbi.
+(async () => {
+  if (S.token) await laddaForetag();
+  applyHash();
+})();
 
 // Varnar om gränssnittet och servern inte är i takt. Beror nästan alltid på att
 // webbläsaren håller kvar en gammal app.js, inte på att backend är gammal.
