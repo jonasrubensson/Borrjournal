@@ -42,7 +42,9 @@ class Settings(BaseSettings):
     geocoder_country_name: str = "Sverige"
     geocoder_user_agent: str = "Borrjournal (internt kundregister)"
 
-    # SGU:s brunnsarkiv, öppna data. Töm för att stänga av.
+    # SGU:s brunnsarkiv, öppna data. Töm sgu_bulk_url för att stänga av.
+    # Bulkfiler per län, en fil per anrop. Verifierat format.
+    sgu_bulk_url: str = "https://resource.sgu.se/data/oppnadata/grundvatten/brunnar"
     sgu_base_url: str = "https://resource.sgu.se/oppnadata/grundvatten/brunnar/v1"
 
     class Config:

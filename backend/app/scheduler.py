@@ -53,24 +53,39 @@ async def _check_reminders() -> None:
 
 
 async def _run_sgu() -> None:
-    """SGU uppdaterar sina öppna data en gång i veckan, så oftare är onödigt."""
+    """Håller de valda länen uppdaterade.
+
+    Hämtar län som saknas helt, och sådana som är äldre än inställt antal dagar.
+    SGU uppdaterar sina öppna data en gång i veckan, så oftare är onödigt.
+    """
     from sqlalchemy import func, select
 
     from .models import SguWell
     from .services import sgu as sgu_service
+    from .services.notify import get_setting
 
     async with SessionLocal() as db:
-        rows = (
-            await db.execute(
-                select(SguWell.lanskod, func.max(SguWell.hamtad_at)).group_by(SguWell.lanskod)
-            )
-        ).all()
-        for lanskod, hamtad in rows:
-            if not sgu_service.is_stale(hamtad, dagar=7):
+        conf = await get_setting(db, "sgu", {"lan": [], "auto": True, "dagar": 7})
+        if not conf.get("auto") or not conf.get("lan"):
+            return
+
+        befintliga = dict(
+            (
+                await db.execute(
+                    select(SguWell.lanskod, func.max(SguWell.hamtad_at)).group_by(SguWell.lanskod)
+                )
+            ).all()
+        )
+        for lanskod in conf["lan"]:
+            hamtad = befintliga.get(lanskod)
+            if not sgu_service.is_stale(hamtad, dagar=int(conf.get("dagar", 7))):
                 continue
             try:
                 r = await sgu_service.sync_lan(db, lanskod)
-                print(f"[schemaläggare] SGU {lanskod}: {r['sparade']} brunnar uppdaterade")
+                print(
+                    f"[schemaläggare] SGU {r['namn']}: {r['sparade']} brunnar "
+                    f"på {r['sekunder']} s"
+                )
             except Exception as exc:  # noqa: BLE001
                 print(f"[schemaläggare] SGU {lanskod} misslyckades: {exc}")
 
@@ -79,6 +94,12 @@ async def loop() -> None:
     global _last_backup_day, _last_scan_day, _last_sgu_day
     # Låt appen komma igång innan första kontrollen
     await asyncio.sleep(20)
+
+    # Hämtar SGU direkt vid start om något valt län saknas eller är gammalt.
+    try:
+        await _run_sgu()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[schemaläggare] första SGU-kontrollen misslyckades: {exc}")
     while True:
         try:
             async with SessionLocal() as db:
