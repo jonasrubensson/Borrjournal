@@ -37,6 +37,8 @@ class User(Base):
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     # Krav satt på just den här användaren. Ett globalt krav kan också gälla.
     totp_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Vilka påminnelser användaren vill bli meddelad om: mina | alla | inga
+    notify_scope: Mapped[str] = mapped_column(String(10), default="mina")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     last_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

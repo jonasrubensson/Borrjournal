@@ -42,6 +42,7 @@ async def bootstrap() -> None:
             username=settings.bootstrap_admin,
             full_name="Administratör",
             role="admin",
+            notify_scope="alla",
             hashed_password=hash_password(settings.bootstrap_password),
         )
         db.add(admin)

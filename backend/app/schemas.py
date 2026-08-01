@@ -120,6 +120,7 @@ def user_out(u: User) -> dict:
         "is_active": u.is_active,
         "totp_enabled": u.totp_enabled,
         "totp_required": u.totp_required,
+        "notify_scope": u.notify_scope,
         "last_login": iso_utc(u.last_login) if u.last_login else None,
     }
 
