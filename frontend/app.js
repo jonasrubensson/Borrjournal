@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "2.1.0";
+const UI_VERSION = "2.2.0";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
@@ -1389,13 +1389,19 @@ function setRadie(m) {
 async function shareDialog(target) {
   const box = $("#sharebox");
   if (!box) return;
-  const { fields } = await api("/share/fields");
+  const qs = new URLSearchParams(target).toString();
+  const { fields, kind } = await api(`/share/fields?${qs}`);
   box.innerHTML = `
   <div class="card" style="margin-top:18px;border-color:#C9DFE3">
     <div class="hd" style="background:#F4F9FA"><h2>Dela med extern borrare</h2></div>
     <div class="pad">
       <p class="lead" style="margin-top:0">Skickas som e-post från din egen server. Inget öppnas
-        utåt, och bara det du kryssar i följer med. Utskicket loggas i journalen.</p>
+        utåt, och bara det du kryssar i följer med.
+        ${
+          kind === "visit"
+            ? "Uppgifterna hämtas från besöket: fastighet, adress, koordinat, kontakt och anteckningar. Borrdata finns inte än, hålet är ju inte borrat."
+            : "Utskicket loggas i kundens journal."
+        }</p>
       <div class="fgrid">
         ${fld("sh_to", "Mottagare", "", "email", 'placeholder="borrare@firma.se"')}
         ${fld("sh_sub", "Ämne", "", "text", 'placeholder="Lämna tomt för automatiskt ämne"')}
@@ -1406,7 +1412,7 @@ async function shareDialog(target) {
           .map(
             (f) => `<label style="display:flex;gap:8px;align-items:flex-start;font-size:14px">
           <input type="checkbox" class="sharefield" value="${f.key}" style="width:auto;margin-top:3px"
-            ${["plats", "atkomst", "borrning"].includes(f.key) ? "checked" : ""}>
+            ${f.default ? "checked" : ""}>
           <span>${esc(f.label)}</span></label>`
           )
           .join("")}
@@ -3368,35 +3374,54 @@ async function adminSgu() {
   const token = claim();
   const [st, delningar] = await Promise.all([api("/sgu/status"), api("/share/log?limit=20")]);
   if (!current(token) || !$("#adminbody")) return;
+  const conf = st.installning || { lan: [], auto: true, dagar: 7 };
+  const hamtade = Object.fromEntries(st.lan.map((l) => [l.lanskod, l]));
+
   $("#adminbody").innerHTML = `
   <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Brunnsarkivet</h2>
     <span class="tag ${st.totalt ? "ok" : "n"}">${st.totalt.toLocaleString("sv-SE")} brunnar</span></div>
     <div class="pad">
-      <p class="lead" style="margin-top:0">Hämtar SGU:s öppna data en gång och lagrar lokalt, så att
-        uppslag inför ett besök går direkt utan att ringa ut. SGU uppdaterar en gång i veckan,
-        så en synk i veckan räcker. Hämta det län ni jobbar i.</p>
-      <div class="row">
-        <select id="sgu_lan" style="width:auto">
-          ${st.tillgangliga_lan.map((l) => `<option value="${l.kod}">${l.kod} ${esc(l.namn)}</option>`).join("")}
-        </select>
-        <button class="btn pri sm" id="sgu_go">Hämta län</button>
-        <span class="hint" id="sgu_hint" style="margin:0">Första hämtningen kan ta någon minut.</span>
+      <p class="lead" style="margin-top:0">Kryssa i de län ni jobbar i. De hämtas automatiskt och
+        hålls uppdaterade, du behöver inte göra något mer. SGU uppdaterar sina öppna data en gång i
+        veckan, så appen hämtar om när lokala data är äldre än ${conf.dagar} dagar.</p>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:4px 14px;
+        margin:14px 0;max-height:none">
+        ${st.tillgangliga_lan
+          .map((l) => {
+            const h = hamtade[l.kod];
+            return `<label style="display:flex;gap:9px;align-items:baseline;font-size:14.5px;padding:3px 0">
+            <input type="checkbox" class="sgulan" value="${l.kod}" style="width:auto"
+              ${conf.lan.includes(l.kod) ? "checked" : ""}>
+            <span>${esc(l.namn)}
+              ${
+                h
+                  ? `<span class="hint" style="display:block;margin:0">${h.antal.toLocaleString("sv-SE")} brunnar, ${dt(h.hamtad, false)}</span>`
+                  : `<span class="hint" style="display:block;margin:0">inte hämtat</span>`
+              }</span></label>`;
+          })
+          .join("")}
       </div>
-      ${
-        st.lan.length
-          ? `<table style="margin-top:16px"><thead><tr><th>Län</th><th>Brunnar</th><th>Hämtat</th></tr></thead>
-             <tbody>${st.lan
-               .map(
-                 (l) => `<tr><td data-l="Län">${esc(l.kod)} ${esc(l.namn)}</td>
-               <td data-l="Brunnar" class="tid">${l.antal.toLocaleString("sv-SE")}</td>
-               <td data-l="Hämtat" class="tid">${dt(l.hamtad)}</td></tr>`
-               )
-               .join("")}</tbody></table>`
-          : `<p class="hint" style="margin-top:14px">Inget hämtat än.</p>`
-      }
-      <p class="hint" style="margin-top:14px">Data från SGU Brunnsarkivet, licens Creative Commons
-        Erkännande 4.0. SGU ska anges som källa där uppgifterna visas, vilket sker automatiskt i
-        underlaget. Brunnsarkivet innehåller ingen vattenkvalitet.</p>
+
+      <div class="row">
+        <label style="display:flex;gap:8px;align-items:center;font-size:14px;width:auto">
+          <input type="checkbox" id="sgu_auto" ${conf.auto ? "checked" : ""} style="width:auto">
+          Håll uppdaterade automatiskt</label>
+        <div style="width:auto"><label class="f" for="sgu_dagar" style="margin:0 0 2px">Hämta om efter</label>
+          <input id="sgu_dagar" type="number" min="1" max="90" value="${conf.dagar}" style="width:90px"></div>
+        <span class="hint" style="margin:0;align-self:flex-end">dagar</span>
+      </div>
+
+      <div class="row" style="margin-top:14px">
+        <button class="btn pri sm" id="sgu_spara">Spara val</button>
+        <button class="btn ghost sm" id="sgu_nu">Hämta valda nu</button>
+        <span class="hint" id="sgu_hint" style="margin:0">Ett län tar från några sekunder till ett par minuter.</span>
+      </div>
+
+      <p class="hint" style="margin-top:14px">Data hämtas från SGU:s bulkfiler per län. Licens
+        Creative Commons Erkännande 4.0, SGU anges som källa i underlaget. Brunnsarkivet innehåller
+        ingen vattenkvalitet. Brunnar utan koordinat i SGU:s register hoppas över, de går inte att
+        placera på kartan.</p>
     </div></div>
 
   <div class="card"><div class="hd"><h2>Senast delat med externa</h2></div>
@@ -3416,18 +3441,57 @@ async function adminSgu() {
     }
   </div>`;
 
-  $("#sgu_go").onclick = async (e) => {
+  const valda = () => [...document.querySelectorAll(".sgulan:checked")].map((c) => c.value);
+
+  const sparaVal = async () => {
+    await api("/sgu/settings", {
+      method: "PUT",
+      body: {
+        lan: valda(),
+        auto: $("#sgu_auto").checked,
+        dagar: parseInt(val("sgu_dagar"), 10) || 7,
+      },
+    });
+  };
+
+  $("#sgu_spara").onclick = async () => {
+    try {
+      await sparaVal();
+      toast(
+        valda().length
+          ? `${valda().length} län sparade, hämtas automatiskt`
+          : "Inga län valda, ingen automatisk hämtning"
+      );
+      adminSgu();
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+
+  $("#sgu_nu").onclick = async (e) => {
+    const lista = valda();
+    if (!lista.length) return toast("Kryssa i minst ett län först", true);
     const knapp = e.target;
     knapp.disabled = true;
-    knapp.textContent = "Hämtar…";
-    $("#sgu_hint").textContent = "Detta kan ta någon minut, låt fliken vara öppen.";
     try {
-      const r = await api("/sgu/sync", { method: "POST", body: { lanskod: val("sgu_lan") } });
-      toast(`${r.sparade.toLocaleString("sv-SE")} brunnar hämtade`);
-    } catch (err) {
-      toast(err.message, true);
+      await sparaVal();
+      for (let i = 0; i < lista.length; i++) {
+        const namn = st.tillgangliga_lan.find((l) => l.kod === lista[i]).namn;
+        knapp.textContent = `Hämtar ${i + 1} av ${lista.length}…`;
+        $("#sgu_hint").textContent = `${namn} pågår, låt fliken vara öppen.`;
+        try {
+          const r = await api("/sgu/sync", { method: "POST", body: { lanskod: lista[i] } });
+          $("#sgu_hint").textContent =
+            `${r.namn}: ${r.sparade.toLocaleString("sv-SE")} brunnar på ${r.sekunder} s` +
+            (r.utan_koordinat ? `, ${r.utan_koordinat.toLocaleString("sv-SE")} utan koordinat` : "");
+        } catch (err) {
+          toast(`${namn}: ${err.message}`, true);
+        }
+      }
+      toast("Hämtningen klar");
+    } finally {
+      adminSgu();
     }
-    adminSgu();
   };
 }
 
