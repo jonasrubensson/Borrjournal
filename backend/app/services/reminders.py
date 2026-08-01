@@ -7,7 +7,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import Customer, Facility, Quote, Reminder, Visit, WorkOrder
+from ..models import Customer, Facility, JournalEntry, Quote, Reminder, User, Visit, WorkOrder
 from .notify import DEFAULT_SMTP, SMTP_KEY, get_setting, send_email, send_push
 
 # Hur långt före förfallodatum en påminnelse ska meddelas
@@ -36,9 +36,42 @@ def add_months(iso: str, months: int) -> str | None:
     return date(year, month, day).isoformat()
 
 
+async def _anvandare_per_namn(db: AsyncSession) -> dict[str, str]:
+    """Namn och användarnamn till id, för att kunna knyta en påminnelse till rätt person."""
+    rader = (await db.execute(select(User.id, User.username, User.full_name))).all()
+    karta = {}
+    for uid_, anvandarnamn, namn in rader:
+        if anvandarnamn:
+            karta[anvandarnamn.lower()] = uid_
+        if namn:
+            karta[namn.lower()] = uid_
+    return karta
+
+
+async def _agare_av_anlaggning(db: AsyncSession, facility_id: str, karta: dict) -> str | None:
+    """Den som senast skrev i journalen på anläggningen får ansvaret.
+
+    Den som var där sist vet mest om vad som behöver göras, och känner igen kunden.
+    """
+    namn = (
+        await db.execute(
+            select(JournalEntry.author_id, JournalEntry.author_name)
+            .where(JournalEntry.facility_id == facility_id)
+            .order_by(JournalEntry.created_at.desc())
+            .limit(1)
+        )
+    ).first()
+    if not namn:
+        return None
+    if namn[0]:
+        return namn[0]
+    return karta.get((namn[1] or "").lower())
+
+
 async def generate_auto(db: AsyncSession) -> int:
     """Skapar de automatiska påminnelserna. Idempotent tack vare auto_key."""
     facilities = (await db.execute(select(Facility).join(Customer))).unique().scalars().all()
+    karta = await _anvandare_per_namn(db)
     existing = set(
         (await db.execute(select(Reminder.auto_key).where(Reminder.auto_key.isnot(None))))
         .scalars()
@@ -82,6 +115,7 @@ async def generate_auto(db: AsyncSession) -> int:
                 Reminder(
                     customer_id=f.customer_id,
                     facility_id=f.id,
+                    assigned_to=await _agare_av_anlaggning(db, f.id, karta),
                     kind=kind,
                     title=title,
                     body=body,
@@ -157,7 +191,7 @@ async def generate_business(db: AsyncSession) -> int:
     idag = date.today()
     skapade = 0
 
-    def lagg(nyckel, kind, titel, text, forfaller, customer_id=None, facility_id=None):
+    def lagg(nyckel, kind, titel, text, forfaller, customer_id=None, facility_id=None, agare=None):
         nonlocal skapade
         if nyckel in befintliga:
             return
@@ -165,6 +199,7 @@ async def generate_business(db: AsyncSession) -> int:
             Reminder(
                 customer_id=customer_id,
                 facility_id=facility_id,
+                assigned_to=agare,
                 kind=kind,
                 title=titel,
                 body=text,
@@ -183,6 +218,7 @@ async def generate_business(db: AsyncSession) -> int:
     kundnamn = dict(
         (await db.execute(select(Customer.id, Customer.name))).all()
     )
+    karta = await _anvandare_per_namn(db)
 
     # 1. Fakturerat men inte betalt
     order = (
@@ -210,6 +246,7 @@ async def generate_business(db: AsyncSession) -> int:
             paminn.isoformat(),
             customer_id=o.customer_id,
             facility_id=o.facility_id,
+            agare=karta.get((o.created_by or "").lower()),
         )
 
     # 2. Offert skickad utan besked
@@ -235,6 +272,7 @@ async def generate_business(db: AsyncSession) -> int:
             paminn.isoformat(),
             customer_id=q.customer_id,
             facility_id=q.facility_id,
+            agare=karta.get((q.created_by or "").lower()),
         )
 
     # 3. Besök som passerat utan att något hänt
@@ -260,6 +298,7 @@ async def generate_business(db: AsyncSession) -> int:
             + (f" Ärende: {v.errand}" if v.errand else ""),
             paminn.isoformat(),
             customer_id=v.customer_id,
+            agare=karta.get((v.created_by or "").lower()),
         )
 
     if skapade:
@@ -329,56 +368,106 @@ async def due_now(db: AsyncSession) -> list[Reminder]:
 
 
 async def notify_due(db: AsyncSession, force: bool = False) -> dict:
-    """Skickar en samlad påminnelse per körning, inte ett mejl per rad."""
+    """Skickar det som förfallit, till rätt person.
+
+    Var och en får sina egna påminnelser. Den som satt notify_scope till "alla"
+    får allt, vilket är standard för administratörer så att inget faller mellan
+    stolarna när någon är sjuk eller slutat. Påminnelser utan ägare går till alla
+    som tar emot allt, och till den globala e-postlistan.
+    """
     items = await due_now(db)
     if not items:
-        return {"reminders": 0, "email": False, "push": 0}
+        return {"reminders": 0, "email": False, "push": 0, "recipients": 0}
 
-    lines = []
+    anvandare = (
+        await db.execute(select(User).where(User.is_active.is_(True)))
+    ).scalars().all()
+    tar_emot_allt = [u for u in anvandare if u.notify_scope == "alla"]
+    per_anvandare: dict[str, list] = {u.id: [] for u in anvandare}
+    utan_agare = []
+
     for r in items:
-        customer = ""
-        if r.customer_id:
-            c = (
-                await db.execute(select(Customer.name).where(Customer.id == r.customer_id))
-            ).scalar_one_or_none()
-            customer = f" ({c})" if c else ""
-        nar = f"{r.due_date} {r.due_time}".strip()
-        lines.append(f"- {nar}  {r.title}{customer}")
+        if r.assigned_to and r.assigned_to in per_anvandare:
+            per_anvandare[r.assigned_to].append(r)
+        else:
+            utan_agare.append(r)
 
-    subject = (
-        f"Borrjournal: {len(items)} påminnelse"
-        f"{'r' if len(items) > 1 else ''} att hantera"
-    )
-    body = (
-        "Följande påminnelser är inom sitt förvarningsfönster:\n\n"
-        + "\n".join(lines)
-        + "\n\nÖppna Borrjournal för att kvittera eller boka in dem.\n"
-    )
+    for u in tar_emot_allt:
+        egna = {x.id for x in per_anvandare[u.id]}
+        for r in items:
+            if r.id not in egna:
+                per_anvandare[u.id].append(r)
 
-    email_sent = False
+    kundnamn = dict((await db.execute(select(Customer.id, Customer.name))).all())
+
+    def formulera(rader: list) -> tuple[str, str]:
+        rubrik = (
+            f"Borrjournal: {len(rader)} påminnelse"
+            f"{'r' if len(rader) > 1 else ''} att hantera"
+        )
+        linjer = []
+        for r in sorted(rader, key=lambda x: (x.due_date, x.due_time)):
+            nar = f"{r.due_date} {r.due_time}".strip()
+            kund = kundnamn.get(r.customer_id)
+            linjer.append(f"- {nar}  {r.title}" + (f" ({kund})" if kund else ""))
+        text = (
+            "Följande påminnelser är inom sitt förvarningsfönster:\n\n"
+            + "\n".join(linjer)
+            + "\n\nÖppna Borrjournal för att kvittera eller boka in dem.\n"
+        )
+        return rubrik, text
+
     smtp = await get_setting(db, SMTP_KEY, DEFAULT_SMTP)
-    if smtp.get("enabled"):
+    epost_pa = bool(smtp.get("enabled"))
+    skickade_mejl = 0
+    pushade = 0
+
+    for u in anvandare:
+        rader = per_anvandare.get(u.id) or []
+        if not rader or u.notify_scope == "inga":
+            continue
+        rubrik, text = formulera(rader)
+
+        pushade += await send_push(
+            db,
+            {
+                "title": rubrik,
+                "body": rader[0].title + (f" och {len(rader) - 1} till" if len(rader) > 1 else ""),
+                "url": "/#/paminnelser",
+                "tag": "paminnelser",
+            },
+            [u.id],
+        )
+        if epost_pa and u.email:
+            try:
+                await send_email(smtp, rubrik, text, [u.email])
+                skickade_mejl += 1
+            except Exception as exc:  # noqa: BLE001
+                print(f"[borrjournal] mejl till {u.email} misslyckades: {exc}")
+
+    # Den gemensamma listan får det som saknar ägare, så inget tappas bort
+    globala = [x for x in smtp.get("recipients") or [] if x]
+    if epost_pa and globala and (utan_agare or not any(u.email for u in anvandare)):
+        rader = utan_agare or items
+        rubrik, text = formulera(rader)
         try:
-            await send_email(smtp, subject, body)
-            email_sent = True
+            await send_email(smtp, rubrik, text, globala)
+            skickade_mejl += 1
         except Exception as exc:  # noqa: BLE001
             print(f"[borrjournal] e-postutskick misslyckades: {exc}")
 
-    pushed = await send_push(
-        db,
-        {
-            "title": subject,
-            "body": lines[0].lstrip("- ") + (f" och {len(items) - 1} till" if len(items) > 1 else ""),
-            "url": "/#/paminnelser",
-            "tag": "paminnelser",
-        },
-    )
-
     stamp = datetime.now(timezone.utc)
-    channels = ",".join([c for c, on in (("epost", email_sent), ("push", pushed > 0)) if on])
+    kanaler = ",".join(
+        [k for k, pa in (("epost", skickade_mejl > 0), ("push", pushade > 0)) if pa]
+    )
     for r in items:
         r.notified_at = stamp
-        r.notified_channels = channels
+        r.notified_channels = kanaler
     await db.commit()
 
-    return {"reminders": len(items), "email": email_sent, "push": pushed}
+    return {
+        "reminders": len(items),
+        "email": skickade_mejl > 0,
+        "push": pushade,
+        "recipients": skickade_mejl,
+    }
