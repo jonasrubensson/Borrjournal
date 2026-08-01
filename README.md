@@ -135,6 +135,11 @@ skrivs en journalrad om det.
 inköps- och försäljningspris, enhet, moms, lagersaldo och en min-nivå som ger varning. Marginalen
 räknas ut, så en felprissatt artikel syns direkt.
 
+När du skriver en fritextrad på en offert eller arbetsorder letar systemet efter liknande
+artiklar och visar dem under fältet, så att samma sak inte hamnar i registret under fem olika
+namn. Träffen går att använda direkt. Är benämningen ny får du frågan om att lägga upp den som
+artikel när raden sparats, med pris och enhet ifyllt.
+
 Saldot ändras aldrig direkt, bara genom lagerrörelser med anledning och anteckning. Varje saldo
 går därför att förklara i efterhand. Artiklar som utgår avaktiveras i stället för att raderas, så
 att gamla order står kvar oförändrade.
@@ -162,6 +167,29 @@ mallens pris i stället för att tyst försvinna.
 Allt går att ändra efteråt. Ändrar du en standardmall blir den er egen. Har du gjort en offert du
 är nöjd med finns **Spara som mall** på offerten, vilket är det enklaste sättet att få egna mallar.
 Mallarna hanteras under **Mer → Offertmallar**.
+
+### Tre vägar till en offert
+
+| Situation | Så gör du |
+|---|---|
+| Befintlig kund | Kundkortet, fliken Ekonomi, Ny offert |
+| Efter platsbesök | Besöket, Skapa offert |
+| Någon ringer och vill ha pris | Fakturera, **Offert på förfrågan** |
+
+Den sista är för telefonsamtal. Ingen kund läggs upp, inget besök bokas, bara ett namn och
+gärna en e-postadress. Blir det affär trycker du **Blev kund** på offerten, så skapas kund och
+anläggning och en journalrad noterar vilken offert de kom ur. Blir det inget ligger offerten
+kvar som avslagen utan att skräpa ner kundregistret.
+
+### Förhandsgranskning medan du bygger
+
+På offert och arbetsorder finns **Visa förhandsgranskning**, som lägger PDF:en längst ned på
+sidan och uppdaterar den när du lägger till rader eller skriver texter. Valet kommer ihåg sig
+till nästa gång.
+
+Det är serverns PDF som visas, samma fil som kunden får. Alternativet hade varit att härma
+layouten i HTML, men då visär förhandsgranskningen något annat än det som skickas, vilket är
+värre än ingen förhandsgranskning alls.
 
 ### Offert
 
