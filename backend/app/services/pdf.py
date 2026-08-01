@@ -11,6 +11,7 @@ vem som helst utan att något är hårdkodat.
 from __future__ import annotations
 
 import io
+import os
 from datetime import date
 
 from reportlab.lib import colors
@@ -129,12 +130,42 @@ def bygg_pdf(
     s = _Sida(c, foretag, typ, nummer)
 
     # ---- huvud ----
+    logo_hojd = 0.0
+    logotyp = foretag.get("logotyp") or ""
+    if logotyp and os.path.exists(logotyp):
+        try:
+            from reportlab.lib.utils import ImageReader
+
+            bild = ImageReader(logotyp)
+            bw, bh = bild.getSize()
+            # Max 22 mm hög och 60 mm bred, proportionerna behålls
+            skala = min(22 * mm / bh, 60 * mm / bw)
+            logo_hojd = bh * skala
+            c.drawImage(
+                bild,
+                MARGIN,
+                s.y - logo_hojd + 4 * mm,
+                width=bw * skala,
+                height=logo_hojd,
+                mask="auto",
+            )
+        except Exception:  # noqa: BLE001 - en trasig logotyp får inte fälla dokumentet
+            logo_hojd = 0.0
+
     c.setFillColor(BLACK)
     c.setFont("Helvetica-Bold", 20)
-    c.drawString(MARGIN, s.y - 4, typ.upper())
-    c.setFont("Helvetica", 10)
-    c.setFillColor(STONE)
-    c.drawRightString(BREDD - MARGIN, s.y, f"Nr {nummer}")
+    if logo_hojd:
+        # Dokumenttypen till höger när logotypen tar vänstra sidan
+        c.drawRightString(BREDD - MARGIN, s.y - 4, typ.upper())
+        c.setFont("Helvetica", 10)
+        c.setFillColor(STONE)
+        c.drawRightString(BREDD - MARGIN, s.y - 11 * mm, f"Nr {nummer}")
+        s.y -= max(logo_hojd, 14 * mm) - 2 * mm
+    else:
+        c.drawString(MARGIN, s.y - 4, typ.upper())
+        c.setFont("Helvetica", 10)
+        c.setFillColor(STONE)
+        c.drawRightString(BREDD - MARGIN, s.y, f"Nr {nummer}")
     s.y -= 8 * mm
 
     c.setStrokeColor(WATER)
