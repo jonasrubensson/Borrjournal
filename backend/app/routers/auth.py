@@ -64,6 +64,7 @@ async def me(user: User = Depends(current_user), db: AsyncSession = Depends(get_
     data = user_out(user)
     data["totp_setup_required"] = await needs_totp_setup(db, user)
     data["totp_required"] = user.totp_required or await totp_globally_required(db)
+    data["notify_scope"] = user.notify_scope
     return data
 
 
@@ -83,6 +84,23 @@ async def change_password(
     await db.commit()
     await log_action(db, "PASSWORD_CHANGE", actor=user.username, request=request)
     return {"ok": True}
+
+
+@router.put("/me/notify-scope")
+async def set_notify_scope(
+    payload: dict,
+    request: Request,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Vilka påminnelser användaren vill bli meddelad om."""
+    omfang = payload.get("scope")
+    if omfang not in ("mina", "alla", "inga"):
+        raise HTTPException(status_code=400, detail="Ange mina, alla eller inga")
+    user.notify_scope = omfang
+    await db.commit()
+    await log_action(db, "NOTIFY_SCOPE", actor=user.username, request=request, detail=omfang)
+    return {"notify_scope": omfang}
 
 
 @router.post("/me/totp/start")
@@ -183,6 +201,9 @@ async def create_user(
         full_name=payload.full_name or payload.username,
         role=payload.role,
         hashed_password=hash_password(payload.password),
+        # En administratör ser allt som standard, så att inget faller mellan
+        # stolarna. Går att ändra på det egna kontot.
+        notify_scope="alla" if payload.role == "admin" else "mina",
     )
     db.add(user)
     await db.commit()
@@ -226,7 +247,7 @@ async def update_user(
         if payload.get("role") and payload["role"] != "admin":
             raise HTTPException(status_code=400, detail="Du kan inte ta bort din egen adminroll")
 
-    for field in ("full_name", "email", "role", "is_active", "totp_required"):
+    for field in ("full_name", "email", "role", "is_active", "totp_required", "notify_scope"):
         if field in payload:
             setattr(user, field, payload[field])
     if payload.get("new_password"):

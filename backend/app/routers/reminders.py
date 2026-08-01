@@ -2,7 +2,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
@@ -68,6 +68,8 @@ def out(r: Reminder, customer_name: str = "") -> dict:
         "notified_at": iso_utc(r.notified_at) if r.notified_at else None,
         "notified_channels": r.notified_channels,
         "auto": bool(r.auto_key),
+        "assigned_to": r.assigned_to,
+        "assigned_name": "",
         "created_by": r.created_by,
         "completed_at": iso_utc(r.completed_at) if r.completed_at else None,
         "completed_by": r.completed_by,
@@ -97,10 +99,16 @@ async def list_reminders(
     status: str = "open",
     customer_id: str | None = None,
     kind: str | None = None,
-    _: User = Depends(current_user),
+    scope: str = "alla",
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(Reminder).order_by(Reminder.due_date)
+    if scope == "mina":
+        # Mina egna, plus sådana som ingen tagit ansvar för
+        stmt = stmt.where(
+            or_(Reminder.assigned_to == user.id, Reminder.assigned_to.is_(None))
+        )
     if status in ("open", "done"):
         stmt = stmt.where(Reminder.status == status)
     if customer_id:
@@ -109,14 +117,34 @@ async def list_reminders(
         stmt = stmt.where(Reminder.kind == kind)
     rows = (await db.execute(stmt)).scalars().all()
     lookup = await names(db, {r.customer_id for r in rows})
-    return [out(r, lookup.get(r.customer_id, "")) for r in rows]
+
+    from ..models import User as _User
+
+    agare = dict(
+        (
+            await db.execute(
+                select(_User.id, _User.full_name).where(
+                    _User.id.in_({r.assigned_to for r in rows if r.assigned_to})
+                )
+            )
+        ).all()
+    ) if any(r.assigned_to for r in rows) else {}
+
+    ut = []
+    for r in rows:
+        d = out(r, lookup.get(r.customer_id, ""))
+        d["assigned_name"] = agare.get(r.assigned_to, "")
+        d["mine"] = r.assigned_to == user.id
+        ut.append(d)
+    return ut
 
 
 @router.get("/summary")
-async def summary(_: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def summary(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     rows = (
         await db.execute(select(Reminder).where(Reminder.status == "open"))
     ).scalars().all()
+    mina = [r for r in rows if r.assigned_to == user.id or r.assigned_to is None]
     today = date.today().isoformat()
     week = (date.today() + timedelta(days=7)).isoformat()
     overdue = [r for r in rows if _valid(r.due_date) and r.due_date < today]
@@ -134,6 +162,9 @@ async def summary(_: User = Depends(current_user), db: AsyncSession = Depends(ge
         "this_week": len(this_week),
         "next_30_days": len(soon),
         "today": today,
+        "mina_open": len(mina),
+        "mina_overdue": len([r for r in mina if _valid(r.due_date) and r.due_date < today]),
+        "notify_scope": user.notify_scope,
     }
 
 
@@ -168,6 +199,8 @@ async def create_reminder(
 
     data = payload.model_dump()
     tid = _tolka_tid(data.pop("remind_at", None))
+    if not data.get("assigned_to"):
+        data["assigned_to"] = user.id
     r = Reminder(**data, created_by=user.full_name or user.username)
     r.remind_at = tid or svc.berakna_remind_at(r)
     r.title = r.title.strip()
