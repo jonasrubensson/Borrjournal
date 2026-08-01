@@ -40,7 +40,10 @@ class Settings(BaseSettings):
     geocoder_url: str = "https://nominatim.openstreetmap.org/search"
     geocoder_country_code: str = "se"
     geocoder_country_name: str = "Sverige"
-    geocoder_user_agent: str = "Borrjournal (internt kundregister)"
+    # Nominatims villkor kräver en User-Agent som identifierar den som frågar.
+    # Sätt GEOCODER_USER_AGENT i .env till något med en kontaktadress i, annars
+    # riskerar uppslagen att avvisas.
+    geocoder_user_agent: str = "Borrjournal/2.3 (kundregister for vattenborrning)"
 
     # SGU:s brunnsarkiv, öppna data. Töm sgu_bulk_url för att stänga av.
     # Bulkfiler per län, en fil per anrop. Verifierat format.
