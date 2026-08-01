@@ -72,8 +72,14 @@ async def lifespan(app: FastAPI):
 
         async with _S() as db:
             created = await generate_auto(db)
-            from .services.reminders import backfill_remind_at
+            from .services.reminders import (
+                backfill_remind_at,
+                generate_business,
+                stang_inaktuella,
+            )
 
+            created += await generate_business(db)
+            await stang_inaktuella(db)
             fyllda = await backfill_remind_at(db)
             if created or fyllda:
                 print(

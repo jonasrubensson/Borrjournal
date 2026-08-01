@@ -494,3 +494,23 @@ class LineItem(Base):
     unit_price: Mapped[float] = mapped_column(Float, default=0.0)
     vat_percent: Mapped[float] = mapped_column(Float, default=25.0)
     discount_percent: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class QuoteTemplate(Base):
+    """Offertmall. Rubrik, texter och färdiga rader för ett återkommande jobb."""
+
+    __tablename__ = "quote_templates"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    description: Mapped[str] = mapped_column(String(255), default="")
+    title: Mapped[str] = mapped_column(String(200), default="")
+    intro: Mapped[Text] = mapped_column(Text, default="")
+    terms: Mapped[Text] = mapped_column(Text, default="")
+    valid_days: Mapped[int] = mapped_column(Integer, default=30)
+    # Rader som JSON, eftersom de är en del av mallen och inte egna poster
+    lines: Mapped[str] = mapped_column(Text, default="[]")
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_by: Mapped[str] = mapped_column(String(120), default="")

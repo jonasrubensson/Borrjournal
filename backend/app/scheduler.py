@@ -35,9 +35,14 @@ async def _run_reminders() -> None:
     """Genererar de automatiska en gång per dygn."""
     async with SessionLocal() as db:
         created = await reminder_service.generate_auto(db)
+        affar = await reminder_service.generate_business(db)
+        stangda = await reminder_service.stang_inaktuella(db)
         await reminder_service.backfill_remind_at(db)
-        if created:
-            print(f"[schemaläggare] {created} nya automatiska påminnelser")
+        if created or affar or stangda:
+            print(
+                f"[schemaläggare] påminnelser: {created} service, {affar} affär, "
+                f"{stangda} inaktuella stängda"
+            )
 
 
 async def _check_reminders() -> None:
