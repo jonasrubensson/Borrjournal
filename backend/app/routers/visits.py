@@ -85,6 +85,30 @@ def apply_coords(data: dict) -> dict:
     return data
 
 
+async def auto_koordinat(obj) -> str:
+    """Slår upp koordinaten från adressen om den saknas.
+
+    Körs när ett besök skapas eller när adressen ändras. Misslyckas uppslaget
+    sparas posten ändå, koordinaten går alltid att fylla i för hand eller hämta
+    från telefonens GPS på plats.
+    """
+    from ..services.geocode import geocode_safe
+
+    if obj.latitude is not None and obj.longitude is not None:
+        return ""
+    adress = ", ".join(x for x in (obj.address, obj.property_designation) if x)
+    if not adress:
+        return ""
+    hit = await geocode_safe(adress, obj.municipality or "")
+    if not hit:
+        return ""
+    obj.latitude = hit["latitude"]
+    obj.longitude = hit["longitude"]
+    if not obj.coordinates:
+        obj.coordinates = f"{hit['latitude']}, {hit['longitude']}"
+    return "ungefärlig" if hit.get("approximate") else hit.get("short_label", "")
+
+
 # ---------- besök ----------
 @router.get("/visits")
 async def list_visits(
@@ -130,12 +154,16 @@ async def create_visit(
         **apply_coords(payload.model_dump()),
     )
     db.add(v)
+    await db.flush()
+    traff = await auto_koordinat(v)
     await db.commit()
     await db.refresh(v)
     await log_action(
         db, "VISIT_CREATE", actor=user.username, object_type="visit", object_id=v.id, request=request
     )
-    return visit_out(v)
+    ut = visit_out(v)
+    ut["geocode"] = traff
+    return ut
 
 
 @router.get("/visits/{visit_id}")
@@ -158,15 +186,27 @@ async def update_visit(
         raise HTTPException(status_code=400, detail="Okänd status")
     if "coordinates" in payload and "latitude" not in payload:
         payload = apply_coords({**payload, "latitude": None, "longitude": None})
+    adress_fore = (v.address, v.property_designation, v.municipality)
     for f in VisitIn.model_fields:
         if f in payload:
             setattr(v, f, payload[f])
+
+    # Ändrad adress utan att koordinaten rörts: slå upp den nya platsen
+    adress_andrad = (v.address, v.property_designation, v.municipality) != adress_fore
+    if adress_andrad and "coordinates" not in payload and "latitude" not in payload:
+        v.latitude = None
+        v.longitude = None
+        v.coordinates = ""
+    traff = await auto_koordinat(v)
+
     await db.commit()
     await db.refresh(v)
     await log_action(
         db, "VISIT_UPDATE", actor=user.username, object_type="visit", object_id=v.id, request=request
     )
-    return visit_out(v)
+    ut = visit_out(v)
+    ut["geocode"] = traff
+    return ut
 
 
 @router.delete("/visits/{visit_id}", status_code=204)

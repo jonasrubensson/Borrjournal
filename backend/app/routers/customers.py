@@ -13,6 +13,7 @@ from ..schemas import (
 )
 from ..security import current_user, log_action, require_admin, require_write
 from ..services.geo import parse_coordinates
+from ..services.geocode import geocode_safe
 from ..services.reminders import generate_auto
 
 router = APIRouter(prefix="/api", tags=["kunder"])
@@ -37,6 +38,23 @@ def apply_coordinates(data: dict) -> dict:
         if parsed:
             data["latitude"], data["longitude"] = parsed
     return data
+
+
+async def auto_koordinat_anlaggning(facility: Facility, customer: Customer) -> None:
+    """Fyller anläggningens koordinat från kundens adress om den saknas."""
+    if facility.latitude is not None and facility.longitude is not None:
+        return
+    adress = ", ".join(
+        x for x in (customer.address, customer.property_designation) if x
+    )
+    if not adress:
+        return
+    hit = await geocode_safe(adress, customer.municipality or "")
+    if hit:
+        facility.latitude = hit["latitude"]
+        facility.longitude = hit["longitude"]
+        if not facility.coordinates:
+            facility.coordinates = f"{hit['latitude']}, {hit['longitude']}"
 
 
 async def get_customer(db: AsyncSession, customer_id: str) -> Customer:
@@ -143,6 +161,8 @@ async def create_facility(
         **apply_coordinates(payload.model_dump()),
     )
     db.add(f)
+    await db.flush()
+    await auto_koordinat_anlaggning(f, await get_customer(db, customer_id))
     await db.commit()
     await db.refresh(f)
     await generate_auto(db)
@@ -287,6 +307,7 @@ async def register_facility(
     )
     db.add(facility)
     await db.flush()
+    await auto_koordinat_anlaggning(facility, customer)
 
     note = JournalEntry(
         customer_id=customer.id,

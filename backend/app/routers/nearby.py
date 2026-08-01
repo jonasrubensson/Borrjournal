@@ -204,7 +204,8 @@ async def geocode_address(
     if not hit:
         raise HTTPException(
             status_code=404,
-            detail="Hittade ingen träff på adressen. Skriv koordinaten för hand.",
+            detail="Hittade ingen träff på adressen. Skriv koordinaten för hand, "
+            "eller hämta din position när du står på plats.",
         )
     return hit
 
