@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "3.3.0";
+const UI_VERSION = "3.4.0";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
@@ -119,6 +119,7 @@ const MER_POSTER = [
   ["nara", "Jobb i närheten", "Vad som ligger runt omkring"],
   ["ny", "Registrera anläggning", "Ny brunn eller pump"],
   ["konto", "Mitt konto", "Lösenord, tvåfaktor, textstorlek"],
+  ["handelser", "Systemhändelser", "Fel i bakgrunden"],
 ];
 
 function go(route, id) {
@@ -1195,7 +1196,11 @@ async function viewVisit() {
       <div class="fact"><div class="k">Adress</div><div class="v">${esc(v.address || "—")}</div></div>
       <div class="fact"><div class="k">Planerat</div><div class="v mono">${esc(v.planned_at || "—")}</div></div>
       <div class="fact"><div class="k">Koordinat</div><div class="v mono" style="font-size:12.5px">${
-        v.latitude ? `${v.latitude}, ${v.longitude}` : "—"
+        v.latitude
+          ? `${v.latitude}, ${v.longitude}`
+          : v.geocode_status === "pagar"
+            ? `<span class="muted">hämtas…</span>`
+            : "—"
       }</div></div>
       ${v.quote_amount ? `<div class="fact"><div class="k">Offert</div><div class="v mono">${v.quote_amount.toLocaleString("sv-SE")} kr</div></div>` : ""}
     </div>
@@ -2187,6 +2192,72 @@ async function offertTillKund() {
   } catch (e) {
     toast(e.message, true);
   }
+}
+
+
+/* ---------------- systemhändelser ---------------- */
+/* Bakgrundsjobb har ingen användare att svara. Utan den här listan blir ett
+   misslyckat adressuppslag en rad i containerloggen som ingen läser. */
+async function viewEvents() {
+  const token = claim();
+  mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
+  const data = await api("/events?limit=80");
+  if (!current(token)) return;
+
+  const ikon = { fel: ["#A6402F", "!"], varning: ["#B3801F", "!"], info: ["var(--stone)", "i"] };
+
+  $("#view").innerHTML = `
+  <div class="spread">
+    <div><div class="eyebrow">Drift</div><h1>Systemhändelser</h1>
+      <p class="lead">Saker som gått fel i bakgrunden, där ingen stod och tittade: adressuppslag,
+        hämtningar från SGU, utskick och oväntade serverfel.</p></div>
+    ${
+      data.open && S.user.role !== "lasare"
+        ? `<button class="btn" onclick="kvitteraHandelser()">Kvittera alla (${data.open})</button>`
+        : ""
+    }
+  </div>
+
+  <div class="card"><div class="pad" style="padding-top:6px">
+    ${
+      data.events.length
+        ? data.events
+            .map((e) => {
+              const [farg, tecken] = ikon[e.level] || ikon.info;
+              return `<div class="filerow" style="${e.acknowledged ? "opacity:.55" : ""}">
+        <div class="ftype" style="background:${farg}">${tecken}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600">${esc(e.message)}</div>
+          <div class="fmeta">${dt(e.at)} · ${esc(e.source)}${
+            e.reference ? ` · referens ${esc(e.reference)}` : ""
+          }${e.acknowledged ? " · kvitterad" : ""}</div>
+          ${
+            e.detail
+              ? `<details style="margin-top:4px"><summary class="tsub" style="cursor:pointer">Detaljer</summary>
+                 <pre style="white-space:pre-wrap;font-size:11.5px;font-family:var(--mono);
+                 background:#F4F7F7;padding:8px;border-radius:3px;margin:6px 0 0;overflow-x:auto">${esc(e.detail.slice(0, 2500))}</pre></details>`
+              : ""
+          }
+        </div>
+        ${
+          e.object_type === "visit"
+            ? `<button class="btn ghost sm" onclick="go('besok','${e.object_id}')">Öppna</button>`
+            : e.object_type === "facility"
+              ? `<button class="btn ghost sm" onclick="go('anlaggningar')">Anläggningar</button>`
+              : ""
+        }</div>`;
+            })
+            .join("")
+        : `<div class="empty"><div class="big">Inget har gått fel</div>
+           <p>Här hamnar fel från bakgrundsjobben. Tomt är bra.</p></div>`
+    }
+  </div></div>`;
+}
+
+async function kvitteraHandelser() {
+  await api("/events/acknowledge", { method: "POST", body: {} });
+  toast("Kvitterade");
+  viewEvents();
 }
 
 /* ---------------- förhandsgranskning ---------------- */
@@ -3265,10 +3336,16 @@ async function viewEconomy() {
 async function viewMore() {
   const token = claim();
   mountShell("");
-  const sum = await api("/reminders/summary").catch(() => ({ overdue: 0, open: 0 }));
+  const [sum, handelser] = await Promise.all([
+    api("/reminders/summary").catch(() => ({ overdue: 0, open: 0 })),
+    api("/events?only_open=true&limit=1").catch(() => ({ open: 0 })),
+  ]);
   if (!current(token)) return;
 
-  const extra = { paminnelser: sum.open ? `${sum.open} öppna${sum.overdue ? `, ${sum.overdue} försenade` : ""}` : "" };
+  const extra = {
+    paminnelser: sum.open ? `${sum.open} öppna${sum.overdue ? `, ${sum.overdue} försenade` : ""}` : "",
+    handelser: handelser.open ? `${handelser.open} att titta på` : "",
+  };
 
   $("#view").innerHTML = `
   <div class="spread"><div><div class="eyebrow">Allt annat</div><h1>Mer</h1></div></div>
@@ -5678,6 +5755,7 @@ function render() {
     order: viewOrder,
     artiklar: viewArticles,
     mallar: viewTemplates,
+    handelser: viewEvents,
     ekonomi: viewEconomy,
     besok: (S.id ? viewVisit : viewVisits),
     admin: viewAdmin,
