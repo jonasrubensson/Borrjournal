@@ -108,13 +108,22 @@ async def geocode(query: str, municipality: str = "") -> dict | None:
     if not hits and sista_fel:
         raise sista_fel
 
-    if not hits:
+    # Tjänsten kan svara med ett felobjekt i stället för en lista
+    if isinstance(hits, dict):
+        hits = hits.get("features") or []
+    if not isinstance(hits, list) or not hits:
         return None
     hit = hits[0]
+    if not isinstance(hit, dict) or "lat" not in hit or "lon" not in hit:
+        return None
+    try:
+        lat, lon = float(hit["lat"]), float(hit["lon"])
+    except (TypeError, ValueError):
+        return None
     etikett = hit.get("display_name", "")
     return {
-        "latitude": round(float(hit["lat"]), 6),
-        "longitude": round(float(hit["lon"]), 6),
+        "latitude": round(lat, 6),
+        "longitude": round(lon, 6),
         "label": etikett,
         "short_label": ", ".join(etikett.split(",")[:3]).strip(),
         # Grov träff betyder att vi fick kommunen eller orten, inte adressen
