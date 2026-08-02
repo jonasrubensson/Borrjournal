@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..schemas import iso_utc
 from ..models import PushSubscription, User
-from ..security import current_user, log_action, require_admin
+from ..security import current_user, log_action, require_admin, require_write
 from ..services.notify import (
     DEFAULT_SMTP,
     SMTP_KEY,
@@ -18,6 +18,7 @@ from ..services.notify import (
 )
 
 router = APIRouter(prefix="/api/notifications", tags=["notiser"])
+events_router = APIRouter(prefix="/api/events", tags=["systemhändelser"])
 
 
 # ---------------- e-post ----------------
@@ -161,3 +162,69 @@ async def test_push(user: User = Depends(current_user), db: AsyncSession = Depen
             detail="Ingen enhet tog emot notisen. Slå på notiser på enheten först.",
         )
     return {"sent": sent}
+
+
+@events_router.get("")
+async def list_events(
+    level: str | None = None,
+    only_open: bool = False,
+    limit: int = 60,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Vad som gått fel i bakgrunden."""
+    from ..models import SystemEvent
+
+    stmt = select(SystemEvent).order_by(SystemEvent.at.desc()).limit(min(limit, 200))
+    if level:
+        stmt = stmt.where(SystemEvent.level == level)
+    if only_open:
+        stmt = stmt.where(SystemEvent.acknowledged.is_(False))
+    rader = (await db.execute(stmt)).scalars().all()
+
+    oppna = (
+        await db.execute(
+            select(func.count())
+            .select_from(SystemEvent)
+            .where(SystemEvent.acknowledged.is_(False))
+        )
+    ).scalar() or 0
+
+    return {
+        "open": oppna,
+        "events": [
+            {
+                "id": r.id,
+                "level": r.level,
+                "source": r.source,
+                "message": r.message,
+                "detail": r.detail,
+                "object_type": r.object_type,
+                "object_id": r.object_id,
+                "reference": r.reference,
+                "at": iso_utc(r.at),
+                "acknowledged": r.acknowledged,
+            }
+            for r in rader
+        ],
+    }
+
+
+@events_router.post("/acknowledge")
+async def acknowledge_events(
+    payload: dict | None = None,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Kvitterar händelser som är hanterade."""
+    from ..models import SystemEvent
+
+    ider = (payload or {}).get("ids")
+    stmt = select(SystemEvent).where(SystemEvent.acknowledged.is_(False))
+    if ider:
+        stmt = stmt.where(SystemEvent.id.in_(ider))
+    rader = (await db.execute(stmt)).scalars().all()
+    for r in rader:
+        r.acknowledged = True
+    await db.commit()
+    return {"acknowledged": len(rader)}

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,7 +13,7 @@ from ..schemas import (
 )
 from ..security import current_user, log_action, require_admin, require_write
 from ..services.geo import parse_coordinates
-from ..services.geocode import geocode_safe
+from ..services.backgrund import slag_upp_adress
 from ..services.reminders import generate_auto
 
 router = APIRouter(prefix="/api", tags=["kunder"])
@@ -40,21 +40,10 @@ def apply_coordinates(data: dict) -> dict:
     return data
 
 
-async def auto_koordinat_anlaggning(facility: Facility, customer: Customer) -> None:
-    """Fyller anläggningens koordinat från kundens adress om den saknas."""
+def anlaggning_behover_uppslag(facility: Facility, customer: Customer) -> bool:
     if facility.latitude is not None and facility.longitude is not None:
-        return
-    adress = ", ".join(
-        x for x in (customer.address, customer.property_designation) if x
-    )
-    if not adress:
-        return
-    hit = await geocode_safe(adress, customer.municipality or "")
-    if hit:
-        facility.latitude = hit["latitude"]
-        facility.longitude = hit["longitude"]
-        if not facility.coordinates:
-            facility.coordinates = f"{hit['latitude']}, {hit['longitude']}"
+        return False
+    return bool((customer.address or "").strip() or (customer.property_designation or "").strip())
 
 
 async def get_customer(db: AsyncSession, customer_id: str) -> Customer:
@@ -151,20 +140,23 @@ async def create_facility(
     customer_id: str,
     payload: FacilityIn,
     request: Request,
+    bakgrund: BackgroundTasks,
     user: User = Depends(require_write),
     db: AsyncSession = Depends(get_db),
 ):
-    await get_customer(db, customer_id)
+    kund = await get_customer(db, customer_id)
     f = Facility(
         facility_no=await next_no(db, Facility, Facility.facility_no, "B", 2000),
         customer_id=customer_id,
         **apply_coordinates(payload.model_dump()),
     )
+    if anlaggning_behover_uppslag(f, kund):
+        f.geocode_status = "pagar"
     db.add(f)
-    await db.flush()
-    await auto_koordinat_anlaggning(f, await get_customer(db, customer_id))
     await db.commit()
     await db.refresh(f)
+    if f.geocode_status == "pagar":
+        bakgrund.add_task(slag_upp_adress, "facility", f.id)
     await generate_auto(db)
     await log_action(
         db, "FACILITY_CREATE", actor=user.username, object_type="facility", object_id=f.id, request=request
@@ -286,6 +278,7 @@ async def pump_fleet(_: User = Depends(current_user), db: AsyncSession = Depends
 async def register_facility(
     payload: NewFacilityIn,
     request: Request,
+    bakgrund: BackgroundTasks,
     user: User = Depends(require_write),
     db: AsyncSession = Depends(get_db),
 ):
@@ -305,9 +298,10 @@ async def register_facility(
         customer_id=customer.id,
         **apply_coordinates(payload.facility.model_dump()),
     )
+    if anlaggning_behover_uppslag(facility, customer):
+        facility.geocode_status = "pagar"
     db.add(facility)
     await db.flush()
-    await auto_koordinat_anlaggning(facility, customer)
 
     note = JournalEntry(
         customer_id=customer.id,
@@ -322,6 +316,8 @@ async def register_facility(
     await db.commit()
     await db.refresh(customer)
     await db.refresh(facility)
+    if facility.geocode_status == "pagar":
+        bakgrund.add_task(slag_upp_adress, "facility", facility.id)
     await generate_auto(db)
     await log_action(
         db,

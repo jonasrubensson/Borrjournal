@@ -1,6 +1,6 @@
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +10,7 @@ from ..models import Customer, Facility, JournalEntry, ShareLog, User, Visit
 from ..schemas import customer_out, facility_out, iso_utc
 from ..security import current_user, log_action, require_admin, require_write
 from ..services import sgu
+from ..services.backgrund import slag_upp_adress
 from ..services.geo import parse_coordinates
 
 router = APIRouter(prefix="/api", tags=["besok"])
@@ -59,6 +60,8 @@ def visit_out(v: Visit) -> dict:
         "coordinates": v.coordinates,
         "latitude": v.latitude,
         "longitude": v.longitude,
+        "geocode_status": v.geocode_status,
+        "geocode_message": v.geocode_message,
         "errand": v.errand,
         "notes": v.notes,
         "quote_amount": v.quote_amount,
@@ -85,28 +88,11 @@ def apply_coords(data: dict) -> dict:
     return data
 
 
-async def auto_koordinat(obj) -> str:
-    """Slår upp koordinaten från adressen om den saknas.
-
-    Körs när ett besök skapas eller när adressen ändras. Misslyckas uppslaget
-    sparas posten ändå, koordinaten går alltid att fylla i för hand eller hämta
-    från telefonens GPS på plats.
-    """
-    from ..services.geocode import geocode_safe
-
+def behover_uppslag(obj) -> bool:
+    """Sant om posten saknar koordinat men har en adress att slå upp."""
     if obj.latitude is not None and obj.longitude is not None:
-        return ""
-    adress = ", ".join(x for x in (obj.address, obj.property_designation) if x)
-    if not adress:
-        return ""
-    hit = await geocode_safe(adress, obj.municipality or "")
-    if not hit:
-        return ""
-    obj.latitude = hit["latitude"]
-    obj.longitude = hit["longitude"]
-    if not obj.coordinates:
-        obj.coordinates = f"{hit['latitude']}, {hit['longitude']}"
-    return "ungefärlig" if hit.get("approximate") else hit.get("short_label", "")
+        return False
+    return bool((obj.address or "").strip() or (obj.property_designation or "").strip())
 
 
 # ---------- besök ----------
@@ -140,6 +126,7 @@ async def list_visits(
 async def create_visit(
     payload: VisitIn,
     request: Request,
+    bakgrund: BackgroundTasks,
     user: User = Depends(require_write),
     db: AsyncSession = Depends(get_db),
 ):
@@ -153,17 +140,19 @@ async def create_visit(
         created_by=user.full_name or user.username,
         **apply_coords(payload.model_dump()),
     )
+    # Sparas direkt. Adressuppslaget sker efteråt, så att en trög karttjänst
+    # aldrig kan hindra eller fördröja att besöket bokas in.
+    if behover_uppslag(v):
+        v.geocode_status = "pagar"
     db.add(v)
-    await db.flush()
-    traff = await auto_koordinat(v)
     await db.commit()
     await db.refresh(v)
+    if v.geocode_status == "pagar":
+        bakgrund.add_task(slag_upp_adress, "visit", v.id)
     await log_action(
         db, "VISIT_CREATE", actor=user.username, object_type="visit", object_id=v.id, request=request
     )
-    ut = visit_out(v)
-    ut["geocode"] = traff
-    return ut
+    return visit_out(v)
 
 
 @router.get("/visits/{visit_id}")
@@ -178,6 +167,7 @@ async def update_visit(
     visit_id: str,
     payload: dict,
     request: Request,
+    bakgrund: BackgroundTasks,
     user: User = Depends(require_write),
     db: AsyncSession = Depends(get_db),
 ):
@@ -197,16 +187,21 @@ async def update_visit(
         v.latitude = None
         v.longitude = None
         v.coordinates = ""
-    traff = await auto_koordinat(v)
+        v.geocode_message = ""
+    slag_upp = behover_uppslag(v)
+    if slag_upp:
+        v.geocode_status = "pagar"
+    elif v.latitude is not None:
+        v.geocode_status = "klar"
 
     await db.commit()
     await db.refresh(v)
+    if slag_upp:
+        bakgrund.add_task(slag_upp_adress, "visit", v.id)
     await log_action(
         db, "VISIT_UPDATE", actor=user.username, object_type="visit", object_id=v.id, request=request
     )
-    ut = visit_out(v)
-    ut["geocode"] = traff
-    return ut
+    return visit_out(v)
 
 
 @router.delete("/visits/{visit_id}", status_code=204)
