@@ -674,6 +674,23 @@ adress som måste hämtas. `index.html` och `sw.js` levereras med `no-cache`, ve
 filer med lång hållbarhet. Ser du listen efter en uppdatering betyder det numera att webbläsaren
 har en gammal flik öppen, inte att backend är gammal.
 
+## När något går fel
+
+**Mer, Systemhändelser.** Bakgrundsjobb har ingen användare att svara. Ett misslyckat
+adressuppslag, en SGU-hämtning som inte gick igenom eller ett oväntat serverfel hamnar där, med
+tidpunkt, källa och hela detaljen utfälld vid behov. Antalet ohanterade visas i Mer-listan.
+
+Oväntade serverfel får ett referensnummer som både visas för användaren och skrivs i loggen:
+
+```bash
+docker compose logs app | grep <referens>
+```
+
+**Adressuppslag blockerar aldrig.** Ett besök sparas på någon hundradels sekund. Koordinaten
+hämtas efteråt och skrivs pa posten när den kommit. Misslyckas det står det på besöket vad som
+hände och vad du kan göra i stället, och händelsen hamnar i listan. Tidigare kunde ett uppslag
+mot en trög adresstjänst ta upp emot en minut, och då hann proxyn framför appen ge upp.
+
 ## Tid och tidszon
 
 Allt lagras i UTC och serveras med tidszon, så webbläsaren räknar om till lokal tid. Utan offset
