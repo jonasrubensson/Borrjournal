@@ -85,6 +85,8 @@ class Facility(Base):
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     access_notes: Mapped[str] = mapped_column(Text, default="")
     permit_status: Mapped[str] = mapped_column(String(40), default="")
+    geocode_status: Mapped[str] = mapped_column(String(20), default="")
+    geocode_message: Mapped[str] = mapped_column(String(255), default="")
 
     # Borrning
     soil_depth_m: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -312,6 +314,9 @@ class Visit(Base):
     coordinates: Mapped[str] = mapped_column(String(80), default="")
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Adressuppslaget sker i bakgrunden. Status: "" | pagar | klar | ungefarlig | misslyckades
+    geocode_status: Mapped[str] = mapped_column(String(20), default="")
+    geocode_message: Mapped[str] = mapped_column(String(255), default="")
 
     errand: Mapped[str] = mapped_column(Text, default="")
     notes: Mapped[str] = mapped_column(Text, default="")
@@ -516,3 +521,25 @@ class QuoteTemplate(Base):
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     created_by: Mapped[str] = mapped_column(String(120), default="")
+
+
+
+class SystemEvent(Base):
+    """Saker som gick fel i bakgrunden, synligt i appen.
+
+    Ett bakgrundsjobb som misslyckas har ingen användare att svara. Utan den här
+    tabellen blir felet en rad i containerloggen som ingen läser.
+    """
+
+    __tablename__ = "system_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    level: Mapped[str] = mapped_column(String(10), default="fel", index=True)  # fel | varning | info
+    source: Mapped[str] = mapped_column(String(40), default="", index=True)
+    message: Mapped[str] = mapped_column(String(500))
+    detail: Mapped[str] = mapped_column(Text, default="")
+    object_type: Mapped[str] = mapped_column(String(30), default="")
+    object_id: Mapped[str] = mapped_column(String(36), default="")
+    reference: Mapped[str] = mapped_column(String(12), default="", index=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, index=True)

@@ -108,10 +108,57 @@ app.include_router(search.router)
 app.include_router(reminders.router)
 app.include_router(backups.router)
 app.include_router(settings_router.router)
+app.include_router(settings_router.events_router)
 app.include_router(nearby.router)
 app.include_router(visits.router)
 app.include_router(articles.router)
 app.include_router(orders.router)
+
+
+@app.exception_handler(Exception)
+async def ohanterat_fel(request, exc):
+    """Loggar hela stackspåret och ger användaren något att hänvisa till.
+
+    Utan detta blir ett fel bara "500" i webbläsaren och en rad i loggen som är
+    svår att koppla ihop med det man just gjorde.
+    """
+    import traceback
+    import uuid as _uuid
+
+    from fastapi.responses import JSONResponse
+
+    referens = str(_uuid.uuid4())[:8]
+    spar = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    print(
+        f"\n[borrjournal] FEL {referens} vid {request.method} {request.url.path}\n{spar}",
+        flush=True,
+    )
+    # Skriv även in det i appen, så att felet går att hitta utan serveråtkomst
+    try:
+        from .db import SessionLocal
+        from .services import events
+
+        async with SessionLocal() as db:
+            await events.logga(
+                db,
+                level="fel",
+                source=request.url.path[:40],
+                message=f"{type(exc).__name__}: {exc}"[:500],
+                detail=spar,
+                reference=referens,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": (
+                f"Något gick fel i servern (referens {referens}). "
+                "Felet finns i loggen: docker compose logs app | grep " + referens
+            ),
+            "reference": referens,
+        },
+    )
 
 
 @app.get("/api/health")

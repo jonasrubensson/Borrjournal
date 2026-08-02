@@ -137,6 +137,8 @@ def facility_out(f: Facility, with_customer: bool = False) -> dict:
         "coordinates": f.coordinates,
         "latitude": f.latitude,
         "longitude": f.longitude,
+        "geocode_status": f.geocode_status,
+        "geocode_message": f.geocode_message,
         "access_notes": f.access_notes,
         "permit_status": f.permit_status,
         "soil_depth_m": f.soil_depth_m,

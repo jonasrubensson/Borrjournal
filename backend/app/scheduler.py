@@ -92,7 +92,22 @@ async def _run_sgu() -> None:
                     f"på {r['sekunder']} s"
                 )
             except Exception as exc:  # noqa: BLE001
-                print(f"[schemaläggare] SGU {lanskod} misslyckades: {exc}")
+                from .services import events
+
+                await events.logga(
+                    db,
+                    level="varning",
+                    source="sgu",
+                    message=f"Hämtningen av län {lanskod} misslyckades",
+                    detail=str(exc),
+                )
+
+
+async def _stada_handelser() -> None:
+    from .services import events
+
+    async with SessionLocal() as db:
+        await events.stada(db)
 
 
 async def loop() -> None:
@@ -128,6 +143,7 @@ async def loop() -> None:
             if _last_sgu_day != today and after(conf.get("reminder_scan_hour", 6), 30):
                 _last_sgu_day = today
                 await _run_sgu()
+                await _stada_handelser()
 
             # Förfallna påminnelser kollas varje varv, alltså varje minut
             await _check_reminders()
