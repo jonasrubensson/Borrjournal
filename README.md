@@ -697,6 +697,77 @@ Allt lagras i UTC och serveras med tidszon, så webbläsaren räknar om till lok
 i tidsstämpeln tolkar webbläsaren den som lokal tid, och en journalrad skriven 22:01 svensk tid
 skulle visas som 20:01. Det gäller särskilt SQLite, som lagrar tidsstämplar utan zon.
 
+### Löpnummer
+
+Kundnummer, besöksnummer, offertnummer och de andra serierna utgår från det högsta nummer som
+finns, inte från antalet rader. Räkningen gav krockar: raderade man en post sjönk antalet och
+nästa post fick ett nummer som redan var taget. Ett raderat nummer återanvänds inte heller, så
+att BES-1004 i någons anteckningar alltid betyder samma besök.
+
+Två sparningar samtidigt kunde ändå läsa samma högsta nummer innan någon hunnit skriva, och
+ett dubbelklick räckte för att utlösa det. Tilldelning och skrivning sker därför i ett odelbart
+steg, och blir numret ändå upptaget tas nästa lediga automatiskt. Sparaknapparna spärras också
+medan anropet pågår, så att ett dubbelklick blir en sparning och inte två.
+
+## Uppdatera
+
+```bash
+cd /sokvag/till/borrjournal
+./uppdatera.sh
+```
+
+Skriptet kontrollerar `.env`, tar en kopia av datavolymen, bygger om, väntar in appen och
+jämför sedan backend mot gränssnitt. Skiljer de sig säger det till med en gång i stället för
+att felet dyker upp hos en användare.
+
+### Tre fällor värda att känna till
+
+**1. Gränssnittet byggs inte in i imagen.** Katalogen `frontend` monteras in från disken:
+
+```yaml
+    volumes:
+      - ./frontend:/app/frontend:ro
+```
+
+Byter du bara backendfilerna får du en ny server med gammalt gränssnitt, hur många gånger du än
+kör `--no-cache`. Byt alltid ut båda. Servern läser numera gränssnittets version från disk, så
+`/api/version` svarar med båda och `in_sync` säger om de stämmer. Versionen står också längst ned
+under **Mer**.
+
+**2. Radera aldrig projektkatalogen.** Där ligger `.env`, som inte följer med i git. Försvinner
+den skapas en ny `SECRET_KEY`, och då blir alla utloggade eftersom deras inloggningar signerats
+med den gamla.
+
+**3. Katalognamnet styr vilken datavolym som används.** Volymen heter `<katalognamn>_data`. Ligger
+projektet i `borrjournal` används `borrjournal_data`. Klonar du om till `borrjournal-ny` får du en
+tom volym, och det ser ut som att all data är borta fast den ligger kvar i den gamla. Kontrollera
+med `docker volume ls`.
+
+### Vad datan ligger i
+
+| Vad | Var | Överlever |
+|---|---|---|
+| Databas, filer, backuper | Docker-volymen `<katalog>_data` | ja, så länge katalognamnet är detsamma |
+| Hemligheter | `.env` i projektkatalogen | bara om du inte raderar katalogen |
+| Backend | inbyggt i imagen | byggs om varje gång |
+| Gränssnitt | `./frontend` på disken | måste bytas ut för hand |
+
+### Om du hämtar koden från git
+
+Leveranserna kommer som zip. Klonar du från ditt eget repo måste du först lägga in den nya koden
+där, annars hämtar `git clone` tillbaka den gamla versionen och ingenting ändras trots att allt
+byggts om. Ett flöde som fungerar:
+
+```bash
+cd /sokvag/till/borrjournal
+unzip -o ~/borrjournal.zip -d /tmp/ny
+rsync -a --delete --exclude .env --exclude .git /tmp/ny/borrjournal/ ./
+git add -A && git commit -m "version x.y.z" && git push
+./uppdatera.sh
+```
+
+`--exclude .env` är det viktiga: annars skrivs hemligheterna över.
+
 ## Att veta om driften
 
 **Kör appen med en (1) worker.** Schemaläggaren ligger i processen, så två workers gör samma
