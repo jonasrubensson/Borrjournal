@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "3.4.0";
+const UI_VERSION = "3.5.0";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
@@ -1116,9 +1116,23 @@ async function viewVisits() {
   </div>`;
 }
 
+/* Två formulär på samma sida som öppnas ovanpå varandra gör att det nedre
+   hamnar utanför skärmen på telefon, och det ser ut som att knappen är död.
+   Därför stängs det andra, och sidan scrollar till det som öppnades. */
+function stangAndraFormular(behall) {
+  for (const id of ["visitform", "forfraganform", "artform", "sharebox"]) {
+    if (id === behall) continue;
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = "";
+  }
+  const kort = document.getElementById("forfragankort");
+  if (kort && behall !== "forfraganform") kort.remove();
+}
+
 function newVisit() {
   const box = $("#visitform");
   if (box.innerHTML) return (box.innerHTML = "");
+  stangAndraFormular("visitform");
   box.innerHTML = `
   <div class="card" style="margin-bottom:16px;border-color:#C9DFE3">
     <div class="hd" style="background:#F4F9FA"><h2>Nytt platsbesök</h2></div>
@@ -1141,9 +1155,12 @@ function newVisit() {
         <button class="btn ghost sm" onclick="document.getElementById('visitform').innerHTML=''">Avbryt</button>
       </div>
     </div></div>`;
+  scrollTill(box);
+  const f = $("#v_name");
+  if (f) f.focus();
 }
 
-async function saveNewVisit() {
+async function _saveNewVisit() {
   const body = {
     contact_name: val("v_name").trim(),
     phone: val("v_phone"),
@@ -1354,7 +1371,7 @@ function planeraFranBesok(visitId) {
   go("nara");
 }
 
-async function saveVisit() {
+async function _saveVisit() {
   const v = S.data.visit;
   const body = {
     contact_name: val("v_name2").trim(),
@@ -1427,7 +1444,7 @@ async function removeVisit() {
   go("besok");
 }
 
-async function convertVisit() {
+async function _convertVisit() {
   const v = S.data.visit;
   const namn = prompt(
     "Vad ska kunden heta i registret?",
@@ -1705,7 +1722,7 @@ async function nyOffert(customerId, visitId) {
   }
 }
 
-async function nyOrder(customerId) {
+async function _nyOrder(customerId) {
   const titel = prompt("Vad gäller arbetsordern?", "");
   if (titel === null) return;
   const c = S.data.customer;
@@ -1772,6 +1789,9 @@ async function valjMall(customerId, visitId) {
       </div>
       <button class="btn ghost sm" style="margin-top:12px" onclick="document.getElementById('mallval').remove()">Avbryt</button>
     </div></div>`;
+  const gammal = document.getElementById("mallval");
+  if (gammal) gammal.remove();
+  stangAndraFormular(null);
   const holder = document.createElement("div");
   holder.innerHTML = html;
   box.prepend(holder.firstElementChild);
@@ -2131,6 +2151,7 @@ async function nyForfragan() {
     document.getElementById("forfragankort").remove();
     return;
   }
+  stangAndraFormular("forfraganform");
   const mallar = await api("/quote-templates");
   const holder = document.createElement("div");
   holder.innerHTML = `
@@ -2158,7 +2179,7 @@ async function nyForfragan() {
   if ($("#ff_namn")) $("#ff_namn").focus();
 }
 
-async function skapaForfragan() {
+async function _skapaForfragan() {
   const namn = val("ff_namn").trim();
   if (!namn) return toast("Ange åtminstone vem offerten ska till", true);
   try {
@@ -2176,7 +2197,7 @@ async function skapaForfragan() {
   }
 }
 
-async function offertTillKund() {
+async function _offertTillKund() {
   const q = S.data.quote;
   const namn = prompt("Vad ska kunden heta i registret?", q.recipient_name || "");
   if (namn === null || !namn.trim()) return;
@@ -2350,6 +2371,55 @@ function kopplaForhand(path) {
     $("#view").appendChild(holder.firstElementChild);
   }
 }
+
+
+/* Spärrar knappen medan anropet pågår. Ett dubbelklick blev annars två
+   sparningar, vilket i värsta fall gav en krock på löpnumret. */
+async function medanSparas(handelse, arbete) {
+  const knapp = handelse && handelse.currentTarget ? handelse.currentTarget : null;
+  const text = knapp ? knapp.textContent : "";
+  if (knapp) {
+    if (knapp.disabled) return;
+    knapp.disabled = true;
+    knapp.textContent = "Sparar…";
+  }
+  try {
+    return await arbete();
+  } finally {
+    if (knapp && document.body.contains(knapp)) {
+      knapp.disabled = false;
+      knapp.textContent = text;
+    }
+  }
+}
+
+/* Enkel spärr för funktioner som anropas utan händelse */
+const pagaende = new Set();
+async function enGang(nyckel, arbete) {
+  if (pagaende.has(nyckel)) return;
+  pagaende.add(nyckel);
+  try {
+    return await arbete();
+  } finally {
+    pagaende.delete(nyckel);
+  }
+}
+
+
+/* Sparfunktionerna körs bara en gång åt gången */
+const saveNewVisit = (...a) => enGang('saveNewVisit', () => _saveNewVisit(...a));
+const sparaNyArtikel = (...a) => enGang('sparaNyArtikel', () => _sparaNyArtikel(...a));
+const skapaForfragan = (...a) => enGang('skapaForfragan', () => _skapaForfragan(...a));
+const saveVisit = (...a) => enGang('saveVisit', () => _saveVisit(...a));
+const sparaOffert = (...a) => enGang('sparaOffert', () => _sparaOffert(...a));
+const sparaOrder = (...a) => enGang('sparaOrder', () => _sparaOrder(...a));
+const laggRad = (...a) => enGang('laggRad', () => _laggRad(...a));
+const convertVisit = (...a) => enGang('convertVisit', () => _convertVisit(...a));
+const offertTillKund = (...a) => enGang('offertTillKund', () => _offertTillKund(...a));
+const skapaOrderFranOffert = (...a) => enGang('skapaOrderFranOffert', () => _skapaOrderFranOffert(...a));
+const genomforSkick = (...a) => enGang('genomforSkick', () => _genomforSkick(...a));
+const saveCustomer = (...a) => enGang('saveCustomer', () => _saveCustomer(...a));
+const nyOrder = (...a) => enGang('nyOrder', () => _nyOrder(...a));
 
 /* ---------------- pengar: gemensamt ---------------- */
 const kr = (v) =>
@@ -2573,7 +2643,7 @@ function artikelVald() {
   $("#ln_enhet").value = o.dataset.enhet || "st";
 }
 
-async function laggRad(malId, typ) {
+async function _laggRad(malId, typ) {
   const body = {
     article_id: val("ln_art") || null,
     name: val("ln_namn").trim(),
@@ -2736,7 +2806,7 @@ async function viewQuote() {
   kopplaForhand(`/api/quotes/${q.id}/pdf`);
 }
 
-async function sparaOffert() {
+async function _sparaOffert() {
   try {
     await api(`/quotes/${S.data.quote.id}`, {
       method: "PATCH",
@@ -2812,7 +2882,7 @@ function skickaOffert() {
     </div></div>`;
 }
 
-async function genomforSkick() {
+async function _genomforSkick() {
   try {
     const r = await api(`/quotes/${S.data.quote.id}/send`, {
       method: "POST",
@@ -2829,7 +2899,7 @@ async function genomforSkick() {
   }
 }
 
-async function skapaOrderFranOffert() {
+async function _skapaOrderFranOffert() {
   const q = S.data.quote;
   try {
     const o = await api("/work-orders", {
@@ -2970,7 +3040,7 @@ async function orderStatus(status) {
   }
 }
 
-async function sparaOrder() {
+async function _sparaOrder() {
   try {
     await api(`/work-orders/${S.data.order.id}`, {
       method: "PATCH",
@@ -3118,6 +3188,7 @@ function artikelFormular(a) {
 function nyArtikel() {
   const box = $("#artform");
   if (box.innerHTML) return (box.innerHTML = "");
+  stangAndraFormular("artform");
   box.innerHTML = `<div class="card" style="margin-bottom:16px;border-color:#C9DFE3">
     <div class="hd" style="background:#F4F9FA"><h2>Ny artikel</h2></div>
     <div class="pad">${artikelFormular(null)}
@@ -3132,7 +3203,7 @@ function nyArtikel() {
   if (f) f.focus();
 }
 
-async function sparaNyArtikel() {
+async function _sparaNyArtikel() {
   if (!val("a_namn").trim()) return toast("Artikeln behöver ett namn", true);
   try {
     await api("/articles", {
@@ -3163,6 +3234,7 @@ function redigeraArtikel(id) {
   const a = (S.data.articles || []).find((x) => x.id === id);
   const box = $("#artform");
   if (!a) return;
+  stangAndraFormular("artform");
   box.innerHTML = `<div class="card" style="margin-bottom:16px;border-color:#C9DFE3">
     <div class="hd" style="background:#F4F9FA"><h2>${esc(a.article_no)} ${esc(a.name)}</h2></div>
     <div class="pad">${artikelFormular(a)}
@@ -3365,7 +3437,20 @@ async function viewMore() {
     <button class="merrad" onclick="logout()">
       <span><strong>Logga ut</strong><span class="m">${esc(S.user.full_name || S.user.username)}</span></span>
       <span class="pil">→</span></button>
-  </div></div>`;
+  </div></div>
+  <p class="hint" id="versionsrad" style="text-align:center;margin-top:14px"></p>`;
+
+  // Versionerna längst ned, så att man kan svara på frågan utan terminal
+  try {
+    const v = await fetch("/api/version", { cache: "no-store" }).then((r) => r.json());
+    const rad = $("#versionsrad");
+    if (rad)
+      rad.innerHTML =
+        v.in_sync === false
+          ? `<span style="color:var(--alert)">Backend ${esc(v.version)}, gränssnitt
+             ${esc(v.ui_version || "okänt")} — inte i takt</span>`
+          : `Version ${esc(v.version)}`;
+  } catch (_) {}
 }
 
 /* ---------------- mitt konto ---------------- */
@@ -3985,7 +4070,7 @@ function editCustomer() {
     </div></div>`;
 }
 
-async function saveCustomer() {
+async function _saveCustomer() {
   if (!val("c_name").trim()) return toast("Kunden behöver ett namn", true);
   try {
     await api(`/customers/${S.data.customer.id}`, {
@@ -5792,17 +5877,24 @@ try {
 (async () => {
   try {
     const r = await fetch("/api/version", { cache: "no-store" });
-    const { version } = await r.json();
+    const { version, ui_version } = await r.json();
     if (version === UI_VERSION) return;
+
+    // Servern läser gränssnittets version från disk. Skiljer den sig från vad
+    // den här sidan kör är det webbläsaren som ligger efter, inte servern.
+    const filenPaDisk = ui_version || "okänd";
+    const bara_cache = filenPaDisk === version;
 
     const bar = document.createElement("div");
     bar.style.cssText =
       "position:fixed;left:0;right:0;top:0;z-index:300;background:#B3801F;color:#fff;" +
       "padding:9px 14px;font:13.5px/1.5 system-ui,sans-serif;text-align:center;" +
       "display:flex;gap:12px;align-items:center;justify-content:center;flex-wrap:wrap";
-    bar.innerHTML =
-      `<span>Servern kör ${esc(version)}, den här sidan är ${UI_VERSION}. ` +
-      `Sidan behöver hämtas om.</span>`;
+    bar.innerHTML = bara_cache
+      ? `<span>Servern och gränssnittet kör ${esc(version)}, men den här fliken
+         har kvar ${UI_VERSION}. Hämta om sidan.</span>`
+      : `<span>Backend kör ${esc(version)}, gränssnittsfilen på servern är
+         ${esc(filenPaDisk)}. Delarna är inte i takt, byt ut båda och bygg om.</span>`;
     const knapp = document.createElement("button");
     knapp.textContent = "Hämta om nu";
     knapp.style.cssText =
