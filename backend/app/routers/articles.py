@@ -4,6 +4,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
+from ..services.numrering import nummerlas_beroende
 from ..models import Article, StockMovement, User
 from ..schemas import iso_utc
 from ..security import current_user, log_action, require_write
@@ -57,15 +58,10 @@ def out(a: Article) -> dict:
 
 
 async def _nasta_nummer(db: AsyncSession, kategori: str = "") -> str:
-    antal = (await db.execute(select(func.count()).select_from(Article))).scalar() or 0
+    from ..services.numrering import nasta_nummer, nummerlas_beroende
+
     prefix = "".join(c for c in (kategori or "ART").upper() if c.isalpha())[:3] or "ART"
-    kandidat = antal + 1
-    while True:
-        nummer = f"{prefix}-{1000 + kandidat}"
-        taget = (await db.execute(select(Article.id).where(Article.article_no == nummer))).first()
-        if not taget:
-            return nummer
-        kandidat += 1
+    return await nasta_nummer(db, Article, Article.article_no, prefix, 1000)
 
 
 @router.get("")
@@ -126,6 +122,7 @@ async def create_article(
     request: Request,
     user: User = Depends(require_write),
     db: AsyncSession = Depends(get_db),
+    _las_=Depends(nummerlas_beroende),
 ):
     if not payload.name.strip():
         raise HTTPException(status_code=400, detail="Artikeln behöver ett namn")

@@ -12,6 +12,7 @@ from ..security import current_user, log_action, require_admin, require_write
 from ..services import sgu
 from ..services.backgrund import slag_upp_adress
 from ..services.geo import parse_coordinates
+from ..services.numrering import nasta_nummer, nummerlas, spara_numrerad, nummerlas_beroende
 
 router = APIRouter(prefix="/api", tags=["besok"])
 
@@ -134,9 +135,7 @@ async def create_visit(
         raise HTTPException(
             status_code=400, detail="Ange åtminstone fastighet, adress eller kontaktperson"
         )
-    antal = (await db.execute(select(func.count()).select_from(Visit))).scalar() or 0
     v = Visit(
-        visit_no=f"BES-{1000 + antal + 1}",
         created_by=user.full_name or user.username,
         **apply_coords(payload.model_dump()),
     )
@@ -144,8 +143,8 @@ async def create_visit(
     # aldrig kan hindra eller fördröja att besöket bokas in.
     if behover_uppslag(v):
         v.geocode_status = "pagar"
-    db.add(v)
-    await db.commit()
+    async with nummerlas():
+        await spara_numrerad(db, v, Visit, Visit.visit_no, "BES")
     await db.refresh(v)
     if v.geocode_status == "pagar":
         bakgrund.add_task(slag_upp_adress, "visit", v.id)
@@ -228,6 +227,7 @@ async def convert_visit(
     request: Request,
     user: User = Depends(require_write),
     db: AsyncSession = Depends(get_db),
+    _las_=Depends(nummerlas_beroende),
 ):
     """Besöket blev affär: skapa kund och första anläggningen av det som redan matats in."""
     v = await get_visit(db, visit_id)

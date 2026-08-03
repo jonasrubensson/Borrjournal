@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..db import get_db
+from ..services.numrering import nummerlas_beroende
 from ..models import (
     Article,
     Customer,
@@ -112,13 +113,9 @@ async def _foretag(db: AsyncSession) -> dict:
 
 
 async def _nasta(db: AsyncSession, model, kolumn, prefix: str) -> str:
-    antal = (await db.execute(select(func.count()).select_from(model))).scalar() or 0
-    kandidat = antal + 1
-    while True:
-        nummer = f"{prefix}-{1000 + kandidat}"
-        if not (await db.execute(select(model.id).where(kolumn == nummer))).first():
-            return nummer
-        kandidat += 1
+    from ..services.numrering import nasta_nummer, nummerlas_beroende
+
+    return await nasta_nummer(db, model, kolumn, prefix, 1000)
 
 
 # ---------------- företagsuppgifter ----------------
@@ -420,6 +417,7 @@ async def create_quote(
     request: Request,
     user: User = Depends(require_write),
     db: AsyncSession = Depends(get_db),
+    _las_=Depends(nummerlas_beroende),
 ):
     """Skapar en offert på en kund eller ett platsbesök."""
     customer_id = payload.get("customer_id")
@@ -594,6 +592,7 @@ async def quote_to_customer(
     request: Request,
     user: User = Depends(require_write),
     db: AsyncSession = Depends(get_db),
+    _las_=Depends(nummerlas_beroende),
 ):
     """Gör en kund av en fristående offert när den lett till affär."""
     from .customers import next_no
@@ -1092,6 +1091,7 @@ async def create_order(
     request: Request,
     user: User = Depends(require_write),
     db: AsyncSession = Depends(get_db),
+    _las_=Depends(nummerlas_beroende),
 ):
     customer_id = payload.get("customer_id")
     if not customer_id:

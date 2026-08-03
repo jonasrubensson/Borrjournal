@@ -13,6 +13,7 @@ from ..schemas import (
 )
 from ..security import current_user, log_action, require_admin, require_write
 from ..services.geo import parse_coordinates
+from ..services.numrering import nasta_nummer, nummerlas, spara_numrerad, nummerlas_beroende
 from ..services.backgrund import slag_upp_adress
 from ..services.reminders import generate_auto
 
@@ -20,14 +21,8 @@ router = APIRouter(prefix="/api", tags=["kunder"])
 
 
 async def next_no(db: AsyncSession, model, column, prefix: str, start: int) -> str:
-    count = (await db.execute(select(func.count()).select_from(model))).scalar() or 0
-    candidate = start + count + 1
-    while True:
-        no = f"{prefix}-{candidate}"
-        taken = (await db.execute(select(model.id).where(column == no))).first()
-        if not taken:
-            return no
-        candidate += 1
+    """Behålls som namn eftersom flera routrar anropar den."""
+    return await nasta_nummer(db, model, column, prefix, start)
 
 
 def apply_coordinates(data: dict) -> dict:
@@ -93,12 +88,9 @@ async def create_customer(
     user: User = Depends(require_write),
     db: AsyncSession = Depends(get_db),
 ):
-    c = Customer(
-        customer_no=await next_no(db, Customer, Customer.customer_no, "K", 1000),
-        **payload.model_dump(),
-    )
-    db.add(c)
-    await db.commit()
+    c = Customer(**payload.model_dump())
+    async with nummerlas():
+        await spara_numrerad(db, c, Customer, Customer.customer_no, "K", 1000)
     await db.refresh(c)
     await log_action(
         db, "CUSTOMER_CREATE", actor=user.username, object_type="customer", object_id=c.id, request=request
@@ -143,6 +135,7 @@ async def create_facility(
     bakgrund: BackgroundTasks,
     user: User = Depends(require_write),
     db: AsyncSession = Depends(get_db),
+    _las_=Depends(nummerlas_beroende),
 ):
     kund = await get_customer(db, customer_id)
     f = Facility(
@@ -281,6 +274,7 @@ async def register_facility(
     bakgrund: BackgroundTasks,
     user: User = Depends(require_write),
     db: AsyncSession = Depends(get_db),
+    _las_=Depends(nummerlas_beroende),
 ):
     """Ett anrop skapar kund (eller återanvänder befintlig), anläggning och första journalraden."""
     if payload.existing_customer_id:
