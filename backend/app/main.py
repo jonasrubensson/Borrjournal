@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, select
 
 from . import scheduler
@@ -115,6 +116,32 @@ app.include_router(articles.router)
 app.include_router(orders.router)
 
 
+@app.exception_handler(IntegrityError)
+async def krock_i_databasen(request, exc):
+    """Ett brutet unikhetskrav är nästan alltid två samtidiga skrivningar.
+
+    Användaren ska få veta att det går att försöka igen, inte ett rått 500.
+    """
+    from fastapi.responses import JSONResponse
+
+    text = str(getattr(exc, "orig", exc))
+    print(f"[borrjournal] databaskrock vid {request.method} {request.url.path}: {text}", flush=True)
+
+    if "UNIQUE constraint" in text or "duplicate key" in text:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": (
+                    "Två sparningar krockade. Försök igen, uppgifterna finns kvar i formuläret."
+                )
+            },
+        )
+    return JSONResponse(
+        status_code=400,
+        content={"detail": "Uppgifterna gick inte att spara: " + text[:200]},
+    )
+
+
 @app.exception_handler(Exception)
 async def ohanterat_fel(request, exc):
     """Loggar hela stackspåret och ger användaren något att hänvisa till.
@@ -166,9 +193,32 @@ async def health():
     return {"status": "ok", "version": APP_VERSION}
 
 
+def las_ui_version() -> str:
+    """Läser versionen ur app.js på disk.
+
+    Gränssnittet monteras in som en katalog och byggs inte in i imagen. Kopierar
+    man bara backendfilerna blir delarna osynkade, och det märks först när någon
+    använder appen. Servern kan se båda och säga till direkt.
+    """
+    import re as _re
+
+    try:
+        with open(os.path.join(FRONTEND_DIR, "app.js"), encoding="utf-8") as fh:
+            borjan = fh.read(4000)
+    except OSError:
+        return ""
+    traff = _re.search(r"UI_VERSION\s*=\s*[\"']([^\"']+)", borjan)
+    return traff.group(1) if traff else ""
+
+
 @app.get("/api/version")
 async def version():
-    return {"version": APP_VERSION}
+    ui = las_ui_version()
+    return {
+        "version": APP_VERSION,
+        "ui_version": ui,
+        "in_sync": (ui == APP_VERSION) if ui else None,
+    }
 
 
 if os.path.isdir(FRONTEND_DIR):
