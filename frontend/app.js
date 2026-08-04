@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "3.5.0";
+const UI_VERSION = "3.6.0";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
@@ -1214,7 +1214,10 @@ async function viewVisit() {
       <div class="fact"><div class="k">Planerat</div><div class="v mono">${esc(v.planned_at || "—")}</div></div>
       <div class="fact"><div class="k">Koordinat</div><div class="v mono" style="font-size:12.5px">${
         v.latitude
-          ? `${v.latitude}, ${v.longitude}`
+          ? `${v.latitude}, ${v.longitude}` +
+            (v.geocode_status === "ungefarlig"
+              ? `<span class="tag soon" style="margin-left:6px">ungefärlig</span>`
+              : "")
           : v.geocode_status === "pagar"
             ? `<span class="muted">hämtas…</span>`
             : "—"
@@ -1258,9 +1261,13 @@ async function viewVisit() {
           <button class="btn ghost sm" onclick="visitPosition()">Hämta min position</button>
           <button class="btn ghost sm" onclick="visitGeocode()">Slå upp adressen igen</button>
           <span class="hint" id="v_coordhint" style="margin:0">${
-            v.latitude
-              ? "Ändrar du adressen och sparar slås koordinaten upp på nytt."
-              : "Saknas. Fyll i adress och spara, eller hämta din position på plats."
+            v.geocode_status === "ungefarlig"
+              ? `<span style="color:var(--brass)">${esc(v.geocode_message || "Ungefärlig koordinat.")}</span>`
+              : v.geocode_status === "misslyckades"
+                ? `<span style="color:var(--alert)">${esc(v.geocode_message || "Uppslaget misslyckades.")}</span>`
+                : v.latitude
+                  ? "Ändrar du adressen och sparar slås koordinaten upp på nytt."
+                  : "Saknas. Fyll i adress och spara, eller hämta din position på plats."
           }</span>
         </div>
         <div class="row" style="margin-top:14px">
@@ -1418,18 +1425,22 @@ async function visitPosition() {
 async function visitGeocode() {
   const hint = $("#v_coordhint");
   // Läs det som står i fälten just nu, så att uppslaget funkar innan man sparat
-  const adress = [val("v_addr2"), val("v_prop2")].filter(Boolean).join(", ");
+  const gata = val("v_addr2");
+  const fastighet = val("v_prop2");
   const kommun = val("v_mun2") || S.data.visit.municipality || "";
-  if (!adress) return toast("Fyll i adress eller fastighetsbeteckning först", true);
+  if (!gata && !fastighet) return toast("Fyll i adress eller fastighetsbeteckning först", true);
+  if (!gata && fastighet && !kommun)
+    return toast("Fyll i kommun också. En fastighetsbeteckning ensam pekar fel.", true);
   hint.textContent = "Slår upp…";
   try {
     const r = await api(
-      `/geocode?q=${encodeURIComponent(adress)}&municipality=${encodeURIComponent(kommun)}`
+      `/geocode?q=${encodeURIComponent(gata)}&municipality=${encodeURIComponent(kommun)}` +
+        `&property_designation=${encodeURIComponent(fastighet)}`
     );
     $("#v_coord").value = `${r.latitude}, ${r.longitude}`;
     hint.innerHTML = r.approximate
-      ? `<span style="color:var(--brass)">Hittade bara ${esc(r.short_label)}, alltså trakten och
-         inte adressen. Justera på plats med Hämta min position.</span>`
+      ? `<span style="color:var(--brass)">Hittade ${esc(r.short_label)}.
+         ${esc(r.warning || "Ungefärlig träff.")} Justera på plats med Hämta min position.</span>`
       : `Hittade ${esc(r.short_label)}. Spara för att uppdatera underlaget.`;
   } catch (e) {
     hint.innerHTML = `<span style="color:var(--alert)">${esc(e.message)}</span>`;
@@ -1490,9 +1501,58 @@ async function loadBriefing(params) {
     return;
   }
 
+  // Koordinaten kan vara på väg. Vänta in den i stället för att visa ett fel.
+  if (b.vantar_koordinat) {
+    box.innerHTML = `<p class="lead" style="margin-top:0">Koordinaten hämtas från adressen just nu.
+      Underlaget om grannbrunnar visas så snart den kommit.</p>
+      <div class="skel"></div>`;
+    setTimeout(() => {
+      if (S.route === "besok" && $("#briefing")) loadBriefing(params);
+    }, 4000);
+    return;
+  }
+
+  // Ingen koordinat alls: uppslaget gav upp eller adressen saknas
+  if (b.geocode_status === "misslyckades" || (b.hint && !("cache_totalt" in b))) {
+    box.innerHTML = `<p class="lead" style="margin-top:0">${esc(b.hint || "Besöket saknar koordinat.")}</p>
+      ${b.geocode_message ? `<p class="hint">${esc(b.geocode_message)}</p>` : ""}
+      <p class="hint">Fyll i koordinaten för hand, eller tryck <strong>Hämta min position</strong>
+        när du står på plats.</p>`;
+    return;
+  }
+
   if (!b.antal) {
+    // Tre helt olika orsaker som förut såg likadana ut
+    if (b.saknar_data) {
+      box.innerHTML = `<p class="lead" style="margin-top:0">
+        <strong>Ingen SGU-data är hämtad än.</strong> Underlaget om grannbrunnar bygger på
+        Brunnsarkivet, och det behöver laddas ner en gång per län.</p>
+        ${
+          S.user.role === "admin"
+            ? `<div class="row"><button class="btn pri sm" onclick="go('admin','sgu')">
+               Hämta län under Inställningar</button></div>`
+            : `<p class="hint">Be en administratör hämta ert län under Inställningar → SGU.</p>`
+        }`;
+      return;
+    }
+    if (b.troligen_fel_lan) {
+      box.innerHTML = `<p class="lead" style="margin-top:0">
+        <strong>Trakten verkar inte vara hämtad.</strong> Närmaste brunn i den nedladdade datan
+        ligger ${b.narmaste_hamtade_km} km bort, vilket brukar betyda att just det här länet
+        saknas.</p>
+        <p class="hint">Hämtade län: ${
+          (b.hamtade_lan || []).map((l) => esc(l.namn)).join(", ") || "inga"
+        }</p>
+        ${
+          S.user.role === "admin"
+            ? `<div class="row"><button class="btn pri sm" onclick="go('admin','sgu')">
+               Hämta fler län</button></div>`
+            : ""
+        }`;
+      return;
+    }
     box.innerHTML = `<p class="lead" style="margin-top:0">Inga registrerade brunnar inom
-      ${b.radius_m} m. Antingen är trakten oborrad, eller så saknas den i Brunnsarkivet.</p>
+      ${b.radius_m} m. Trakten är antingen oborrad, eller så saknas brunnarna i Brunnsarkivet.</p>
       ${radieVal()}`;
     return;
   }
