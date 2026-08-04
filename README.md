@@ -298,6 +298,20 @@ grundvattenkvalitet, men de kommer från miljöövervakningens stationer, inte f
 och säger ingenting om en enskild fastighet. Ett vattenprov på plats är enda vägen, och det står
 också i underlaget så att ingen tror något annat.
 
+### När underlaget är tomt
+
+Tre olika saker kan ligga bakom att inga grannbrunnar visas, och de kräver olika åtgärder:
+
+| Vad appen säger | Vad du gör |
+|---|---|
+| Ingen SGU-data är hämtad än | Inställningar → SGU, kryssa i ert län |
+| Trakten verkar inte vara hämtad | Hämta länet där jobbet ligger |
+| Inga registrerade brunnar inom radien | Ingenting, trakten är oborrad |
+| Koordinaten hämtas | Vänta, underlaget kommer av sig självt |
+
+Strår det att trakten inte verkar vara hämtad visas också hur långt bort närmaste nedladdade
+brunn ligger. Är det tiotals mil har fel län hämtats.
+
 ### Hämta SGU-data
 
 **Inställningar → SGU**: kryssa i de län ni jobbar i, spara. Sedan sköter appen resten. Saknade län
@@ -401,6 +415,25 @@ Sorteringen sätter angelägenhet före avstånd. En försenad service två mil 
 fungerande brunn på samma gata, eftersom det är den avstickaren som faktiskt är värd något.
 Bocka i stoppen och tryck *Öppna rundan i kartan*, så byggs en Google Maps-rutt med din position
 som start och stoppen som delmål (högst tio, det är kartans gräns).
+
+### Fastighetsbeteckningar och adresser är inte samma sak
+
+OpenStreetMap känner inte till svenska fastighetsbeteckningar. "Hasselmusen 2" finns inte i
+deras register, men det kan finnas en plats med liknande namn någon helt annanstans i landet.
+Därför gäller:
+
+* **Beteckning utan kommun slås inte upp alls.** Samma beteckning finns i flera kommuner, och en
+  sökning över hela landet ger inte en osäker träff utan en felaktig som ser riktig ut.
+* **Beteckning med kommun** ger kommunens läge, markerat **ungefärlig**. Det duger för att se
+  vilken trakt det gäller, inte för att peka ut tomten.
+* **Träffar i fel kommun förkastas.** Ligger svaret utanför den kommun du angett är det fel
+  plats, hur bra namnet än matchar, och appen går vidare till nästa formulering.
+
+En ungefärlig koordinat märks ut på besöket och hamnar i systemhändelserna, så att ingen tror
+att den pekar på borrplatsen. **Hämta min position** på plats är alltid det exakta alternativet.
+
+För att få exakta lägen ur en fastighetsbeteckning krävs Lantmäteriets register, som är en
+betaltjänst. Det går att koppla in senare om behovet finns.
 
 ### Koordinater hämtas av sig själva
 
