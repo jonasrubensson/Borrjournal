@@ -275,9 +275,53 @@ async def briefing(
     kapaciteter = [w["vattenmangd"] for w in vatten if w["vattenmangd"]]
     svaga = [v for v in kapaciteter if v < 600]
 
+    # Skilj på "inget borrat här" och "vi har inte hämtat data för trakten".
+    # Utan den skillnaden ser en tom cache ut som en oborrad bygd.
+    from sqlalchemy import func as _func
+
+    totalt = (
+        await db.execute(select(_func.count()).select_from(SguWell))
+    ).scalar() or 0
+
+    narmast_km = None
+    if totalt and not alla:
+        # Hur långt bort ligger närmaste hämtade brunn? Är det tiotals mil
+        # har man hämtat fel län, inte hamnat i en oborrad trakt.
+        n0, e0 = wgs84_to_sweref99tm(lat, lon)
+        rad = (
+            await db.execute(
+                select(SguWell.n, SguWell.e)
+                .where(
+                    SguWell.n.between(n0 - 200000, n0 + 200000),
+                    SguWell.e.between(e0 - 200000, e0 + 200000),
+                )
+                .limit(4000)
+            )
+        ).all()
+        if rad:
+            narmast_km = round(
+                min(math.hypot(r[0] - n0, r[1] - e0) for r in rad) / 1000, 1
+            )
+
+    hamtade_lan = sorted(
+        {
+            r[0]
+            for r in (await db.execute(select(SguWell.lanskod).distinct())).all()
+            if r[0]
+        }
+    )
+
     return {
         "radius_m": radius_m,
         "antal": len(alla),
+        "cache_totalt": totalt,
+        "hamtade_lan": [
+            {"kod": k, "namn": LAN_NAMN.get(k, k)} for k in hamtade_lan
+        ],
+        "narmaste_hamtade_km": narmast_km,
+        "saknar_data": totalt == 0,
+        # Långt till närmaste hämtade brunn betyder nästan alltid fel län
+        "troligen_fel_lan": bool(narmast_km and narmast_km > 40),
         "antal_vattenbrunnar": len(vatten),
         "antal_energibrunnar": len(energi),
         "jorddjup": berg,

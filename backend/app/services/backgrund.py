@@ -34,15 +34,19 @@ async def slag_upp_adress(typ: str, objekt_id: str) -> None:
             await db.commit()
             return
 
+        # Gatuadress och fastighetsbeteckning skickas var för sig. Beteckningar
+        # finns inte i adressregistret och kräver kommun för att inte peka fel.
         if typ == "visit":
-            delar = [obj.address, obj.property_designation]
+            gata = obj.address or ""
+            fastighet = obj.property_designation or ""
             kommun = obj.municipality or ""
         else:
             kund = obj.customer
-            delar = [kund.address, kund.property_designation] if kund else []
+            gata = (kund.address if kund else "") or ""
+            fastighet = (kund.property_designation if kund else "") or ""
             kommun = (kund.municipality if kund else "") or ""
 
-        adress = ", ".join(x for x in delar if x)
+        adress = gata or fastighet
         if not adress:
             obj.geocode_status = ""
             obj.geocode_message = ""
@@ -50,7 +54,7 @@ async def slag_upp_adress(typ: str, objekt_id: str) -> None:
             return
 
         try:
-            hit = await geocode(adress, kommun)
+            hit = await geocode(gata, kommun, fastighet=fastighet)
         except Exception as exc:  # noqa: BLE001
             obj.geocode_status = "misslyckades"
             obj.geocode_message = str(exc)[:255]
@@ -86,10 +90,24 @@ async def slag_upp_adress(typ: str, objekt_id: str) -> None:
         obj.geocode_status = "ungefarlig" if hit.get("approximate") else "klar"
         obj.geocode_message = (
             f"Hittade {hit.get('short_label', '')}."
-            + (
-                " Det är trakten, inte adressen. Justera på plats."
-                if hit.get("approximate")
-                else ""
-            )
+            + (f" {hit['warning']}" if hit.get("warning") else "")
         )[:255]
+
+        # En träff i fel kommun eller på ortnivå är värd en anteckning, annars
+        # tror man att koordinaten pekar på tomten.
+        if hit.get("wrong_municipality") or hit.get("precision") == "kommun":
+            await events.logga(
+                db,
+                level="varning",
+                source="adressuppslag",
+                message=f"Ungefärlig koordinat för {adress}",
+                detail=(
+                    f"{hit.get('warning', '')}\n\nSökningen som gav träff: "
+                    f"{hit.get('query_used', '')}\nTräff: {hit.get('label', '')}\n\n"
+                    "Justera med Hämta min position när du står på plats."
+                ),
+                object_type=typ,
+                object_id=objekt_id,
+                commit=False,
+            )
         await db.commit()
