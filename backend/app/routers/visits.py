@@ -396,10 +396,27 @@ async def sgu_briefing(
         lat, lon = f.latitude, f.longitude
 
     if lat is None or lon is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Saknar koordinat. Fyll i den eller hämta från adressen först.",
-        )
+        # Koordinaten kan vara på väg. Det är inte ett fel, det är ett tillstånd,
+        # och ska inte se ut som att något gått sönder i gränssnittet.
+        status = ""
+        meddelande = ""
+        if visit_id:
+            status = v.geocode_status or ""
+            meddelande = v.geocode_message or ""
+        return {
+            "antal": 0,
+            "radius_m": radius_m,
+            "vantar_koordinat": status == "pagar",
+            "geocode_status": status,
+            "geocode_message": meddelande,
+            "narmaste": [],
+            "kalla": "SGU Brunnsarkivet, CC BY 4.0",
+            "hint": (
+                "Koordinaten hämtas i bakgrunden."
+                if status == "pagar"
+                else "Besöket saknar koordinat. Fyll i adressen eller hämta din position."
+            ),
+        }
     return await sgu.briefing(db, lat, lon, min(radius_m, 5000))
 
 

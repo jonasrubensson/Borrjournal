@@ -266,6 +266,7 @@ async def nearby_facility(
 async def geocode_address(
     q: str,
     municipality: str = "",
+    property_designation: str = "",
     _: User = Depends(current_user),
 ):
     """Slår upp koordinater från en adress eller fastighetsbeteckning."""
@@ -275,7 +276,7 @@ async def geocode_address(
     if not settings.geocoder_url:
         raise HTTPException(status_code=503, detail="Adressuppslag är avstängt på servern")
     try:
-        hit = await geocode(q, municipality)
+        hit = await geocode(q, municipality, fastighet=property_designation or "")
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if not hit:
