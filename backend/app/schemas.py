@@ -191,6 +191,7 @@ def customer_out(c: Customer, facilities: bool = True) -> dict:
         "municipality": c.municipality,
         "notes": c.notes,
         "created_at": iso_utc(c.created_at) if c.created_at else None,
+        "anonymized_at": iso_utc(c.anonymized_at) if c.anonymized_at else None,
     }
     if facilities:
         d["facilities"] = [facility_out(f) for f in c.facilities]

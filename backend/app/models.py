@@ -58,6 +58,11 @@ class Customer(Base):
     address: Mapped[str] = mapped_column(String(200), default="")
     municipality: Mapped[str] = mapped_column(String(80), default="", index=True)
     notes: Mapped[str] = mapped_column(Text, default="")
+    # Anonymiserad enligt GDPR: personuppgifterna borttagna, teknik och
+    # bokföringsunderlag kvar
+    anonymized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
@@ -543,3 +548,21 @@ class SystemEvent(Base):
     reference: Mapped[str] = mapped_column(String(12), default="", index=True)
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
     acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+
+class LoginAttempt(Base):
+    """Varje inloggningsförsök, lyckat som misslyckat.
+
+    Behövs för tre saker: att blockera efter upprepade misslyckanden, att kunna
+    svara på frågan vem som loggat in varifrån, och att se mönster i efterhand.
+    """
+
+    __tablename__ = "login_attempts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    username: Mapped[str] = mapped_column(String(64), default="", index=True)
+    ip: Mapped[str] = mapped_column(String(64), default="", index=True)
+    user_agent: Mapped[str] = mapped_column(String(255), default="")
+    success: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    reason: Mapped[str] = mapped_column(String(60), default="")
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)

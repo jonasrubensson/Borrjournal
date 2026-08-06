@@ -20,6 +20,7 @@ from .routers import (
     backups,
     customers,
     files,
+    gallring,
     journal,
     nearby,
     orders,
@@ -114,6 +115,7 @@ app.include_router(nearby.router)
 app.include_router(visits.router)
 app.include_router(articles.router)
 app.include_router(orders.router)
+app.include_router(gallring.router)
 
 
 @app.exception_handler(IntegrityError)
@@ -267,10 +269,50 @@ if os.path.isdir(FRONTEND_DIR):
             from fastapi import HTTPException
 
             raise HTTPException(status_code=404, detail="Okänd endpoint")
-        candidate = os.path.join(FRONTEND_DIR, path)
-        if path and os.path.isfile(candidate):
-            return FileResponse(candidate)
+        # Sökvägen kommer från klienten och får aldrig leda utanför frontend-
+        # katalogen. Utan den här kontrollen kunde /../../etc/passwd läsas.
+        rot = os.path.realpath(FRONTEND_DIR)
+        kandidat = os.path.realpath(os.path.join(rot, path.lstrip("/")))
+        if (
+            path
+            and (kandidat == rot or kandidat.startswith(rot + os.sep))
+            and os.path.isfile(kandidat)
+        ):
+            return FileResponse(kandidat)
         return HTMLResponse(_las_index(), headers=INGEN_CACHE)
+
+
+@app.middleware("http")
+async def sakerhetsheaders(request, call_next):
+    """Sätts i appen och inte bara i nginx.
+
+    Proxyn kan konfigureras om, bytas ut eller kringgås vid felsökning. Headers
+    som skyddar användaren hör hemma där svaret skapas.
+    """
+    svar = await call_next(request)
+    svar.headers.setdefault("X-Content-Type-Options", "nosniff")
+    svar.headers.setdefault("X-Frame-Options", "DENY")
+    svar.headers.setdefault("Referrer-Policy", "no-referrer")
+    svar.headers.setdefault(
+        "Permissions-Policy",
+        "geolocation=(self), camera=(self), microphone=(), payment=(), usb=()",
+    )
+    # Allt laddas från samma ursprung. Inga externa skript, inga inline-eval.
+    svar.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "font-src 'self'; "
+        "connect-src 'self'; "
+        "frame-src 'self' blob:; "
+        "object-src 'none'; "
+        "base-uri 'none'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'",
+    )
+    return svar
 
 
 @app.middleware("http")
