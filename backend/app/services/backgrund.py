@@ -83,6 +83,32 @@ async def slag_upp_adress(typ: str, objekt_id: str) -> None:
             await db.commit()
             return
 
+        # Brunnsarkivet känner fastighetsbeteckningar, det gör inte adressregistret.
+        # Finns det redan en brunn på fastigheten ligger den på tomten, vilket är
+        # oändligt mycket bättre än ortens mittpunkt.
+        if fastighet and hit.get("approximate"):
+            from .sgu import sok_fastighet
+
+            traff = await sok_fastighet(
+                db, fastighet, hit["latitude"], hit["longitude"], radie_km=40
+            )
+            if traff:
+                obj.latitude = traff["latitude"]
+                obj.longitude = traff["longitude"]
+                if not obj.coordinates:
+                    obj.coordinates = f"{traff['latitude']}, {traff['longitude']}"
+                obj.geocode_status = "klar" if traff["exakt_beteckning"] else "ungefarlig"
+                obj.geocode_message = (
+                    f"Hittad i Brunnsarkivet: {traff['fastighet']}"
+                    + (f", {traff['ort']}" if traff["ort"] else "")
+                    + f". {traff['antal_brunnar']} registrerad"
+                    + ("e brunnar" if traff["antal_brunnar"] > 1 else " brunn")
+                    + " på fastigheten."
+                    + ("" if traff["exakt_beteckning"] else " Matchar traktnamnet, inte hela beteckningen.")
+                )[:255]
+                await db.commit()
+                return
+
         obj.latitude = hit["latitude"]
         obj.longitude = hit["longitude"]
         if not obj.coordinates:

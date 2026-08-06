@@ -258,6 +258,89 @@ def _sammanfatta(varden: list[float]) -> dict | None:
     }
 
 
+def normalisera_beteckning(text: str) -> str:
+    """Gör beteckningar jämförbara: versaler, ett mellanslag, inget skräp.
+
+    SGU skriver dem som "VÄSSLAN 3:14". Folk skriver "Vässlan 3:14",
+    "vasslan 3: 14" eller bara "Vässlan 3".
+    """
+    rent = " ".join((text or "").upper().split())
+    rent = rent.replace(" :", ":").replace(": ", ":")
+    return rent.strip()
+
+
+def _namndel(beteckning: str) -> str:
+    """Traktnamnet utan blocknummer, alltså VÄSSLAN ur VÄSSLAN 3:14."""
+    delar = normalisera_beteckning(beteckning).split()
+    return delar[0] if delar else ""
+
+
+async def sok_fastighet(
+    db: AsyncSession,
+    beteckning: str,
+    nara_lat: float | None = None,
+    nara_lon: float | None = None,
+    radie_km: float = 40,
+) -> dict | None:
+    """Letar upp en fastighet i Brunnsarkivet och ger dess läge.
+
+    Brunnsarkivet innehåller fastighetsbeteckningen för varje registrerad brunn.
+    Finns det redan en brunn på fastigheten är dess koordinat vida mycket bättre
+    än ortens mittpunkt, för den ligger på tomten.
+
+    Samma beteckning förekommer i flera kommuner, därför krävs en ungefärlig
+    utgångspunkt att söka runt. Den kommer från kommunuppslaget.
+    """
+    sokt = normalisera_beteckning(beteckning)
+    if len(sokt) < 3:
+        return None
+
+    stmt = select(SguWell).where(SguWell.fastighet != "")
+    if nara_lat is not None and nara_lon is not None:
+        n0, e0 = wgs84_to_sweref99tm(nara_lat, nara_lon)
+        meter = radie_km * 1000
+        stmt = stmt.where(
+            SguWell.n.between(n0 - meter, n0 + meter),
+            SguWell.e.between(e0 - meter, e0 + meter),
+        )
+    rader = (await db.execute(stmt.limit(60000))).scalars().all()
+    if not rader:
+        return None
+
+    exakta = []
+    ungefarliga = []
+    namn_sokt = _namndel(sokt)
+    for w in rader:
+        varde = normalisera_beteckning(w.fastighet)
+        if varde == sokt:
+            exakta.append(w)
+        elif namn_sokt and len(namn_sokt) >= 4 and _namndel(varde) == namn_sokt:
+            ungefarliga.append(w)
+
+    traffar = exakta or ungefarliga
+    if not traffar:
+        return None
+
+    # Ligger träffarna långt isär är beteckningen tvetydig och duger inte
+    n_medel = sum(w.n for w in traffar) / len(traffar)
+    e_medel = sum(w.e for w in traffar) / len(traffar)
+    spridning = max(math.hypot(w.n - n_medel, w.e - e_medel) for w in traffar)
+    if spridning > 3000:
+        return None
+
+    lat, lon = sweref99tm_to_wgs84(n_medel, e_medel)
+    return {
+        "latitude": round(lat, 6),
+        "longitude": round(lon, 6),
+        "antal_brunnar": len(traffar),
+        "exakt_beteckning": bool(exakta),
+        "spridning_m": round(spridning),
+        "fastighet": traffar[0].fastighet,
+        "ort": traffar[0].ort,
+        "source": "sgu",
+    }
+
+
 async def briefing(
     db: AsyncSession, lat: float, lon: float, radius_m: float = 1000
 ) -> dict:
@@ -267,6 +350,9 @@ async def briefing(
     energi = [w for w in alla if w["anvandning"] == "ENE"]
 
     berg = _sammanfatta([w["djup_till_berg"] for w in alla])
+    # Foderrörslängd är det som avgör priset mest, och det är grannarnas verkliga
+    # längder som betyder något, inte en uppskattning ur jorddjupet.
+    foderror = _sammanfatta([w["foderror_till"] for w in alla])
     djup_vatten = _sammanfatta([w["totaldjup"] for w in vatten])
     djup_energi = _sammanfatta([w["totaldjup"] for w in energi])
     kapacitet = _sammanfatta([w["vattenmangd"] for w in vatten])
@@ -274,6 +360,19 @@ async def briefing(
 
     kapaciteter = [w["vattenmangd"] for w in vatten if w["vattenmangd"]]
     svaga = [v for v in kapaciteter if v < 600]
+
+    # Vilken granne krävde mest foderrör, och var ligger den?
+    varsta_foderror = None
+    med_foderror = [w for w in alla if w["foderror_till"]]
+    if med_foderror:
+        varsta = max(med_foderror, key=lambda w: w["foderror_till"])
+        varsta_foderror = {
+            "meter": varsta["foderror_till"],
+            "avstand_m": varsta["avstand_m"],
+            "fastighet": varsta["fastighet"],
+            "borrdatum": varsta["borrdatum"],
+            "djup_till_berg": varsta["djup_till_berg"],
+        }
 
     # Skilj på "inget borrat här" och "vi har inte hämtat data för trakten".
     # Utan den skillnaden ser en tom cache ut som en oborrad bygd.
@@ -325,11 +424,13 @@ async def briefing(
         "antal_vattenbrunnar": len(vatten),
         "antal_energibrunnar": len(energi),
         "jorddjup": berg,
+        "foderror": foderror,
         "borrdjup_vatten": djup_vatten,
         "borrdjup_energi": djup_energi,
         "kapacitet": kapacitet,
         "grundvattenniva": niva,
         "svag_kapacitet_andel": round(100 * len(svaga) / len(kapaciteter)) if kapaciteter else None,
+        "varsta_foderror": varsta_foderror,
         "narmaste": alla[:12],
         "kalla": "SGU Brunnsarkivet, CC BY 4.0",
         "vattenkvalitet": (
