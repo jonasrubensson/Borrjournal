@@ -285,6 +285,8 @@ rent från folk som aldrig blev kunder.
 
 * hur djupt till berg grannarna hade, som spann och median
 * hur djupt de borrade, uppdelat på vatten- och energibrunnar
+* hur mycket foderrör grannarna faktiskt använde, som spänn och median, samt vilken granne
+  som krävde mest och hur långt bort den ligger
 * vilken kapacitet de fick, och hur stor andel som ligger under 600 l/h
 * grundvattennivå, samt en lista på de närmaste brunnarna med avstånd
 
@@ -742,6 +744,39 @@ ett dubbelklick räckte för att utlösa det. Tilldelning och skrivning sker dä
 steg, och blir numret ändå upptaget tas nästa lediga automatiskt. Sparaknapparna spärras också
 medan anropet pågår, så att ett dubbelklick blir en sparning och inte två.
 
+## Inaktiva kunder och gallring
+
+**Mer, Inaktiva kunder och gallring.** Två frågor med olika syfte i samma vy.
+
+### Inaktiva
+
+Kunder som inte hört av sig på den tid du väljer, 12 till 60 månader, med den tystaste först.
+Senaste aktiviteten räknas från journal, arbetsorder, offert eller besök, vilket som är senast.
+
+### Gallring
+
+Personuppgifter får inte sparas längre än nödvändigt. Samtidigt kräver bokföringslagen att
+underlag för fakturerade arbeten sparas i sju år efter räkenskapsårets slut. Kraven krockar, och
+appen löser det med två olika åtgärder:
+
+| Åtgärd | Vad som händer | När |
+|---|---|---|
+| **Anonymisera** | Namn, kontaktuppgifter, journaltexter och foton tas bort. Kundnummer,
+anläggningar och fakturor står kvar | När kunden har fakturerade arbeten inom bokföringstiden |
+| **Radera** | Allt försvinner: anläggningar, journal, filer, offerter, order | När inget
+bokföringsunderlag finns kvar |
+
+Appen räknar själv ut vilken som gäller och **vägrar radera** en kund vars bokföringstid inte gått
+ut. Du får veta vilka som hindrades och till när de är bundna. Båda åtgärderna loggas i
+händelseloggen med vem som gjorde vad.
+
+Anonymisering tar även bort uppladdade filer från disken, inte bara posterna i databasen.
+Journalraderna behålls som spår men texten ersätts, eftersom en anteckning kan innehålla namn och
+telefonnummer.
+
+Detta är hjälp att hålla ordning, inte juridisk rådgivning. Vilka gallringstider som gäller för
+just er verksamhet får ni stämma av själva.
+
 ## Uppdatera
 
 ```bash
@@ -800,6 +835,74 @@ git add -A && git commit -m "version x.y.z" && git push
 ```
 
 `--exclude .env` är det viktiga: annars skrivs hemligheterna över.
+
+## Säkerhet
+
+### Vad appen gör själv
+
+| Skydd | Hur |
+|---|---|
+| Lösenord | bcrypt, aldrig i klartext |
+| Sessioner | signerad JWT, manipulerad eller osignerad token avvisas |
+| Databasfrågor | enbart via SQLAlchemy, inga strängbyggda frågor |
+| Filer | lagras med slumpade namn, sokvägar valideras mot rotkatalogen |
+| Headers | CSP, nosniff, DENY i ram, ingen referrer, begränsade behörigheter |
+| Inloggning | spärr efter upprepade misslyckanden, per konto och per IP |
+| Aviseringar | administratörer meddelas om inloggningar och spärrar |
+
+Alla API-vägar kräver inloggning utom fyra: `/api/login`, `/api/health`, `/api/version` och
+`/api/company/logo`, den sista för att logotypen ska synas på inloggningssidan.
+
+### Inloggningar och spärr
+
+**Inställningar → Inloggningar** visar vem som loggat in varifrån och vilka försök som
+misslyckats, med tid, konto, IP och webbläsare.
+
+Efter ett inställbart antal misslyckade försök spärras både kontot och IP-adressen en stund.
+Spärren är tidsbegränsad med flit: en permanent spärr gör att den som gissar kan låsa ute den
+riktiga användaren, vilket är ett angrepp i sig. En administratör kan häva spärren direkt.
+
+Administratörer får e-post vid inloggning och push när ett konto används från en adress det
+inte använt förut. Bara nya adresser ger push, annars blir det brus.
+
+### Att nå appen förbi inloggningen
+
+Den verkliga risken är inte att gissa sig förbi inloggningsrutan, utan att nå appen utan att
+passera proxyn. Därför lyssnar containern som standard bara på `127.0.0.1`:
+
+```
+APP_BIND=127.0.0.1
+```
+
+Med den inställningen är appen onåbar från nätverket och enda vägen in går via nginx, som
+kräver klientcertifikat. Sätter du `0.0.0.0` är både mTLS och certifikatkravet verkningslösa,
+hur väl proxyn än är konfigurerad. Kontrollera med `ss -tlnp | grep 8000`.
+
+Själva API:et kräver token oavsett, så ett direktanrop till port 8000 ger 401. Men då är
+lösenordet det enda som står kvar, i stället för lösenord plus certifikat.
+
+### Nginx
+
+Se `nginx-exempel.conf`. Tre saker behöver göras där, resten sköter appen:
+
+1. **HSTS**, som bara kan sättas av den som terminerar TLS
+2. **X-Forwarded-For**, annars loggas proxyns IP i stället för besökarens
+3. **Gränser**, `client_max_body_size 50m` för foton och `proxy_read_timeout 300s` för
+   SGU-hämtning och backup
+
+Sätt inte CSP eller X-Frame-Options i nginx. Appen sätter dem redan, och två olika värden på
+samma header ger oförutsägbart resultat.
+
+Glöm inte spärrlistan (`ssl_crl`) för klientcertifikaten. Utan den fortsätter ett borttappat
+certifikat att fungera tills det går ut.
+
+### Kvarstående risker
+
+* **Token i webbläsarens lagring.** Ett skript som lyckas köra på sidan kommer åt den. CSP:n
+  tillåter inga externa skript, vilket är huvudskyddet.
+* **X-Forwarded-For går att förfalska** om appen nås direkt. Den används till loggning och grov
+  spärr, aldrig till åtkomstkontroll.
+* **Backuper innehåller allt.** Ligger de på en nätverksdisk är den lika känslig som appen.
 
 ## Att veta om driften
 
