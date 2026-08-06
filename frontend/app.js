@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "3.9.0";
+const UI_VERSION = "3.9.1";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
