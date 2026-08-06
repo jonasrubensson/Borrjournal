@@ -846,12 +846,21 @@ git add -A && git commit -m "version x.y.z" && git push
 | Sessioner | signerad JWT, manipulerad eller osignerad token avvisas |
 | Databasfrågor | enbart via SQLAlchemy, inga strängbyggda frågor |
 | Filer | lagras med slumpade namn, sokvägar valideras mot rotkatalogen |
-| Headers | CSP, nosniff, DENY i ram, ingen referrer, begränsade behörigheter |
+| Headers | CSP utan externa källor, nosniff, DENY i ram, ingen referrer |
 | Inloggning | spärr efter upprepade misslyckanden, per konto och per IP |
 | Aviseringar | administratörer meddelas om inloggningar och spärrar |
 
 Alla API-vägar kräver inloggning utom fyra: `/api/login`, `/api/health`, `/api/version` och
 `/api/company/logo`, den sista för att logotypen ska synas på inloggningssidan.
+
+
+### Om CSP och inline-hanterare
+
+Policyn tillåter `'unsafe-inline'` för skript. Det är ett medvetet val: gränssnittet bygger på
+234 `onclick`-attribut, och utan det slutar varje knapp i appen att fungera. Skyddet mot
+inskjuten kod vilar därför på två andra saker: all text som skrivs ut escapas, och inga externa
+källor är tillåtna. Vill man skruva åt det ytterligare behöver hanterarna flyttas till
+`addEventListener`, vilket är ett större arbete än det låter.
 
 ### Inloggningar och spärr
 
@@ -868,18 +877,36 @@ inte använt förut. Bara nya adresser ger push, annars blir det brus.
 ### Att nå appen förbi inloggningen
 
 Den verkliga risken är inte att gissa sig förbi inloggningsrutan, utan att nå appen utan att
-passera proxyn. Därför lyssnar containern som standard bara på `127.0.0.1`:
+passera proxyn. API:et kräver token oavsett, så ett direktanrop ger 401, men då är lösenordet
+det enda som står kvar i stället för lösenord plus klientcertifikat.
 
+Standard är `APP_BIND=0.0.0.0` eftersom nginx i en egen container inte når `127.0.0.1` på
+värden. Tre sätt att täppa till hålet, bäst först:
+
+**1. Ingen publicerad port alls.** Kör appen på samma dockernätverk som nginx och peka proxyn
+mot containernamnet. Då finns porten inte utanför nätverket över huvud taget.
+
+```yaml
+    # ta bort hela ports-blocket och lägg till:
+    networks: [proxy]
+
+networks:
+  proxy:
+    external: true
+    name: nginxproxymanager_default   # kontrollera med docker network ls
 ```
-APP_BIND=127.0.0.1
+
+I proxyn pekar du då mot `borrjournal-app` port `8000` i stället för en IP.
+
+**2. Brandvägg.** Behåll porten men släpp bara in dockervärden:
+
+```bash
+sudo ufw deny 8000/tcp
 ```
 
-Med den inställningen är appen onåbar från nätverket och enda vägen in går via nginx, som
-kräver klientcertifikat. Sätter du `0.0.0.0` är både mTLS och certifikatkravet verkningslösa,
-hur väl proxyn än är konfigurerad. Kontrollera med `ss -tlnp | grep 8000`.
+**3. Kör nginx direkt på värden**, inte i container, och sätt `APP_BIND=127.0.0.1`.
 
-Själva API:et kräver token oavsett, så ett direktanrop till port 8000 ger 401. Men då är
-lösenordet det enda som står kvar, i stället för lösenord plus certifikat.
+Kontrollera resultatet utifrån: `curl http://din-server:8000/api/health` ska inte svara.
 
 ### Nginx
 
