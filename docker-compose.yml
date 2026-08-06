@@ -23,9 +23,10 @@ services:
       - data:/data
       - ./frontend:/app/frontend:ro
     ports:
-      # Bara nåbar från värden, alltså via nginx. Binder man till 0.0.0.0 går
-      # appen att nå direkt från nätverket, förbi proxyn och därmed förbi mTLS.
-      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8000}:8000"
+      # Kör nginx i en egen container når den inte 127.0.0.1 på värden, därför
+      # är 0.0.0.0 standard. Se avsnittet Säkerhet i README för hur du stänger
+      # porten mot omvärlden utan att bryta proxyn.
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
       interval: 30s
