@@ -569,6 +569,21 @@ async def share(
                     f"  Jorddjup: {b['jorddjup']['min']}–{b['jorddjup']['max']} m, "
                     f"median {b['jorddjup']['median']} m"
                 )
+            if b.get("foderror"):
+                f = b["foderror"]
+                rader.append(
+                    f"  Foderrör hos grannarna: {f['min']}–{f['max']} m, "
+                    f"median {f['median']} m ({f['antal']} brunnar)"
+                )
+            if b.get("varsta_foderror"):
+                v_ = b["varsta_foderror"]
+                rader.append(
+                    f"  Mest foderrör i området: {v_['meter']} m"
+                    + (f" ({v_['fastighet']}" if v_["fastighet"] else " (")
+                    + f", {v_['avstand_m']} m härifrån"
+                    + (f", borrad {v_['borrdatum']}" if v_["borrdatum"] else "")
+                    + ")"
+                )
             if b["borrdjup_vatten"]:
                 rader.append(
                     f"  Borrdjup vattenbrunnar: {b['borrdjup_vatten']['min']}–"

@@ -24,6 +24,27 @@ router = APIRouter(prefix="/api", tags=["auth"])
 
 @router.post("/login")
 async def login(payload: LoginIn, request: Request, db: AsyncSession = Depends(get_db)):
+    from ..services import inloggning
+
+    ip = inloggning.klient_ip(request)
+    webblasare = request.headers.get("user-agent", "") if request else ""
+    conf = await inloggning.installningar(db)
+
+    sparrad, kvar = await inloggning.ar_sparrad(db, payload.username, ip)
+    if sparrad:
+        await inloggning.notera(
+            db, username=payload.username, ip=ip, user_agent=webblasare,
+            success=False, reason="spärrad",
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"För många misslyckade försök. Försök igen om "
+                f"{max(1, kvar // 60)} minuter."
+            ),
+            headers={"Retry-After": str(max(1, kvar))},
+        )
+
     user = (
         await db.execute(
             select(User).where(
@@ -32,26 +53,49 @@ async def login(payload: LoginIn, request: Request, db: AsyncSession = Depends(g
         )
     ).scalar_one_or_none()
 
-    if user is None or not verify_password(payload.password, user.hashed_password):
-        await log_action(
-            db, "LOGIN_FAIL", actor=payload.username, request=request, detail="fel användare eller lösenord"
+    async def misslyckat(anledning: str, status: int = 401, meddelande: str = ""):
+        await inloggning.notera(
+            db, username=payload.username, ip=ip, user_agent=webblasare,
+            success=False, reason=anledning,
         )
-        raise HTTPException(status_code=401, detail="Fel användarnamn eller lösenord")
+        await log_action(
+            db, "LOGIN_FAIL", actor=payload.username, request=request, detail=anledning
+        )
+        # Nådde vi gränsen med det här försöket är det värt att säga till
+        nu_sparrad, _ = await inloggning.ar_sparrad(db, payload.username, ip)
+        if nu_sparrad:
+            await inloggning.avisera_sparr(
+                db, username=payload.username, ip=ip, antal=int(conf["max_forsok"])
+            )
+        raise HTTPException(
+            status_code=status, detail=meddelande or "Fel användarnamn eller lösenord"
+        )
+
+    if user is None or not verify_password(payload.password, user.hashed_password):
+        # Samma svar oavsett om kontot finns, annars går det att kartlägga vilka
+        # användarnamn som existerar
+        await misslyckat("fel användare eller lösenord")
 
     if not user.is_active:
-        raise HTTPException(status_code=403, detail="Kontot är avstängt")
+        await misslyckat("kontot avstängt", 403, "Kontot är avstängt")
 
     if user.totp_enabled and user.totp_secret:
         if not payload.totp_code:
             # Klienten vet då att den ska visa fältet för engångskod
             raise HTTPException(status_code=428, detail="Engångskod krävs")
         if not pyotp.TOTP(user.totp_secret).verify(payload.totp_code, valid_window=1):
-            await log_action(db, "LOGIN_FAIL", actor=user.username, request=request, detail="fel engångskod")
-            raise HTTPException(status_code=401, detail="Fel engångskod")
+            await misslyckat("fel engångskod", 401, "Fel engångskod")
 
+    ny_plats = not await inloggning.kand_plats(db, user.username, ip)
     user.last_login = datetime.now(timezone.utc)
     await db.commit()
+    await inloggning.notera(
+        db, username=user.username, ip=ip, user_agent=webblasare, success=True
+    )
     await log_action(db, "LOGIN", actor=user.username, request=request)
+    await inloggning.avisera_inloggning(
+        db, user=user, ip=ip, user_agent=webblasare, ny_plats=ny_plats
+    )
     return {
         "token": create_token(user),
         "user": user_out(user),
@@ -315,3 +359,91 @@ async def audit(
         }
         for r in rows
     ]
+
+
+
+@router.get("/login-attempts")
+async def login_attempts(
+    limit: int = 60,
+    only_failed: bool = False,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Vem har loggat in varifrån, och vilka försök har misslyckats."""
+    from ..models import LoginAttempt
+    from ..services.inloggning import installningar
+
+    stmt = select(LoginAttempt).order_by(LoginAttempt.at.desc()).limit(min(limit, 300))
+    if only_failed:
+        stmt = stmt.where(LoginAttempt.success.is_(False))
+    rader = (await db.execute(stmt)).scalars().all()
+    return {
+        "settings": await installningar(db),
+        "attempts": [
+            {
+                "id": r.id,
+                "username": r.username,
+                "ip": r.ip,
+                "user_agent": r.user_agent,
+                "success": r.success,
+                "reason": r.reason,
+                "at": iso_utc(r.at),
+            }
+            for r in rader
+        ],
+    }
+
+
+@router.put("/login-settings")
+async def login_settings(
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from ..services.inloggning import NYCKEL, STANDARD, installningar
+    from ..services.notify import save_setting
+
+    conf = await installningar(db)
+    for nyckel in STANDARD:
+        if nyckel in payload:
+            if isinstance(STANDARD[nyckel], bool):
+                conf[nyckel] = bool(payload[nyckel])
+            else:
+                conf[nyckel] = max(1, min(9999, int(payload[nyckel])))
+    await save_setting(db, NYCKEL, conf)
+    await log_action(db, "LOGIN_SETTINGS", actor=user.username, request=request)
+    return conf
+
+
+@router.post("/login-attempts/clear")
+async def clear_block(
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Häver en spärr, till exempel när någon glömt sitt lösenord."""
+    from sqlalchemy import delete as _delete
+
+    from ..models import LoginAttempt
+
+    villkor = []
+    if payload.get("username"):
+        villkor.append(LoginAttempt.username == payload["username"])
+    if payload.get("ip"):
+        villkor.append(LoginAttempt.ip == payload["ip"])
+    if not villkor:
+        raise HTTPException(status_code=400, detail="Ange användarnamn eller IP-adress")
+
+    from sqlalchemy import or_ as _or
+
+    resultat = await db.execute(
+        _delete(LoginAttempt).where(_or(*villkor), LoginAttempt.success.is_(False))
+    )
+    await db.commit()
+    await log_action(
+        db, "LOGIN_UNBLOCK", actor=user.username, request=request,
+        detail=str(payload.get("username") or payload.get("ip")),
+    )
+    return {"rensade": resultat.rowcount or 0}
