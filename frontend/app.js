@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "3.6.0";
+const UI_VERSION = "3.9.0";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
@@ -119,6 +119,7 @@ const MER_POSTER = [
   ["nara", "Jobb i närheten", "Vad som ligger runt omkring"],
   ["ny", "Registrera anläggning", "Ny brunn eller pump"],
   ["konto", "Mitt konto", "Lösenord, tvåfaktor, textstorlek"],
+  ["gallring", "Inaktiva kunder och gallring", "Vem har varit tyst, vad ska rensas"],
   ["handelser", "Systemhändelser", "Fel i bakgrunden"],
 ];
 
@@ -133,6 +134,7 @@ function applyHash() {
   S.route = parts[0] || "oversikt";
   S.id = parts[1] || null;
   if (S.route === "kund") S.tab = parts[2] || "oversikt";
+  else if (S.route === "gallring") S.tab = parts[1] || "inaktiva";
   if (S.route === "admin") S.tab = parts[1] || "konton";
   if (S.route === "ny" && !S.id) S.step = S.step || 0;
   window.scrollTo(0, 0);
@@ -1565,6 +1567,7 @@ async function loadBriefing(params) {
 
   <div class="facts" style="border-top:none;padding-top:4px;grid-template-columns:1fr 1fr">
     <div class="fact"><div class="k">Berg på</div><div class="v">${spann(b.jorddjup, "m")}</div></div>
+    <div class="fact"><div class="k">Foderrör hos grannarna</div><div class="v">${spann(b.foderror, "m")}</div></div>
     <div class="fact"><div class="k">Borrdjup, vatten</div><div class="v">${spann(b.borrdjup_vatten, "m")}</div></div>
     <div class="fact"><div class="k">Kapacitet</div><div class="v">${spann(b.kapacitet, "l/h")}</div></div>
     <div class="fact"><div class="k">Grundvattennivå</div><div class="v">${spann(b.grundvattenniva, "m")}</div></div>
@@ -1584,10 +1587,27 @@ async function loadBriefing(params) {
   ${
     b.jorddjup && b.borrdjup_vatten
       ? `<p class="lead" style="margin-top:14px;padding:12px;background:#F4F9FA;border-radius:3px">
-         Att räkna med: <strong>foderrör kring ${Math.ceil(b.jorddjup.median) + 2} m</strong>
-         (grannarnas jorddjup ${b.jorddjup.min}–${b.jorddjup.max} m plus marginal ner i berg),
+         Att räkna med: <strong>foderrör ${
+           b.foderror
+             ? `omkring ${Math.round(b.foderror.median)} m, men räkna med upp till ${b.foderror.max} m`
+             : `kring ${Math.ceil(b.jorddjup.median) + 2} m`
+         }</strong>${
+           b.foderror
+             ? " (grannarnas verkliga längder)"
+             : ` (uppskattat ur jorddjupet ${b.jorddjup.min}–${b.jorddjup.max} m)`
+         },
          och <strong>borrdjup omkring ${Math.round(b.borrdjup_vatten.median)} m</strong>.
-         ${svag >= 30 ? "Var beredd på svag kapacitet, flera grannar ligger under 600 l/h." : ""}</p>`
+         ${svag >= 30 ? "Var beredd på svag kapacitet, flera grannar ligger under 600 l/h." : ""}</p>
+         ${
+           b.varsta_foderror
+             ? `<p class="hint" style="margin-top:6px">Mest foderrör i området:
+                <strong>${b.varsta_foderror.meter} m</strong>${
+                  b.varsta_foderror.fastighet ? ` på ${esc(b.varsta_foderror.fastighet)}` : ""
+                }, ${b.varsta_foderror.avstand_m} m härifrån${
+                  b.varsta_foderror.borrdatum ? `, borrad ${esc(b.varsta_foderror.borrdatum)}` : ""
+                }. Den siffran är värd att ta höjd för i offerten.</p>`
+             : ""
+         }`
       : ""
   }
 
@@ -1595,13 +1615,14 @@ async function loadBriefing(params) {
     <summary style="cursor:pointer;font-family:var(--cond);text-transform:uppercase;
       letter-spacing:.05em;font-weight:600">Närmaste brunnarna</summary>
     <table style="margin-top:10px"><thead><tr><th>Avstånd</th><th>Borrad</th><th>Djup</th>
-      <th>Berg</th><th>Kapacitet</th><th>Typ</th></tr></thead>
+      <th>Berg</th><th>Foderrör</th><th>Kapacitet</th><th>Typ</th></tr></thead>
       <tbody>${b.narmaste
         .map(
           (w) => `<tr><td data-l="Avstånd" class="tid">${w.avstand_m} m</td>
         <td data-l="Borrad" class="tid">${esc(w.borrdatum || "—")}</td>
         <td data-l="Djup" class="tid">${w.totaldjup ?? "—"} m</td>
         <td data-l="Berg" class="tid">${w.djup_till_berg ?? "—"} m</td>
+        <td data-l="Foderrör" class="tid">${w.foderror_till ?? "—"} m</td>
         <td data-l="Kapacitet" class="tid">${w.vattenmangd ?? "—"} l/h</td>
         <td data-l="Typ">${esc(w.anvandning_text)}</td></tr>`
         )
@@ -2275,6 +2296,265 @@ async function _offertTillKund() {
   }
 }
 
+
+
+/* ---------------- inaktiva kunder och gallring ---------------- */
+/* Två frågor med olika syfte i samma vy: vem borde jag ringa, och vad måste
+   rensas bort. Den senare krockar med bokföringslagen, därför finns
+   anonymisering vid sidan av radering. */
+async function viewGallring() {
+  const token = claim();
+  mountShell(`<div class="skel" style="width:30%"></div><div class="skel"></div>`);
+  const manader = S.filter.inaktivManader ?? 24;
+  const ar = S.filter.gallringAr ?? 7;
+  const d = await api(`/gallring/review?inactive_months=${manader}&retention_years=${ar}`);
+  if (!current(token)) return;
+  S.data.gallring = d;
+  const flik = S.tab === "gallring" ? "gallring" : "inaktiva";
+  const admin = S.user.role === "admin";
+
+  const rad = (k, medKryss) => `
+    <div class="filerow">
+      ${
+        medKryss
+          ? `<input type="checkbox" class="gallringsval" value="${k.id}" style="width:auto;margin-right:4px"
+             ${k.bookkeeping_locked && flik === "gallring" ? "" : ""}>`
+          : ""
+      }
+      <div class="ftype" style="background:${
+        k.recommendation === "behåll" ? "var(--stone)" : k.recommendation === "anonymisera" ? "#B3801F" : "#A6402F"
+      };font-size:9px">${k.years_since_activity ?? "?"}<br>år</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600">${esc(k.name)}
+          ${k.anonymized ? `<span class="tag n" style="margin-left:6px">anonymiserad</span>` : ""}</div>
+        <div class="fmeta">${esc(k.customer_no)} · ${esc(k.municipality || "")} ·
+          senast ${esc(k.last_activity)} (${esc(k.last_activity_kind)}) ·
+          i registret ${k.years_in_register} år</div>
+        ${
+          k.bookkeeping_locked
+            ? `<div class="tsub" style="color:var(--brass)">Fakturerat arbete måste sparas till
+               ${esc(k.bookkeeping_until)} enligt bokföringslagen. Anonymisera i stället för att radera.</div>`
+            : k.invoiced_orders
+              ? `<div class="tsub">${k.invoiced_orders} fakturerade arbeten, bokföringstiden ute ${esc(k.bookkeeping_until)}</div>`
+              : ""
+        }
+      </div>
+      <button class="btn ghost sm" onclick="go('kund','${k.id}')">Öppna</button>
+    </div>`;
+
+  $("#view").innerHTML = `
+  <div class="spread">
+    <div><div class="eyebrow">Uppföljning och gallring</div><h1>Kundregistret över tid</h1>
+      <p class="lead">Vem har inte hört av sig på länge, och vad måste rensas bort. Två frågor med
+        olika syfte, och gallringen har regler som krockar med varandra.</p></div>
+  </div>
+
+  <div class="tabs">
+    <button class="${flik === "inaktiva" ? "on" : ""}" onclick="go('gallring','inaktiva')">
+      Inaktiva ${d.inaktiva.length}</button>
+    <button class="${flik === "gallring" ? "on" : ""}" onclick="go('gallring','gallring')">
+      Kan gallras ${d.gallringsbara.length}</button>
+  </div>
+
+  ${
+    flik === "inaktiva"
+      ? `<div class="card"><div class="hd"><h2>Ingen aktivitet på ${manader} månader</h2>
+      <div class="row" style="margin-left:auto">
+        ${[12, 24, 36, 60]
+          .map(
+            (m) =>
+              `<button class="btn ghost sm" style="${m === manader ? "border-color:var(--water);color:var(--water-dark)" : ""}"
+              onclick="S.filter.inaktivManader=${m};viewGallring()">${m} mån</button>`
+          )
+          .join("")}
+      </div></div>
+      <div class="pad" style="padding-top:2px">
+        ${
+          d.inaktiva.length
+            ? `<p class="hint" style="margin-top:0">Sorterade med den tystaste först. Ett samtal
+               till någon av dem är ofta det billigaste jobbet du kan få.</p>` +
+              d.inaktiva.map((k) => rad(k, false)).join("")
+            : `<div class="empty"><div class="big">Alla har hörts av</div>
+               <p>Ingen kund har varit tyst i ${manader} månader.</p></div>`
+        }
+      </div></div>`
+      : `<div class="card"><div class="hd"><h2>Äldre än ${ar} år utan aktivitet</h2>
+      <div class="row" style="margin-left:auto">
+        ${[3, 5, 7, 10]
+          .map(
+            (y) =>
+              `<button class="btn ghost sm" style="${y === ar ? "border-color:var(--water);color:var(--water-dark)" : ""}"
+              onclick="S.filter.gallringAr=${y};viewGallring()">${y} år</button>`
+          )
+          .join("")}
+      </div></div>
+      <div class="pad" style="padding-top:2px">
+        <p class="lead" style="margin-top:0">Personuppgifter får inte sparas längre än nödvändigt.
+          Men bokföringslagen kräver att underlag för fakturerade arbeten sparas i
+          ${d.bokforing_ar} år. Där kraven krockar är <strong>anonymisering</strong> svaret:
+          personuppgifterna försvinner, medan fakturor och brunnsdata står kvar.</p>
+        ${
+          d.gallringsbara.length
+            ? d.gallringsbara.map((k) => rad(k, admin)).join("") +
+              (admin
+                ? `<div class="row" style="margin-top:16px">
+                   <button class="btn ghost sm" onclick="valjAllaGallring(true)">Markera alla</button>
+                   <button class="btn ghost sm" onclick="valjAllaGallring(false)">Avmarkera</button>
+                   <button class="btn sm" style="margin-left:auto" onclick="kunderAnonymisera()">Anonymisera valda</button>
+                   <button class="btn danger sm" onclick="kunderRadera()">Radera valda</button>
+                 </div>
+                 <p class="hint">Anonymisering tar bort namn, kontaktuppgifter, journaltexter och
+                   foton. Kundnummer, anläggningar och fakturor står kvar. Radering tar bort allt
+                   och vägras om bokföringstiden inte gått ut.</p>`
+                : `<p class="hint">Bara administratörer kan gallra.</p>`)
+            : `<div class="empty"><div class="big">Inget att gallra</div>
+               <p>Ingen kund är äldre än ${ar} år utan aktivitet.</p></div>`
+        }
+      </div></div>`
+  }`;
+}
+
+function valjAllaGallring(pa) {
+  document.querySelectorAll(".gallringsval").forEach((c) => (c.checked = pa));
+}
+
+function valdaGallring() {
+  return [...document.querySelectorAll(".gallringsval:checked")].map((c) => c.value);
+}
+
+async function kunderAnonymisera() {
+  const ider = valdaGallring();
+  if (!ider.length) return toast("Markera vilka kunder det gäller", true);
+  if (
+    !confirm(
+      `Anonymisera ${ider.length} kunder?\n\nNamn, kontaktuppgifter, journaltexter och foton ` +
+        `tas bort permanent. Kundnummer, anläggningar och fakturor står kvar.\n\nDet går inte att ångra.`
+    )
+  )
+    return;
+  try {
+    const r = await api("/gallring/anonymize", { method: "POST", body: { ids: ider } });
+    toast(`${r.anonymiserade} kunder anonymiserade`);
+    S.data.customers = null;
+    viewGallring();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function kunderRadera() {
+  const ider = valdaGallring();
+  if (!ider.length) return toast("Markera vilka kunder det gäller", true);
+  if (
+    !confirm(
+      `Radera ${ider.length} kunder helt?\n\nAllt försvinner: anläggningar, journal, filer, ` +
+        `offerter och order.\n\nKunder med fakturerade arbeten inom bokföringstiden hoppas över.`
+    )
+  )
+    return;
+  try {
+    const r = await api("/gallring/bulk-delete", { method: "POST", body: { ids: ider } });
+    let text = `${r.raderade} kunder raderade`;
+    if (r.hindrade.length) text += `, ${r.hindrade.length} hindrade av bokföringslagen`;
+    toast(text);
+    if (r.hindrade.length) {
+      alert(
+        "Följande kunde inte raderas:\n\n" +
+          r.hindrade.map((h) => `${h.customer_no} ${h.name}\n  ${h.reason}`).join("\n\n")
+      );
+    }
+    S.data.customers = null;
+    viewGallring();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+
+/* ---------------- inloggningar ---------------- */
+async function adminInloggningar() {
+  const token = claim();
+  const bara = S.filter.baraMisslyckade ? "&only_failed=true" : "";
+  const d = await api(`/login-attempts?limit=80${bara}`);
+  if (!current(token) || !$("#adminbody")) return;
+  const k = d.settings;
+
+  $("#adminbody").innerHTML = `
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Skydd mot lösenordsgissning</h2></div>
+    <div class="pad">
+      <p class="lead" style="margin-top:0">Försök räknas både per konto och per IP-adress. Spärren
+        är tidsbegränsad, inte permanent: en permanent spärr gör att den som gissar kan låsa ute
+        den riktiga användaren.</p>
+      <div class="fgrid">
+        ${fld("li_max", "Antal försök innan spärr", k.max_forsok, "number")}
+        ${fld("li_fonster", "Räknas inom, minuter", k.fonster_minuter, "number")}
+        ${fld("li_sparr", "Spärrtid, minuter", k.sparr_minuter, "number")}
+        ${fld("li_spara", "Spara historik, dagar", k.spara_dagar, "number")}
+      </div>
+      <div style="margin-top:10px">
+        <label style="display:flex;gap:8px;align-items:center;font-size:14px;padding:4px 0">
+          <input type="checkbox" id="li_lyckade" ${k.avisera_lyckade ? "checked" : ""} style="width:auto">
+          Meddela administratörer om inloggningar</label>
+        <label style="display:flex;gap:8px;align-items:center;font-size:14px;padding:4px 0">
+          <input type="checkbox" id="li_sparrmail" ${k.avisera_sparr ? "checked" : ""} style="width:auto">
+          Meddela när ett konto spärras</label>
+      </div>
+      <p class="hint">Push skickas bara vid inloggning från en adress kontot inte använt förut.
+        Allt annat blir brus. E-post går till administratörernas adresser.</p>
+      <button class="btn pri sm" style="margin-top:10px" id="li_spara_knapp">Spara</button>
+    </div></div>
+
+  <div class="card"><div class="hd"><h2>Senaste inloggningsförsök</h2>
+    <button class="btn ghost sm" style="margin-left:auto"
+      onclick="S.filter.baraMisslyckade=!S.filter.baraMisslyckade;adminInloggningar()">
+      ${S.filter.baraMisslyckade ? "Visa alla" : "Bara misslyckade"}</button></div>
+    <table><thead><tr><th>Tid</th><th>Användare</th><th>IP</th><th>Resultat</th><th>Enhet</th><th></th></tr></thead>
+    <tbody>${d.attempts
+      .map(
+        (a) => `<tr>
+      <td data-l="Tid" class="tid">${dt(a.at)}</td>
+      <td data-l="Användare">${esc(a.username || "—")}</td>
+      <td data-l="IP" class="mono" style="font-size:12px">${esc(a.ip || "—")}</td>
+      <td data-l="Resultat"><span class="tag ${a.success ? "ok" : "action"}">${
+        a.success ? "Lyckad" : esc(a.reason || "Misslyckad")
+      }</span></td>
+      <td data-l="Enhet" class="tsub">${esc((a.user_agent || "").slice(0, 42))}</td>
+      <td>${
+        a.success
+          ? ""
+          : `<button class="btn ghost sm" onclick="haevSparr('${esc(a.username)}','${esc(a.ip)}')">Häv spärr</button>`
+      }</td></tr>`
+      )
+      .join("")}</tbody></table>
+    ${d.attempts.length ? "" : `<div class="empty"><div class="big">Inga försök loggade</div></div>`}
+  </div>`;
+
+  $("#li_spara_knapp").onclick = async () => {
+    try {
+      await api("/login-settings", {
+        method: "PUT",
+        body: {
+          max_forsok: parseInt(val("li_max"), 10),
+          fonster_minuter: parseInt(val("li_fonster"), 10),
+          sparr_minuter: parseInt(val("li_sparr"), 10),
+          spara_dagar: parseInt(val("li_spara"), 10),
+          avisera_lyckade: $("#li_lyckade").checked,
+          avisera_sparr: $("#li_sparrmail").checked,
+        },
+      });
+      toast("Sparat");
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+}
+
+async function haevSparr(anvandare, ip) {
+  if (!confirm(`Häv spärren för ${anvandare || ip}?`)) return;
+  await api("/login-attempts/clear", { method: "POST", body: { username: anvandare, ip } });
+  toast("Spärren hävd");
+  adminInloggningar();
+}
 
 /* ---------------- systemhändelser ---------------- */
 /* Bakgrundsjobb har ingen användare att svara. Utan den här listan blir ett
@@ -3478,6 +3758,13 @@ async function viewMore() {
     paminnelser: sum.open ? `${sum.open} öppna${sum.overdue ? `, ${sum.overdue} försenade` : ""}` : "",
     handelser: handelser.open ? `${handelser.open} att titta på` : "",
   };
+  try {
+    const g = await api("/gallring/review?inactive_months=24&retention_years=7");
+    if (g.inaktiva.length || g.gallringsbara.length)
+      extra.gallring =
+        `${g.inaktiva.length} tysta i 2 år` +
+        (g.gallringsbara.length ? `, ${g.gallringsbara.length} kan gallras` : "");
+  } catch (_) {}
 
   $("#view").innerHTML = `
   <div class="spread"><div><div class="eyebrow">Allt annat</div><h1>Mer</h1></div></div>
@@ -5077,17 +5364,18 @@ function planFrom(facilityId) {
 async function viewAdmin() {
   const token = claim();
   const tab =
-    S.tab && ["konton", "foretag", "notiser", "sgu", "backup", "logg"].includes(S.tab)
+    S.tab && ["konton", "inloggningar", "foretag", "notiser", "sgu", "backup", "logg"].includes(S.tab)
       ? S.tab
       : "konton";
   const T = (id, label) =>
     `<button class="${tab === id ? "on" : ""}" onclick="go('admin','${id}')">${label}</button>`;
   mountShell(`
     <div class="spread"><div><div class="eyebrow">Administration</div><h1>Inställningar</h1></div></div>
-    <div class="tabs">${T("konton", "Konton")}${T("foretag", "Företag")}${T("notiser", "Notiser")}${T("sgu", "SGU")}${T("backup", "Backup")}${T("logg", "Logg")}</div>
+    <div class="tabs">${T("konton", "Konton")}${T("inloggningar", "Inloggningar")}${T("foretag", "Företag")}${T("notiser", "Notiser")}${T("sgu", "SGU")}${T("backup", "Backup")}${T("logg", "Logg")}</div>
     <div id="adminbody"><div class="skel"></div><div class="skel"></div></div>`);
 
   if (tab === "konton") await adminUsers();
+  else if (tab === "inloggningar") await adminInloggningar();
   else if (tab === "foretag") await adminCompany();
   else if (tab === "sgu") await adminSgu();
   else if (tab === "notiser") await adminNotifications();
@@ -5901,6 +6189,7 @@ function render() {
     artiklar: viewArticles,
     mallar: viewTemplates,
     handelser: viewEvents,
+    gallring: viewGallring,
     ekonomi: viewEconomy,
     besok: (S.id ? viewVisit : viewVisits),
     admin: viewAdmin,
