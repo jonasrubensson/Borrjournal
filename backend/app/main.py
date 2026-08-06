@@ -297,11 +297,16 @@ async def sakerhetsheaders(request, call_next):
         "Permissions-Policy",
         "geolocation=(self), camera=(self), microphone=(), payment=(), usb=()",
     )
-    # Allt laddas från samma ursprung. Inga externa skript, inga inline-eval.
+    # Allt laddas från samma ursprung, inga externa skript.
+    #
+    # 'unsafe-inline' i script-src behövs för att gränssnittet använder
+    # onclick-attribut. Utan det slutar varje knapp i appen att fungera.
+    # Skyddet mot inskjuten kod vilar därför på att all text som skrivs ut
+    # escapas, och på att inga externa källor är tillåtna.
     svar.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; "
-        "script-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob:; "
         "font-src 'self'; "
