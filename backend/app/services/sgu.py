@@ -38,6 +38,22 @@ ANVANDNING = {
     "ÖVR": "Annan användning",
 }
 VATTENBRUNNAR = {"HUS", "LAN", "BEV", "IND", "SAM", "VAF", "ÖVR"}
+# Många rader i Brunnsarkivet saknar användningskod. De är i praktiken
+# vattenbrunnar, och att lämna dem utanför gör att en femtedel av materialet
+# försvinner ur borrdjup och kapacitet trots att de räknas i antalet.
+EJ_VATTEN = {"ENE", "OBS"}
+
+
+def ar_vattenbrunn(kod: str) -> bool:
+    return (kod or "").strip().upper() not in EJ_VATTEN
+
+# SGU:s bedömning av hur nära det angivna läget ligger verkligheten
+LAGESNOGGRANNHET = {
+    "0": "avviker mindre än 100 m",
+    "1": "avviker mindre än 250 m",
+    "2": "osäkert läge",
+    "3": "läget inte kontrollerat",
+}
 
 LAN_NAMN = {
     "01": "Stockholm", "03": "Uppsala", "04": "Södermanland", "05": "Östergötland",
@@ -80,6 +96,8 @@ KOLUMNER = {
     # SGU stavar den här med ett R i bulkfilen, håll båda
     "foderror_till": ("STALFODERROR_TILL", "RORBORRNING_TILL", "PLASTFODEROR_TILL"),
     "tatning": ("TATNING",),
+    "tecken_jord": ("TJ",),
+    "tecken_vatten": ("TV",),
     "anvandning": ("ANVANDNING",),
     "anmarkning": ("ANMARKNING",),
 }
@@ -181,6 +199,8 @@ async def sync_lan(db: AsyncSession, lanskod: str, progress=None) -> dict:
                 "foderror_till": _tal(plocka(rad, "foderror_till")),
                 "anvandning": plocka(rad, "anvandning")[:10].upper(),
                 "tatning": plocka(rad, "tatning")[:10],
+                "tecken_jord": plocka(rad, "tecken_jord")[:2],
+                "tecken_vatten": plocka(rad, "tecken_vatten")[:2],
                 "anmarkning": plocka(rad, "anmarkning")[:255],
                 "hamtad_at": started,
             }
@@ -205,7 +225,11 @@ async def sync_lan(db: AsyncSession, lanskod: str, progress=None) -> dict:
 
 
 async def neighbours(
-    db: AsyncSession, lat: float, lon: float, radius_m: float = 1000, limit: int = 60
+    db: AsyncSession,
+    lat: float,
+    lon: float,
+    radius_m: float = 1000,
+    limit: int | None = None,
 ) -> list[dict]:
     """Brunnar inom radien, närmast först. Grovsållar på ruta, mäter sedan exakt."""
     n0, e0 = wgs84_to_sweref99tm(lat, lon)
@@ -240,10 +264,18 @@ async def neighbours(
                 "anvandning": w.anvandning,
                 "anvandning_text": ANVANDNING.get(w.anvandning, w.anvandning or "okänd"),
                 "lagesnoggrannhet": w.lagesnoggrannhet,
+                "lagesnoggrannhet_text": LAGESNOGGRANNHET.get(
+                    (w.lagesnoggrannhet or "").strip(), "okänd noggrannhet"
+                ),
+                "berg_minst": w.tecken_jord == ">",
+                "kapacitet_minst": w.tecken_vatten == ">",
+                "kapacitet_hogst": w.tecken_vatten == "<",
             }
         )
     traffar.sort(key=lambda x: x["avstand_m"])
-    return traffar[:limit]
+    # Utan gräns som standard. En tyst avkapning gör att brunnar i ett tätt
+    # område försvinner ur statistiken utan att någon märker det.
+    return traffar[:limit] if limit else traffar
 
 
 def _sammanfatta(varden: list[float]) -> dict | None:
@@ -303,7 +335,7 @@ async def sok_fastighet(
             SguWell.n.between(n0 - meter, n0 + meter),
             SguWell.e.between(e0 - meter, e0 + meter),
         )
-    rader = (await db.execute(stmt.limit(60000))).scalars().all()
+    rader = (await db.execute(stmt)).scalars().all()
     if not rader:
         return None
 
@@ -346,16 +378,26 @@ async def briefing(
 ) -> dict:
     """Underlaget inför ett besök: vad grannarna stötte på och vad de fick."""
     alla = await neighbours(db, lat, lon, radius_m)
-    vatten = [w for w in alla if w["anvandning"] in VATTENBRUNNAR]
+    vatten = [w for w in alla if ar_vattenbrunn(w["anvandning"])]
     energi = [w for w in alla if w["anvandning"] == "ENE"]
+    okand_typ = len([w for w in alla if not (w["anvandning"] or "").strip()])
 
-    berg = _sammanfatta([w["djup_till_berg"] for w in alla])
+    # Ett jorddjup med ">" betyder att berget ligger djupare, hur mycket vet
+    # ingen. Att räkna in det som ett uppmätt värde drar ner medianen och ger
+    # en för billig offert. De redovisas separat i stället.
+    uppmatt = [w for w in alla if not w["berg_minst"]]
+    minst = [w for w in alla if w["berg_minst"]]
+    berg = _sammanfatta([w["djup_till_berg"] for w in uppmatt])
+    berg_minst = _sammanfatta([w["djup_till_berg"] for w in minst])
     # Foderrörslängd är det som avgör priset mest, och det är grannarnas verkliga
     # längder som betyder något, inte en uppskattning ur jorddjupet.
     foderror = _sammanfatta([w["foderror_till"] for w in alla])
     djup_vatten = _sammanfatta([w["totaldjup"] for w in vatten])
     djup_energi = _sammanfatta([w["totaldjup"] for w in energi])
     kapacitet = _sammanfatta([w["vattenmangd"] for w in vatten])
+    antal_osakert_lage = len(
+        [w for w in alla if (w["lagesnoggrannhet"] or "").strip() in ("2", "3")]
+    )
     niva = _sammanfatta([w["grundvattenniva"] for w in alla])
 
     kapaciteter = [w["vattenmangd"] for w in vatten if w["vattenmangd"]]
@@ -402,6 +444,28 @@ async def briefing(
                 min(math.hypot(r[0] - n0, r[1] - e0) for r in rad) / 1000, 1
             )
 
+    # Ligger punkten i ett län vi inte hämtat? Då är det den enda relevanta
+    # förklaringen, och den ska visas i klartext i stället för att användaren
+    # ska behöva räkna ut det själv.
+    saknat_lan = None
+    if not alla:
+        try:
+            from .geocode import lan_for_punkt
+
+            traff = await lan_for_punkt(lat, lon)
+        except Exception:  # noqa: BLE001
+            traff = None
+        if traff:
+            hamtade_koder = {
+                r[0] for r in (await db.execute(select(SguWell.lanskod).distinct())).all()
+            }
+            if traff["lanskod"] not in hamtade_koder:
+                saknat_lan = {
+                    "lanskod": traff["lanskod"],
+                    "namn": LAN_NAMN.get(traff["lanskod"], traff["lan"]),
+                    "kommun": traff.get("kommun", ""),
+                }
+
     hamtade_lan = sorted(
         {
             r[0]
@@ -413,17 +477,24 @@ async def briefing(
     return {
         "radius_m": radius_m,
         "antal": len(alla),
+        "origin_lat": lat,
+        "origin_lon": lon,
         "cache_totalt": totalt,
         "hamtade_lan": [
             {"kod": k, "namn": LAN_NAMN.get(k, k)} for k in hamtade_lan
         ],
         "narmaste_hamtade_km": narmast_km,
         "saknar_data": totalt == 0,
+        "saknat_lan": saknat_lan,
         # Långt till närmaste hämtade brunn betyder nästan alltid fel län
         "troligen_fel_lan": bool(narmast_km and narmast_km > 40),
         "antal_vattenbrunnar": len(vatten),
+        "antal_utan_typ": okand_typ,
         "antal_energibrunnar": len(energi),
         "jorddjup": berg,
+        "jorddjup_minst": berg_minst,
+        "antal_jordbrunnar": len(minst),
+        "antal_osakert_lage": antal_osakert_lage,
         "foderror": foderror,
         "borrdjup_vatten": djup_vatten,
         "borrdjup_energi": djup_energi,

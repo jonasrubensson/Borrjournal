@@ -239,3 +239,78 @@ async def geocode_safe(
     except Exception as exc:  # noqa: BLE001
         print(f"[borrjournal] automatiskt adressuppslag misslyckades: {exc}")
         return None
+
+
+# Länsnamn som Nominatim skriver dem, till länskod
+LAN_TILL_KOD = {
+    "stockholms län": "01", "uppsala län": "03", "södermanlands län": "04",
+    "östergötlands län": "05", "jönköpings län": "06", "kronobergs län": "07",
+    "kalmar län": "08", "gotlands län": "09", "blekinge län": "10",
+    "skåne län": "12", "hallands län": "13", "västra götalands län": "14",
+    "värmlands län": "17", "örebro län": "18", "västmanlands län": "19",
+    "dalarnas län": "20", "gävleborgs län": "21", "västernorrlands län": "22",
+    "jämtlands län": "23", "västerbottens län": "24", "norrbottens län": "25",
+}
+
+
+async def lan_for_punkt(lat: float, lon: float) -> dict | None:
+    """Vilket län ligger punkten i?
+
+    Används för att kunna hämta rätt SGU-data automatiskt i stället för att
+    kräva att någon vet vilka län som behövs.
+    """
+    import httpx
+
+    global _last_call
+    if not settings.geocoder_url:
+        return None
+
+    url = settings.geocoder_url.replace("/search", "/reverse")
+    async with _lock:
+        wait = 1.05 - (time.monotonic() - _last_call)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_call = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+                r = await client.get(
+                    url,
+                    params={
+                        "lat": lat,
+                        "lon": lon,
+                        "format": "jsonv2",
+                        "zoom": 8,
+                        "addressdetails": 1,
+                    },
+                    headers={
+                        "User-Agent": settings.geocoder_user_agent,
+                        "Accept-Language": "sv",
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Nådde inte adresstjänsten: {exc}") from exc
+
+    if r.status_code >= 400:
+        raise RuntimeError(f"Adresstjänsten svarade {r.status_code}")
+    try:
+        data = r.json()
+    except ValueError:
+        return None
+
+    adress = (data or {}).get("address") or {}
+    lan_namn = (adress.get("county") or adress.get("state") or "").strip().lower()
+    kod = LAN_TILL_KOD.get(lan_namn)
+    if not kod:
+        # Nominatim kan skriva "Jönköping County" eller utan "län"
+        for namn, k in LAN_TILL_KOD.items():
+            kort = namn.replace(" län", "")
+            if kort and kort in lan_namn:
+                kod = k
+                break
+    if not kod:
+        return None
+    return {
+        "lanskod": kod,
+        "lan": lan_namn,
+        "kommun": adress.get("municipality") or adress.get("city") or "",
+    }
