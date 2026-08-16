@@ -314,6 +314,35 @@ Tre olika saker kan ligga bakom att inga grannbrunnar visas, och de kräver olik
 Strår det att trakten inte verkar vara hämtad visas också hur långt bort närmaste nedladdade
 brunn ligger. Är det tiotals mil har fel län hämtats.
 
+### När brunnar saknas
+
+Underlaget bygger på SGU:s öppna data, som laddas ner ett län i taget. **Appen håller själv reda
+på vilket län en punkt ligger i.** Slår du upp ett besök i ett län som inte är hämtat står det
+rakt ut, länet läggs i kön automatiskt, och en administratör kan hämta det direkt med en knapp.
+Du behöver inte veta vilka län firman arbetar i.
+
+Två saker är värda att känna till om själva datan:
+
+**Läget är ungefärligt.** SGU sätter oftast brunnen på fastighetens huvudbyggnad utifrån
+fastighetsbeteckningen, inte på hålet. Deras egen bedömning: 0 avviker under 100 m, 1 under
+250 m, 2 osäkert, 3 okontrollerat. En grannbrunn kan därför ligga längre bort i registret än i
+verkligheten. Står det inga brunnar inom radien, pröva en större innan du drar slutsatsen att
+trakten är oborrad.
+
+**Öppna data uppdateras en gång i veckan** medan SGU:s kartvisare visar databasen direkt. En
+nyinrapporterad brunn syns därför på deras karta innan den finns här.
+
+### Tre fel som rättades i 3.11
+
+* **Brunnar utan användningskod försvann ur statistiken.** Många rader i Brunnsarkivet saknar
+  kod. De räknades i antalet men låg utanför både vatten- och energigruppen, alltså utanför
+  borrdjup och kapacitet. Nu räknas allt utom energi- och observationsbrunnar som vattenbrunn.
+* **Fler än 60 brunnar kapades tyst.** I ett tätt område föll de bortersta ur hela statistiken.
+  Gränsen är borttagen.
+* **Jordbrunnar räknades som uppmätta.** När borrningen stannat i jord anger SGU jorddjupet med
+  tecknet `>`, altså *minst* så djupt. Det lästes som ett exakt värde, vilket drog ner medianen
+  och gav en för låg foderrörsuppskattning, altså en för billig offert. De redovisas nu separat.
+
 ### Hämta SGU-data
 
 **Inställningar → SGU**: kryssa i de län ni jobbar i, spara. Sedan sköter appen resten. Saknade län
@@ -744,6 +773,23 @@ ett dubbelklick räckte för att utlösa det. Tilldelning och skrivning sker dä
 steg, och blir numret ändå upptaget tas nästa lediga automatiskt. Sparaknapparna spärras också
 medan anropet pågår, så att ett dubbelklick blir en sparning och inte två.
 
+### Arbetsorder utan kund
+
+**Idag → Ny arbetsorder** skapar en order direkt, utan att du behöver leta upp kunden först.
+Ute i fält vill man skriva ner vad som går åt medan man minns det. Inne på ordern finns en
+sökruta där du kopplar den till rätt kund när du hinner, och har kunden bara en anläggning väljs
+den automatiskt.
+
+Ordern går inte att markera utförd, fakturera eller spara bland dokumenten förrän kunden är vald.
+En redan fakturerad order kan inte flyttas till en annan kund, eftersom det skulle flytta pengar
+mellan kunder i efterhand. Antalet order som saknar kund visas i vyn **Fakturera**.
+
+### Visa på karta
+
+Besök med koordinat har tre länkar: **Visa på karta** och **Vägbeskrivning** startar navigering,
+**Se platsen** visar bara punkten. Alla öppnas i ny flik med `noopener`, så att den externa sidan
+inte kan röra appen.
+
 ## Inaktiva kunder och gallring
 
 **Mer, Inaktiva kunder och gallring.** Två frågor med olika syfte i samma vy.
@@ -907,6 +953,30 @@ sudo ufw deny 8000/tcp
 **3. Kör nginx direkt på värden**, inte i container, och sätt `APP_BIND=127.0.0.1`.
 
 Kontrollera resultatet utifrån: `curl http://din-server:8000/api/health` ska inte svara.
+
+### Tjänster framför appen, till exempel Cloudflare
+
+En robotkontroll kör egna skript och lägger sin ruta i en iframe från sin egen domän. Policyn
+tillåter bara det egna ursprunget, vilket stänger ute den, och besökaren fastnar i ”Utför
+säkerhetsverifiering”. Sätt då i `.env`:
+
+```
+ALLOW_CHALLENGE_SCRIPTS=true
+```
+
+För andra tjänster än Cloudflare anges källorna direkt:
+
+```
+CSP_EXTRA_SOURCES=https://challenges.example.com
+```
+
+Vid felsökning går allt att stänga av med `SECURITY_HEADERS=false`. Använd det bara för att
+bekräfta att det är headers som ställer till det, och slå på igen direkt.
+
+Policyn sätts numera bara på HTML-sidor. På bilder, PDF:er och JSON-svar skyddar den ingenting
+och kan störa tjänster som ligger framför. `Referrer-Policy` är också mjukad till
+`strict-origin-when-cross-origin`: sökvägen läcker inte, men flöden som behöver veta vilken
+domän besökaren kom från fungerar.
 
 ### Nginx
 
