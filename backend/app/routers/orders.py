@@ -818,9 +818,11 @@ async def _bygg_dokument(db: AsyncSession, *, offert: Quote = None, order: WorkO
         )
 
     rader = [rad_ut(r) for r in await _rader(db, work_order_id=order.id)]
-    c = (
-        await db.execute(select(Customer).where(Customer.id == order.customer_id))
-    ).unique().scalar_one_or_none()
+    c = None
+    if order.customer_id:
+        c = (
+            await db.execute(select(Customer).where(Customer.id == order.customer_id))
+        ).unique().scalar_one_or_none()
     anlaggning = ""
     if order.facility_id:
         f = (
@@ -834,7 +836,7 @@ async def _bygg_dokument(db: AsyncSession, *, offert: Quote = None, order: WorkO
         titel=order.title,
         foretag=foretag,
         mottagare={
-            "namn": c.name if c else "",
+            "namn": c.name if c else "Kund ej vald",
             "adress": (c.invoice_address or c.address) if c else "",
             "fastighet": f"Fastighet: {c.property_designation}" if c and c.property_designation else "",
             "telefon": c.phone if c else "",
@@ -1001,6 +1003,7 @@ def order_ut(o: WorkOrder, rader: list[LineItem], kundnamn: str = "") -> dict:
         "description": o.description,
         "customer_id": o.customer_id,
         "customer_name": kundnamn,
+        "saknar_kund": not o.customer_id,
         "facility_id": o.facility_id,
         "quote_id": o.quote_id,
         "performed_at": o.performed_at,
@@ -1052,7 +1055,7 @@ async def list_orders(
         rader = (
             await db.execute(
                 select(Customer.id, Customer.name).where(
-                    Customer.id.in_([o.customer_id for o in order])
+                    Customer.id.in_([o.customer_id for o in order if o.customer_id])
                 )
             )
         ).all()
@@ -1068,7 +1071,7 @@ async def order_summary(_: User = Depends(current_user), db: AsyncSession = Depe
     """Vad som väntar på fakturering och vad som väntar på betalning."""
     alla = (await db.execute(select(WorkOrder))).scalars().all()
     ut = {"att_fakturera": 0, "att_fakturera_belopp": 0.0, "obetalda": 0, "obetalda_belopp": 0.0,
-          "oppna": 0}
+          "oppna": 0, "utan_kund": 0}
     for o in alla:
         rader = [rad_ut(r) for r in await _rader(db, work_order_id=o.id)]
         belopp = summera(rader, o.discount_percent)["brutto"]
@@ -1080,6 +1083,8 @@ async def order_summary(_: User = Depends(current_user), db: AsyncSession = Depe
             ut["obetalda_belopp"] += belopp
         elif o.status == "oppen":
             ut["oppna"] += 1
+        if not o.customer_id:
+            ut["utan_kund"] += 1
     ut["att_fakturera_belopp"] = round(ut["att_fakturera_belopp"], 2)
     ut["obetalda_belopp"] = round(ut["obetalda_belopp"], 2)
     return ut
@@ -1093,14 +1098,16 @@ async def create_order(
     db: AsyncSession = Depends(get_db),
     _las_=Depends(nummerlas_beroende),
 ):
+    # Kunden får väljas senare. Det gör det möjligt att börja skriva rader
+    # direkt på plats och koppla ordern till rätt kund efteråt.
     customer_id = payload.get("customer_id")
-    if not customer_id:
-        raise HTTPException(status_code=400, detail="Ange kund")
-    c = (
-        await db.execute(select(Customer).where(Customer.id == customer_id))
-    ).unique().scalar_one_or_none()
-    if c is None:
-        raise HTTPException(status_code=404, detail="Kunden finns inte")
+    c = None
+    if customer_id:
+        c = (
+            await db.execute(select(Customer).where(Customer.id == customer_id))
+        ).unique().scalar_one_or_none()
+        if c is None:
+            raise HTTPException(status_code=404, detail="Kunden finns inte")
 
     o = WorkOrder(
         order_no=await _nasta(db, WorkOrder, WorkOrder.order_no, "AO"),
@@ -1141,7 +1148,7 @@ async def create_order(
         db, "ORDER_CREATE", actor=user.username, object_type="work_order", object_id=o.id,
         request=request, detail=o.order_no,
     )
-    return order_ut(o, await _rader(db, work_order_id=o.id), c.name)
+    return order_ut(o, await _rader(db, work_order_id=o.id), c.name if c else "")
 
 
 @router.get("/work-orders/{order_id}")
@@ -1149,9 +1156,11 @@ async def read_order(
     order_id: str, _: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ):
     o = await _hamta_order(db, order_id)
-    namn = (
-        await db.execute(select(Customer.name).where(Customer.id == o.customer_id))
-    ).scalar() or ""
+    namn = ""
+    if o.customer_id:
+        namn = (
+            await db.execute(select(Customer.name).where(Customer.id == o.customer_id))
+        ).scalar() or ""
     return order_ut(o, await _rader(db, work_order_id=o.id), namn)
 
 
@@ -1214,6 +1223,33 @@ async def update_order(
         raise HTTPException(status_code=400, detail="Okänd status")
 
     tidigare = o.status
+
+    if "customer_id" in payload:
+        nytt = payload["customer_id"]
+        if nytt:
+            kund = (
+                await db.execute(select(Customer).where(Customer.id == nytt))
+            ).unique().scalar_one_or_none()
+            if kund is None:
+                raise HTTPException(status_code=404, detail="Kunden finns inte")
+            # Byte av kund på en fakturerad order skulle flytta pengar mellan
+            # kunder i efterhand, och det ska inte gå.
+            if o.customer_id and o.customer_id != nytt and o.status in ("fakturerad", "betald"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="En fakturerad order kan inte flyttas till en annan kund",
+                )
+            o.customer_id = nytt
+            if payload.get("facility_id") is None:
+                o.facility_id = None
+        elif o.status in ("fakturerad", "betald"):
+            raise HTTPException(
+                status_code=400, detail="En fakturerad order måste höra till en kund"
+            )
+        else:
+            o.customer_id = None
+            o.facility_id = None
+
     for falt in (
         "status", "title", "description", "performed_at", "performed_by",
         "invoiced_at", "invoice_no", "paid_at", "discount_percent", "rot_deduction",
@@ -1221,6 +1257,12 @@ async def update_order(
     ):
         if falt in payload:
             setattr(o, falt, payload[falt])
+
+    if o.status != tidigare and o.status != "oppen" and not o.customer_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Välj vilken kund ordern gäller innan den markeras som utförd.",
+        )
 
     idag = date.today().isoformat()
     dragna = 0
@@ -1240,7 +1282,12 @@ async def update_order(
         db, "ORDER_UPDATE", actor=user.username, object_type="work_order", object_id=o.id,
         request=request, detail=f"{o.order_no} {tidigare} -> {o.status}",
     )
-    svar = order_ut(o, await _rader(db, work_order_id=o.id))
+    kundnamn = ""
+    if o.customer_id:
+        kundnamn = (
+            await db.execute(select(Customer.name).where(Customer.id == o.customer_id))
+        ).scalar() or ""
+    svar = order_ut(o, await _rader(db, work_order_id=o.id), kundnamn)
     svar["stock_lines_deducted"] = dragna
     return svar
 
@@ -1271,6 +1318,11 @@ async def save_order_pdf(
 ):
     """Sparar arbetsordern som PDF bland kundens dokument."""
     o = await _hamta_order(db, order_id)
+    if not o.customer_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Välj vilken kund ordern gäller innan den sparas bland dokumenten.",
+        )
     pdf = await _bygg_dokument(db, order=o)
     sparad = await _spara_som_dokument(
         db,

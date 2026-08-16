@@ -417,7 +417,22 @@ async def sgu_briefing(
                 else "Besöket saknar koordinat. Fyll i adressen eller hämta din position."
             ),
         }
-    return await sgu.briefing(db, lat, lon, min(radius_m, 5000))
+    resultat = await sgu.briefing(db, lat, lon, min(radius_m, 5000))
+
+    # Saknas länet: lägg det i kön så att det finns nästa gång, utan att någon
+    # behöver be om det.
+    saknat = resultat.get("saknat_lan")
+    if saknat:
+        from ..services.notify import get_setting, save_setting
+
+        conf = await get_setting(db, "sgu", {"lan": [], "auto": True, "dagar": 7})
+        koade = list(conf.get("auto_lan") or [])
+        if saknat["lanskod"] not in koade and saknat["lanskod"] not in (conf.get("lan") or []):
+            koade.append(saknat["lanskod"])
+            conf["auto_lan"] = koade
+            await save_setting(db, "sgu", conf)
+            resultat["lan_koat"] = True
+    return resultat
 
 
 # ---------- dela med extern borrare ----------
