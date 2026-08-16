@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     # riskerar uppslagen att avvisas.
     geocoder_user_agent: str = "Borrjournal/2.3 (kundregister for vattenborrning)"
 
+    # Säkerhetsheaders. Stäng av bara vid felsökning.
+    security_headers: bool = True
+    # Sätt true när en tjänst som Cloudflare ligger framför och behöver köra
+    # sina egna skript och rutor för robotkontroll.
+    allow_challenge_scripts: bool = False
+    # Extra källor att tillåta i policyn, mellanslagsseparerat. Till exempel
+    # "https://challenges.cloudflare.com https://static.cloudflareinsights.com"
+    csp_extra_sources: str = ""
+
     # SGU:s brunnsarkiv, öppna data. Töm sgu_bulk_url för att stänga av.
     # Bulkfiler per län, en fil per anrop. Verifierat format.
     sgu_bulk_url: str = "https://resource.sgu.se/data/oppnadata/grundvatten/brunnar"

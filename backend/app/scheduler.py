@@ -81,7 +81,10 @@ async def _run_sgu() -> None:
                 )
             ).all()
         )
-        for lanskod in conf["lan"]:
+        # Län som efterfrågats men saknas läggs till automatiskt, så att ingen
+        # behöver veta vilka län firman jobbar i.
+        onskade = list(dict.fromkeys(list(conf["lan"]) + list(conf.get("auto_lan") or [])))
+        for lanskod in onskade:
             hamtad = befintliga.get(lanskod)
             if not sgu_service.is_stale(hamtad, dagar=int(conf.get("dagar", 7))):
                 continue

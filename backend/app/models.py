@@ -288,6 +288,11 @@ class SguWell(Base):
     foderror_till: Mapped[float | None] = mapped_column(Float, nullable=True)
     anvandning: Mapped[str] = mapped_column(String(10), default="", index=True)
     tatning: Mapped[str] = mapped_column(String(10), default="")
+    # Tecken före jorddjup respektive vattenmängd. ">" betyder att värdet är en
+    # undre gräns: berget ligger djupare än så, kapaciteten är minst så mycket.
+    # Utan detta läses "berg djupare än 15 m" som "berg på exakt 15 m".
+    tecken_jord: Mapped[str] = mapped_column(String(2), default="")
+    tecken_vatten: Mapped[str] = mapped_column(String(2), default="")
     anmarkning: Mapped[str] = mapped_column(String(255), default="")
     hamtad_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
@@ -449,8 +454,10 @@ class WorkOrder(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     order_no: Mapped[str] = mapped_column(String(20), unique=True, index=True)
 
-    customer_id: Mapped[str] = mapped_column(
-        ForeignKey("customers.id", ondelete="CASCADE"), index=True
+    # Får saknas medan ordern är ett utkast. Ute i fält vill man kunna börja
+    # skriva vad som går åt innan man letat upp rätt kund i registret.
+    customer_id: Mapped[str | None] = mapped_column(
+        ForeignKey("customers.id", ondelete="CASCADE"), nullable=True, index=True
     )
     facility_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     quote_id: Mapped[str | None] = mapped_column(String(36), nullable=True)

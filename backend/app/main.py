@@ -282,41 +282,70 @@ if os.path.isdir(FRONTEND_DIR):
         return HTMLResponse(_las_index(), headers=INGEN_CACHE)
 
 
-@app.middleware("http")
-async def sakerhetsheaders(request, call_next):
-    """Sätts i appen och inte bara i nginx.
+CLOUDFLARE_KALLOR = (
+    "https://challenges.cloudflare.com "
+    "https://static.cloudflareinsights.com "
+    "https://ajax.cloudflare.com"
+)
 
-    Proxyn kan konfigureras om, bytas ut eller kringgås vid felsökning. Headers
-    som skyddar användaren hör hemma där svaret skapas.
+
+def bygg_csp() -> str:
+    """Policyn, med plats för en tjänst framför appen.
+
+    En robotkontroll som Cloudflare kör egna skript och lägger sin ruta i en
+    iframe från sin egen domän. En policy som bara tillåter det egna ursprunget
+    stänger ute den, och besökaren fastnar i verifieringen.
     """
-    svar = await call_next(request)
-    svar.headers.setdefault("X-Content-Type-Options", "nosniff")
-    svar.headers.setdefault("X-Frame-Options", "DENY")
-    svar.headers.setdefault("Referrer-Policy", "no-referrer")
-    svar.headers.setdefault(
-        "Permissions-Policy",
-        "geolocation=(self), camera=(self), microphone=(), payment=(), usb=()",
-    )
-    # Allt laddas från samma ursprung, inga externa skript.
-    #
-    # 'unsafe-inline' i script-src behövs för att gränssnittet använder
-    # onclick-attribut. Utan det slutar varje knapp i appen att fungera.
-    # Skyddet mot inskjuten kod vilar därför på att all text som skrivs ut
-    # escapas, och på att inga externa källor är tillåtna.
-    svar.headers.setdefault(
-        "Content-Security-Policy",
+    extra = (settings.csp_extra_sources or "").strip()
+    if settings.allow_challenge_scripts:
+        extra = f"{CLOUDFLARE_KALLOR} {extra}".strip()
+
+    skript = "'self' 'unsafe-inline'" + (f" {extra}" if extra else "")
+    ram = "'self' blob:" + (f" {extra}" if extra else "")
+    anslut = "'self'" + (f" {extra}" if extra else "")
+
+    return (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
+        f"script-src {skript}; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob:; "
         "font-src 'self'; "
-        "connect-src 'self'; "
-        "frame-src 'self' blob:; "
+        f"connect-src {anslut}; "
+        f"frame-src {ram}; "
         "object-src 'none'; "
         "base-uri 'none'; "
         "form-action 'self'; "
-        "frame-ancestors 'none'",
+        "frame-ancestors 'none'"
     )
+
+
+@app.middleware("http")
+async def sakerhetsheaders(request, call_next):
+    """Sätts i appen och inte bara i proxyn.
+
+    Proxyn kan konfigureras om, bytas ut eller kringgås vid felsökning. Headers
+    som skyddar användaren hör hemma där svaret skapas.
+
+    Policyn sätts bara på HTML-sidor. Att lägga den på bilder, PDF:er och
+    JSON-svar ger inget skydd och kan störa tjänster som ligger framför.
+    """
+    svar = await call_next(request)
+    if not settings.security_headers:
+        return svar
+
+    svar.headers.setdefault("X-Content-Type-Options", "nosniff")
+    # Mindre strikt än no-referrer: skyddar sökvägen men bryter inte flöden
+    # som behöver veta vilken domän besökaren kom från.
+    svar.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+
+    typ = (svar.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if typ in ("text/html", "application/xhtml+xml"):
+        svar.headers.setdefault("X-Frame-Options", "DENY")
+        svar.headers.setdefault(
+            "Permissions-Policy",
+            "geolocation=(self), camera=(self), microphone=(), payment=(), usb=()",
+        )
+        svar.headers.setdefault("Content-Security-Policy", bygg_csp())
     return svar
 
 

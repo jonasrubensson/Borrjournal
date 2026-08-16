@@ -6,4 +6,4 @@ backend-koden bakas in i imagen, så en uppdatering utan --build ger nytt
 gränssnitt mot gammalt API.
 """
 
-APP_VERSION = "3.9.1"
+APP_VERSION = "3.13.0"
