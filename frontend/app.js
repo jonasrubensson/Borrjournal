@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "3.9.1";
+const UI_VERSION = "3.13.0";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
@@ -464,8 +464,13 @@ async function viewDashboard() {
     <div><div class="eyebrow">${dt(new Date().toISOString(), false)}</div><h1>Översikt</h1>
       <p class="lead">${d.counts.customers} kunder och ${d.counts.facilities} anläggningar i registret.</p></div>
     <div class="row">
-      ${S.user.role === "lasare" ? "" : `<button class="btn ghost" onclick="go('besok')">Offert på förfrågan</button>`}
-      <button class="btn pri" onclick="go('ny')">+ Ny brunn eller pump</button>
+      ${
+        S.user.role === "lasare"
+          ? ""
+          : `<button class="btn pri" onclick="snabbOrder()">+ Ny arbetsorder</button>
+             <button class="btn ghost" onclick="go('besok')">Offert på förfrågan</button>`
+      }
+      <button class="btn" onclick="go('ny')">+ Ny brunn eller pump</button>
     </div>
   </div>
   <div class="stats">
@@ -1201,6 +1206,12 @@ async function viewVisit() {
         <p class="lead">${esc(v.property_designation || "")}${v.municipality ? ", " + esc(v.municipality) : ""}</p></div>
       <div class="row"><span class="tag ${klass}">${esc(text)}</span>
         ${
+          v.latitude
+            ? `<a class="btn sm" href="${mapLink(v.latitude, v.longitude)}" target="_blank"
+               rel="noopener noreferrer">Visa på karta</a>`
+            : ""
+        }
+        ${
           laser
             ? ""
             : v.customer_id
@@ -1262,6 +1273,14 @@ async function viewVisit() {
         <div class="row" style="margin-top:8px">
           <button class="btn ghost sm" onclick="visitPosition()">Hämta min position</button>
           <button class="btn ghost sm" onclick="visitGeocode()">Slå upp adressen igen</button>
+          ${
+            v.latitude
+              ? `<a class="btn ghost sm" href="${mapLink(v.latitude, v.longitude)}" target="_blank"
+                 rel="noopener noreferrer">Vägbeskrivning</a>
+                 <a class="btn ghost sm" href="${platsLink(v.latitude, v.longitude)}" target="_blank"
+                 rel="noopener noreferrer">Se platsen</a>`
+              : ""
+          }
           <span class="hint" id="v_coordhint" style="margin:0">${
             v.geocode_status === "ungefarlig"
               ? `<span style="color:var(--brass)">${esc(v.geocode_message || "Ungefärlig koordinat.")}</span>`
@@ -1477,6 +1496,7 @@ async function _convertVisit() {
   }
 }
 
+
 /* ---------------- underlag från SGU ---------------- */
 function spann(s, enhet) {
   if (!s) return "—";
@@ -1537,11 +1557,29 @@ async function loadBriefing(params) {
         }`;
       return;
     }
+    if (b.saknat_lan) {
+      box.innerHTML = `<p class="lead" style="margin-top:0">
+        <strong>${esc(b.saknat_lan.namn)}s län är inte hämtat.</strong> Underlaget bygger på
+        SGU:s brunnsarkiv, som laddas ner ett län i taget.</p>
+        <p class="hint">${
+          b.lan_koat
+            ? `Länet är nu köat och hämtas automatiskt inom ett dygn. ${
+                S.user.role === "admin" ? "Vill du inte vänta:" : ""
+              }`
+            : "Länet ligger redan i kön."
+        }</p>
+        ${
+          S.user.role === "admin"
+            ? `<div class="row"><button class="btn pri sm" onclick="hamtaLanNu('${b.saknat_lan.lanskod}')">
+               Hämta ${esc(b.saknat_lan.namn)} nu</button></div>`
+            : ""
+        }`;
+      return;
+    }
     if (b.troligen_fel_lan) {
       box.innerHTML = `<p class="lead" style="margin-top:0">
         <strong>Trakten verkar inte vara hämtad.</strong> Närmaste brunn i den nedladdade datan
-        ligger ${b.narmaste_hamtade_km} km bort, vilket brukar betyda att just det här länet
-        saknas.</p>
+        ligger ${b.narmaste_hamtade_km} km bort.</p>
         <p class="hint">Hämtade län: ${
           (b.hamtade_lan || []).map((l) => esc(l.namn)).join(", ") || "inga"
         }</p>
@@ -1554,7 +1592,10 @@ async function loadBriefing(params) {
       return;
     }
     box.innerHTML = `<p class="lead" style="margin-top:0">Inga registrerade brunnar inom
-      ${b.radius_m} m. Trakten är antingen oborrad, eller så saknas brunnarna i Brunnsarkivet.</p>
+      ${b.radius_m} m.</p>
+      <p class="hint">SGU sätter ofta brunnen på fastighetens mittpunkt, så en grannbrunn kan
+      ligga längre bort i registret än i verkligheten. Pröva en större radie innan du drar
+      slutsatsen att trakten är oborrad.</p>
       ${radieVal()}`;
     return;
   }
@@ -1566,7 +1607,14 @@ async function loadBriefing(params) {
     varav ${b.antal_vattenbrunnar} vattenbrunnar och ${b.antal_energibrunnar} energibrunnar.</p>
 
   <div class="facts" style="border-top:none;padding-top:4px;grid-template-columns:1fr 1fr">
-    <div class="fact"><div class="k">Berg på</div><div class="v">${spann(b.jorddjup, "m")}</div></div>
+    <div class="fact"><div class="k">Berg på</div><div class="v">${spann(b.jorddjup, "m")}
+      ${
+        b.antal_jordbrunnar
+          ? `<span class="tsub" style="display:block">${b.antal_jordbrunnar} jordbrunn${
+              b.antal_jordbrunnar > 1 ? "ar" : ""
+            } där berget ligger djupare än ${b.jorddjup_minst ? b.jorddjup_minst.max : "?"} m</span>`
+          : ""
+      }</div></div>
     <div class="fact"><div class="k">Foderrör hos grannarna</div><div class="v">${spann(b.foderror, "m")}</div></div>
     <div class="fact"><div class="k">Borrdjup, vatten</div><div class="v">${spann(b.borrdjup_vatten, "m")}</div></div>
     <div class="fact"><div class="k">Kapacitet</div><div class="v">${spann(b.kapacitet, "l/h")}</div></div>
@@ -1621,18 +1669,45 @@ async function loadBriefing(params) {
           (w) => `<tr><td data-l="Avstånd" class="tid">${w.avstand_m} m</td>
         <td data-l="Borrad" class="tid">${esc(w.borrdatum || "—")}</td>
         <td data-l="Djup" class="tid">${w.totaldjup ?? "—"} m</td>
-        <td data-l="Berg" class="tid">${w.djup_till_berg ?? "—"} m</td>
+        <td data-l="Berg" class="tid">${
+          w.djup_till_berg == null ? "—" : `${w.berg_minst ? ">" : ""}${w.djup_till_berg} m`
+        }</td>
         <td data-l="Foderrör" class="tid">${w.foderror_till ?? "—"} m</td>
         <td data-l="Kapacitet" class="tid">${w.vattenmangd ?? "—"} l/h</td>
-        <td data-l="Typ">${esc(w.anvandning_text)}</td></tr>`
+        <td data-l="Typ">${esc(w.anvandning_text)}
+          ${
+            ["2", "3"].includes((w.lagesnoggrannhet || "").trim())
+              ? `<span class="tsub" style="display:block">${esc(w.lagesnoggrannhet_text)}</span>`
+              : ""
+          }</td></tr>`
         )
         .join("")}</tbody></table>
   </details>
 
   ${radieVal()}
   <p class="hint" style="margin-top:12px">${esc(b.vattenkvalitet)}</p>
-  <p class="hint">Källa: ${esc(b.kalla)}. Lägesnoggrannheten varierar, många brunnar är satta på
-    fastighetens mittpunkt snarare än på hålet.</p>`;
+  <details style="margin-top:10px">
+    <summary class="hint" style="cursor:pointer;margin:0">Om siffrorna och varför en brunn kan saknas</summary>
+    <div class="hint" style="margin-top:6px">
+      <p style="margin:0 0 6px">Källa: ${esc(b.kalla)}.</p>
+      <p style="margin:0 0 6px"><strong>Läget är ungefärligt.</strong> SGU sätter oftast brunnen på
+        huvudbyggnadens mittpunkt utifrån fastighetsbeteckningen, inte på hålet. Deras egen
+        bedömning: 0 avviker under 100 m, 1 under 250 m, 2 osäkert.
+        ${
+          b.antal_osakert_lage
+            ? `Här har <strong>${b.antal_osakert_lage} av ${b.antal}</strong> osäkert eller
+               okontrollerat läge.`
+            : ""
+        }</p>
+      <p style="margin:0 0 6px"><strong>Saknas en brunn du sett på SGU:s karta?</strong> Öppna data
+        uppdateras en gång i veckan medan kartvisaren visar databasen direkt, så nyinrapporterade
+        brunnar dröjer. Ligger brunnen nära gränsen kan den också ha en koordinat som hamnar utanför
+        radien, eftersom läget är satt på fastigheten. Pröva en större radie.</p>
+      <p style="margin:0"><strong>Jordbrunnar</strong> där borrningen stannat i jord har okänt
+        bergdjup, bara ett minsta värde. De räknas inte in i medianen utan redovisas separat, annars
+        blir foderrörsuppskattningen för låg.</p>
+    </div>
+  </details>`;
 }
 
 function radieVal() {
@@ -1647,6 +1722,17 @@ function radieVal() {
       )
       .join("")}
   </div>`;
+}
+
+async function hamtaLanNu(lanskod) {
+  toast("Hämtar länet, det tar någon minut…");
+  try {
+    const r = await api("/sgu/sync", { method: "POST", body: { lanskod } });
+    toast(`${r.namn}: ${r.sparade.toLocaleString("sv-SE")} brunnar hämtade`);
+    if (S.route === "besok" && S.id) loadBriefing({ visit_id: S.id });
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 function setRadie(m) {
@@ -1798,6 +1884,20 @@ async function nyOffert(customerId, visitId) {
     });
     toast(`${q.quote_no} skapad`);
     go("offert", q.id);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+/* Ute i fält vill man börja skriva vad som går åt direkt. Kunden väljs inne
+   på ordern, när man har tid att leta rätt på den. */
+async function _snabbOrder() {
+  const titel = prompt("Vad gäller arbetet?", "");
+  if (titel === null) return;
+  try {
+    const o = await api("/work-orders", { method: "POST", body: { title: titel.trim() } });
+    toast(`${o.order_no} skapad. Välj kund när du hinner.`);
+    go("order", o.id);
   } catch (e) {
     toast(e.message, true);
   }
@@ -2760,6 +2860,7 @@ const skapaOrderFranOffert = (...a) => enGang('skapaOrderFranOffert', () => _ska
 const genomforSkick = (...a) => enGang('genomforSkick', () => _genomforSkick(...a));
 const saveCustomer = (...a) => enGang('saveCustomer', () => _saveCustomer(...a));
 const nyOrder = (...a) => enGang('nyOrder', () => _nyOrder(...a));
+const snabbOrder = (...a) => enGang('snabbOrder', () => _snabbOrder(...a));
 
 /* ---------------- pengar: gemensamt ---------------- */
 const kr = (v) =>
@@ -3276,7 +3377,11 @@ async function viewOrder() {
     <div class="spread" style="margin-bottom:0">
       <div><div class="eyebrow">${esc(o.order_no)} · skapad ${dt(o.created_at, false)}</div>
         <h1>${esc(o.title || "Arbetsorder")}</h1>
-        <p class="lead">${esc(o.customer_name)}</p></div>
+        <p class="lead">${
+          o.saknar_kund
+            ? `<span class="tag soon">Kund inte vald än</span>`
+            : esc(o.customer_name)
+        }</p></div>
       <div class="row"><span class="tag ${klass}">${esc(text)}</span>
         <span class="mono" style="font-size:19px;font-weight:600">${kr(o.totals.brutto)} kr</span></div>
     </div>
@@ -3290,6 +3395,21 @@ async function viewOrder() {
     </div>
   </div>
 
+  ${
+    o.saknar_kund && !laser
+      ? `<div class="card" style="margin-bottom:16px;border-color:#C9DFE3">
+      <div class="hd" style="background:#F4F9FA"><h2>Vilken kund gäller ordern?</h2></div>
+      <div class="pad">
+        <p class="lead" style="margin-top:0">Skriv rader nu och koppla ordern när du hinner.
+          Den behöver en kund innan den kan markeras utförd eller faktureras.</p>
+        <div class="row">
+          <input id="ok_sok" placeholder="Sök kund, fastighet eller ort"
+            style="flex:1;min-width:200px" oninput="sokOrderkund(this.value)">
+        </div>
+        <div id="ok_traffar"></div>
+      </div></div>`
+      : ""
+  }
   ${
     laser
       ? ""
@@ -3340,6 +3460,13 @@ async function viewOrder() {
       : `<div class="card" style="margin-top:16px"><div class="hd"><h2>Beskrivning</h2></div>
     <div class="pad">
       ${fld("o_titel", "Rubrik", o.title || "")}
+      ${
+        o.customer_id && !["fakturerad", "betald"].includes(o.status)
+          ? `<div class="row" style="margin:6px 0 10px">
+             <span class="hint" style="margin:0">Kund: <strong>${esc(o.customer_name)}</strong></span>
+             <button class="btn ghost sm" onclick="byteKund()">Byt kund</button></div>`
+          : ""
+      }
       <label class="f" for="o_beskr">Vad som gjordes</label>
       <textarea id="o_beskr">${esc(o.description || "")}</textarea>
       <div class="row" style="margin-top:12px">
@@ -3420,6 +3547,75 @@ async function taBortOrder() {
   }
 }
 
+
+
+/* ---------------- välja kund på en arbetsorder ---------------- */
+let orderKundTimer;
+function sokOrderkund(text) {
+  clearTimeout(orderKundTimer);
+  const box = $("#ok_traffar");
+  if (!box) return;
+  if (!text || text.trim().length < 2) return (box.innerHTML = "");
+  orderKundTimer = setTimeout(async () => {
+    const kunder = S.data.customers || (await api("/customers"));
+    S.data.customers = kunder;
+    const n = text.toLowerCase();
+    const traffar = kunder
+      .filter(
+        (c) =>
+          (c.name || "").toLowerCase().includes(n) ||
+          (c.property_designation || "").toLowerCase().includes(n) ||
+          (c.municipality || "").toLowerCase().includes(n) ||
+          (c.customer_no || "").toLowerCase().includes(n)
+      )
+      .slice(0, 8);
+    box.innerHTML = traffar.length
+      ? traffar
+          .map(
+            (c) => `<div class="filerow" style="cursor:pointer" onclick="valjOrderkund('${c.id}')">
+        <div class="ftype" style="background:var(--water)">K</div>
+        <div style="flex:1;min-width:0"><div style="font-weight:600">${esc(c.name)}</div>
+          <div class="fmeta">${esc(c.customer_no)} · ${esc(c.property_designation || "")}
+            ${esc(c.municipality || "")} · ${c.facilities.length} anläggningar</div></div></div>`
+          )
+          .join("")
+      : `<p class="hint">Ingen träff. <button class="linkbtn"
+         style="color:var(--water-dark);text-decoration:underline" onclick="go('kunder')">
+         Lägg upp kunden först</button></p>`;
+  }, 250);
+}
+
+async function valjOrderkund(customerId) {
+  const o = S.data.order;
+  try {
+    await api(`/work-orders/${o.id}`, { method: "PATCH", body: { customer_id: customerId } });
+    const kund = (S.data.customers || []).find((c) => c.id === customerId);
+    // Finns bara en anläggning är valet självklart
+    if (kund && kund.facilities.length === 1) {
+      await api(`/work-orders/${o.id}`, {
+        method: "PATCH",
+        body: { facility_id: kund.facilities[0].id },
+      });
+    }
+    toast(`Kopplad till ${kund ? kund.name : "kunden"}`);
+    viewOrder();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function byteKund() {
+  if (!confirm("Koppla om ordern till en annan kund?")) return;
+  try {
+    await api(`/work-orders/${S.data.order.id}`, {
+      method: "PATCH",
+      body: { customer_id: null },
+    });
+    viewOrder();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
 
 /* ---------------- artikelregister ---------------- */
 async function viewArticles() {
@@ -3681,7 +3877,9 @@ async function viewEconomy() {
     const [text, klass] = ORDER_STATUS[o.status] || [o.status, "n"];
     return `<tr class="clickable" onclick="go('order','${o.id}')">
       <td data-l="Nr" class="tid">${esc(o.order_no)}</td>
-      <td data-l="Kund"><span class="tname">${esc(o.customer_name)}</span>
+      <td data-l="Kund"><span class="tname">${
+        o.saknar_kund ? `<span class="tag soon">kund saknas</span>` : esc(o.customer_name)
+      }</span>
         <div class="tsub">${esc(o.title || "")}</div></td>
       <td data-l="Utförd" class="tid">${esc(o.performed_at || "—")}</td>
       <td data-l="Fakturanr" class="tid">${esc(o.invoice_no || "—")}</td>
@@ -3705,6 +3903,12 @@ async function viewEconomy() {
   <div id="forfraganform"></div>
 
   <div class="stats">
+    ${
+      sum.utan_kund
+        ? `<div class="stat warn"><div class="v">${sum.utan_kund}</div>
+           <div class="l">Saknar kund</div></div>`
+        : ""
+    }
     <div class="stat ${sum.att_fakturera ? "warn" : ""}"><div class="v">${sum.att_fakturera}</div>
       <div class="l">Att fakturera</div></div>
     <div class="stat ${sum.att_fakturera ? "warn" : ""}"><div class="v">${krRund(sum.att_fakturera_belopp)}</div>
@@ -5170,6 +5374,11 @@ const GEO = {
       );
     }),
 };
+
+/* Visar punkten på kartan. mapLink startar vägbeskrivning, den här bara tittar. */
+function platsLink(lat, lon) {
+  return `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`;
+}
 
 function mapLink(lat, lon) {
   return `https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}`;
