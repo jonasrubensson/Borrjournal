@@ -55,6 +55,44 @@ LAGESNOGGRANNHET = {
     "3": "läget inte kontrollerat",
 }
 
+# Ungefärlig utbredning för varje län, i WGS84. Används enbart för att avgöra
+# vilka län som kan vara relevanta att ladda ner, aldrig för beräkningar.
+# Rutorna överlappar med flit: hellre två kandidater än fel svar vid en gräns.
+# Detta fungerar utan internet, till skillnad från ett uppslag mot en adresstjänst.
+LAN_OMRADE = {
+    "01": (58.8, 60.2, 17.0, 19.1),
+    "03": (59.5, 60.7, 16.3, 18.9),
+    "04": (58.7, 59.7, 15.6, 17.9),
+    "05": (57.7, 59.0, 14.4, 17.2),
+    "06": (56.9, 58.3, 13.0, 15.9),
+    "07": (56.4, 57.4, 13.2, 15.9),
+    "08": (56.2, 58.2, 15.0, 17.1),
+    "09": (56.9, 58.0, 18.1, 19.4),
+    "10": (56.0, 56.6, 14.3, 16.1),
+    "12": (55.3, 56.5, 12.4, 14.6),
+    "13": (56.3, 57.8, 11.9, 13.6),
+    "14": (56.9, 59.3, 11.0, 14.9),
+    "17": (58.7, 61.1, 11.6, 14.7),
+    "18": (58.5, 60.1, 14.0, 16.2),
+    "19": (59.3, 60.4, 15.3, 17.2),
+    "20": (59.9, 62.3, 12.1, 16.7),
+    "21": (60.2, 62.4, 14.4, 17.6),
+    "22": (62.2, 64.5, 15.0, 19.3),
+    "23": (61.6, 65.1, 12.1, 16.9),
+    "24": (63.5, 66.3, 14.5, 21.6),
+    "25": (65.0, 69.1, 15.5, 24.2),
+}
+
+
+def mojliga_lan(lat: float, lon: float) -> list[str]:
+    """Vilka län kan punkten ligga i? Kräver ingen extern tjänst."""
+    return [
+        kod
+        for kod, (s_, n_, v_, o_) in LAN_OMRADE.items()
+        if s_ <= lat <= n_ and v_ <= lon <= o_
+    ]
+
+
 LAN_NAMN = {
     "01": "Stockholm", "03": "Uppsala", "04": "Södermanland", "05": "Östergötland",
     "06": "Jönköping", "07": "Kronoberg", "08": "Kalmar", "09": "Gotland",
@@ -376,7 +414,24 @@ async def sok_fastighet(
 async def briefing(
     db: AsyncSession, lat: float, lon: float, radius_m: float = 1000
 ) -> dict:
-    """Underlaget inför ett besök: vad grannarna stötte på och vad de fick."""
+    """Underlaget inför ett besök: vad grannarna stötte på och vad de fick.
+
+    Frågar SGU direkt om området först. Går det inte används den nedladdade
+    kopian, och det syns i svaret vilken källa siffrorna kommer från.
+    """
+    kalla = "lokal kopia"
+    live_fel = ""
+    nya_fran_sgu = 0
+    try:
+        farska = await hamta_omrade(lat, lon, radius_m)
+    except Exception as exc:  # noqa: BLE001
+        farska = None
+        live_fel = str(exc)[:250]
+
+    if farska is not None:
+        nya_fran_sgu = await uppdatera_fran_sgu(db, farska)
+        kalla = "SGU direkt"
+
     alla = await neighbours(db, lat, lon, radius_m)
     vatten = [w for w in alla if ar_vattenbrunn(w["anvandning"])]
     energi = [w for w in alla if w["anvandning"] == "ENE"]
@@ -449,22 +504,31 @@ async def briefing(
     # ska behöva räkna ut det själv.
     saknat_lan = None
     if not alla:
-        try:
-            from .geocode import lan_for_punkt
+        hamtade_koder = {
+            r[0] for r in (await db.execute(select(SguWell.lanskod).distinct())).all() if r[0]
+        }
+        kandidater = [k for k in mojliga_lan(lat, lon) if k not in hamtade_koder]
 
-            traff = await lan_for_punkt(lat, lon)
-        except Exception:  # noqa: BLE001
-            traff = None
-        if traff:
-            hamtade_koder = {
-                r[0] for r in (await db.execute(select(SguWell.lanskod).distinct())).all()
+        # Adresstjänsten kan peka ut exakt län, men får inte vara en förutsättning.
+        # Utan den används rutorna ovan, som alltid fungerar.
+        if kandidater:
+            try:
+                from .geocode import lan_for_punkt
+
+                traff = await lan_for_punkt(lat, lon)
+            except Exception:  # noqa: BLE001
+                traff = None
+            if traff and traff["lanskod"] in kandidater:
+                kandidater = [traff["lanskod"]]
+
+            saknat_lan = {
+                "lanskod": kandidater[0],
+                "namn": LAN_NAMN.get(kandidater[0], kandidater[0]),
+                "alla": [
+                    {"kod": k, "namn": LAN_NAMN.get(k, k)} for k in kandidater
+                ],
+                "sakert": len(kandidater) == 1,
             }
-            if traff["lanskod"] not in hamtade_koder:
-                saknat_lan = {
-                    "lanskod": traff["lanskod"],
-                    "namn": LAN_NAMN.get(traff["lanskod"], traff["lan"]),
-                    "kommun": traff.get("kommun", ""),
-                }
 
     hamtade_lan = sorted(
         {
@@ -504,6 +568,9 @@ async def briefing(
         "varsta_foderror": varsta_foderror,
         "narmaste": alla[:12],
         "kalla": "SGU Brunnsarkivet, CC BY 4.0",
+        "datakalla": kalla,
+        "live_fel": live_fel,
+        "nya_fran_sgu": nya_fran_sgu,
         "vattenkvalitet": (
             "Brunnsarkivet innehåller ingen vattenkvalitet. Kapacitet och djup finns, "
             "men kemi och bakterier går bara att få genom ett vattenprov på plats."
@@ -542,3 +609,203 @@ def is_stale(hamtad: datetime | None, dagar: int = 7) -> bool:
     if hamtad.tzinfo is None:
         hamtad = hamtad.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - hamtad).days >= dagar
+
+
+# ---------------------------------------------------------------------------
+# Direktfråga mot SGU för ett område
+#
+# Den nedladdade kopian är en ögonblicksbild per län. Den kan vara gammal, och
+# ett län kan saknas helt. Att fråga SGU om just det område som slås upp ger
+# alltid det de har just nu, och gör kopian till en snabbhetsoptimering i
+# stället för en förutsättning.
+# ---------------------------------------------------------------------------
+
+# Fältnamn varierar mellan SGU:s gränssnitt. Vi provar flera stavningar hellre
+# än att anta en, precis som för bulkfilernas kolumner.
+OGC_FALT = {
+    "brunnsid": (
+        "brunnsid", "brunnsidentitet", "BRUNNS_ID", "brunns_id",
+        "obsplatsid", "OBSPLATSID",
+    ),
+    "kommunkod": ("kommunkod", "KOMMUNKOD"),
+    "kommun": ("kommun", "KOMMUN"),
+    "lagesnoggrannhet": (
+        "lagesnoggrannhet", "LAGESNOGGRANNHET", "koordinatkvalitet", "posvardering",
+    ),
+    "fastighet": ("fastighet", "FASTIGHETSBETECKNING", "fastighetsbeteckning"),
+    "ort": ("ort", "ORT"),
+    "borrdatum": ("borrdatum", "BORRDATUM"),
+    "totaldjup": ("totaldjup", "TOTALDJUP"),
+    "djup_till_berg": (
+        "jorddjup", "JORDDJUP", "djupTillBerg", "DJUP_TILL_BERG", "djuptillberg",
+    ),
+    "vattenmangd": ("vattenmangd", "VATTENMANGD"),
+    "grundvattenniva": ("grundvattenniva", "GRUNDVATTENNIVA"),
+    "foderror_till": (
+        "stalfoderrorTill", "stalfoderror_till", "STALFODERROR_TILL",
+        "rorborrningTill", "rorborrning_till", "RORBORRNING_TILL",
+        "plastfoderrorTill", "plastfoderror_till", "PLASTFODEROR_TILL",
+    ),
+    "anvandning": ("anvandning", "ANVANDNING"),
+    "tatning": ("tatning", "TATNING"),
+    "tecken_jord": ("tj", "TJ"),
+    "tecken_vatten": ("tv", "TV"),
+    "anmarkning": ("anmarkning", "ANMARKNING"),
+}
+
+
+def _ur_egenskaper(egenskaper: dict, falt: str) -> str:
+    for namn in OGC_FALT[falt]:
+        varde = egenskaper.get(namn)
+        if varde not in (None, ""):
+            return str(varde).strip()
+    return ""
+
+
+def _punkt_ur_geometri(geometri: dict) -> tuple[float, float] | None:
+    """Ger (n, e) i SWEREF99TM oavsett vilket system svaret kommer i."""
+    if not isinstance(geometri, dict):
+        return None
+    koord = geometri.get("coordinates")
+    while isinstance(koord, list) and koord and isinstance(koord[0], list):
+        koord = koord[0]
+    if not isinstance(koord, list) or len(koord) < 2:
+        return None
+    try:
+        x, y = float(koord[0]), float(koord[1])
+    except (TypeError, ValueError):
+        return None
+    # Longitud och latitud ligger inom ±180 respektive ±90. SWEREF-värden är
+    # sexsiffriga och uppåt, så de går att skilja åt utan att gissa.
+    if abs(x) <= 180 and abs(y) <= 90:
+        return wgs84_to_sweref99tm(y, x)
+    return (y, x) if y > x else (x, y)
+
+
+async def hamta_omrade(
+    lat: float, lon: float, radius_m: float, max_antal: int = 400
+) -> list[dict] | None:
+    """Frågar SGU om brunnarna i en ruta kring punkten.
+
+    Returnerar None om tjänsten inte gick att nå eller svarade oväntat. Då
+    används den nedladdade kopian i stället, och orsaken loggas.
+    """
+    import httpx
+
+    if not settings.sgu_live or not settings.sgu_ogc_url:
+        return None
+
+    # En ruta som säkert rymmer cirkeln, med marginal för SGU:s lägesosäkerhet
+    marginal = radius_m + 400
+    grader_lat = marginal / 111320
+    grader_lon = marginal / (111320 * max(0.2, math.cos(math.radians(lat))))
+    bbox = (
+        f"{lon - grader_lon:.6f},{lat - grader_lat:.6f},"
+        f"{lon + grader_lon:.6f},{lat + grader_lat:.6f}"
+    )
+    url = f"{settings.sgu_ogc_url.rstrip('/')}/collections/brunnar/items"
+
+    async with httpx.AsyncClient(
+        timeout=settings.sgu_live_timeout, follow_redirects=True
+    ) as client:
+        r = await client.get(
+            url,
+            # f=json är det värde SGU:s tjänst svarar på. Andra varianter av
+            # samma format ger hela datamängden i stället för rutan.
+            params={"bbox": bbox, "limit": max_antal, "f": "json"},
+            headers={"User-Agent": settings.geocoder_user_agent},
+        )
+    r.raise_for_status()
+    data = r.json()
+
+    features = data.get("features") if isinstance(data, dict) else None
+    if features is None:
+        raise RuntimeError("Oväntat svar från SGU, saknar features")
+
+
+    # Tillämpades områdesfiltret? Ett svar där punkterna ligger utspridda över
+    # landet betyder att rutan ignorerats, och då duger svaret inte. Det är en
+    # säkrare kontroll än att räkna antalet.
+    v_lon, s_lat, o_lon, n_lat = [float(x) for x in bbox.split(",")]
+    innanfor = 0
+    granskade = 0
+    for f in features[:60]:
+        punkt = _punkt_ur_geometri((f or {}).get("geometry") or {})
+        if punkt is None:
+            continue
+        granskade += 1
+        p_lat, p_lon = sweref99tm_to_wgs84(*punkt)
+        # Lite marginal, tjänsten kan runda
+        if (s_lat - 0.02) <= p_lat <= (n_lat + 0.02) and (v_lon - 0.04) <= p_lon <= (o_lon + 0.04):
+            innanfor += 1
+    if granskade and innanfor / granskade < 0.8:
+        raise RuntimeError(
+            f"SGU svarade med {len(features)} brunnar men bara {innanfor} av "
+            f"{granskade} kontrollerade låg i det efterfrågade området. "
+            "Områdesfiltret verkar inte ha tillämpats."
+        )
+
+    rader = []
+    for f in features:
+        if not isinstance(f, dict):
+            continue
+        egenskaper = f.get("properties") or {}
+        punkt = _punkt_ur_geometri(f.get("geometry") or {})
+        if punkt is None:
+            continue
+        n, e = punkt
+        brunnsid = _ur_egenskaper(egenskaper, "brunnsid") or str(f.get("id") or "")
+        if not brunnsid:
+            continue
+        lat_w, lon_w = sweref99tm_to_wgs84(n, e)
+        rader.append(
+            {
+                "brunnsid": brunnsid[:30],
+                "lanskod": (_ur_egenskaper(egenskaper, "kommunkod") or "")[:2],
+                "kommunkod": _ur_egenskaper(egenskaper, "kommunkod")[:6],
+                "n": n,
+                "e": e,
+                "latitude": round(lat_w, 6),
+                "longitude": round(lon_w, 6),
+                "lagesnoggrannhet": _ur_egenskaper(egenskaper, "lagesnoggrannhet")[:4],
+                "fastighet": _ur_egenskaper(egenskaper, "fastighet")[:120],
+                "ort": _ur_egenskaper(egenskaper, "ort")[:80],
+                "borrdatum": normalisera_datum(_ur_egenskaper(egenskaper, "borrdatum")),
+                "totaldjup": _tal(_ur_egenskaper(egenskaper, "totaldjup")),
+                "djup_till_berg": _tal(_ur_egenskaper(egenskaper, "djup_till_berg")),
+                "vattenmangd": _tal(_ur_egenskaper(egenskaper, "vattenmangd")),
+                "grundvattenniva": _tal(_ur_egenskaper(egenskaper, "grundvattenniva")),
+                "foderror_till": _tal(_ur_egenskaper(egenskaper, "foderror_till")),
+                "anvandning": _ur_egenskaper(egenskaper, "anvandning")[:10].upper(),
+                "tatning": _ur_egenskaper(egenskaper, "tatning")[:10],
+                "tecken_jord": _ur_egenskaper(egenskaper, "tecken_jord")[:2],
+                "tecken_vatten": _ur_egenskaper(egenskaper, "tecken_vatten")[:2],
+                "anmarkning": _ur_egenskaper(egenskaper, "anmarkning")[:255],
+                "hamtad_at": datetime.now(timezone.utc),
+            }
+        )
+    return rader
+
+
+async def uppdatera_fran_sgu(db: AsyncSession, rader: list[dict]) -> int:
+    """Lägger in det SGU svarade i den lokala kopian, så att det finns nästa gång."""
+    if not rader:
+        return 0
+    from sqlalchemy import insert
+
+    fanns = {
+        r[0]
+        for r in (
+            await db.execute(
+                select(SguWell.brunnsid).where(
+                    SguWell.brunnsid.in_([x["brunnsid"] for x in rader])
+                )
+            )
+        ).all()
+    }
+    nya = [r for r in rader if r["brunnsid"] not in fanns]
+    for i in range(0, len(nya), 500):
+        await db.execute(insert(SguWell), nya[i : i + 500])
+    if nya:
+        await db.commit()
+    return len(nya)
