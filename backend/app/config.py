@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     # Bulkfiler per län, en fil per anrop. Verifierat format.
     sgu_bulk_url: str = "https://resource.sgu.se/data/oppnadata/grundvatten/brunnar"
     sgu_base_url: str = "https://resource.sgu.se/oppnadata/grundvatten/brunnar/v1"
+    # Områdesfråga direkt mot SGU. Ger alltid färsk data för just den plats som
+    # slås upp, i stället för en veckogammal kopia av hela länet.
+    sgu_ogc_url: str = "https://api.sgu.se/oppnadata/brunnar/ogc/features/v1"
+    sgu_live: bool = True
+    sgu_live_timeout: float = 12.0
 
     class Config:
         env_file = ".env"
