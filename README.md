@@ -314,23 +314,53 @@ Tre olika saker kan ligga bakom att inga grannbrunnar visas, och de kräver olik
 Strår det att trakten inte verkar vara hämtad visas också hur långt bort närmaste nedladdade
 brunn ligger. Är det tiotals mil har fel län hämtats.
 
-### När brunnar saknas
+### Varifrån siffrorna kommer
 
-Underlaget bygger på SGU:s öppna data, som laddas ner ett län i taget. **Appen håller själv reda
-på vilket län en punkt ligger i.** Slår du upp ett besök i ett län som inte är hämtat står det
-rakt ut, länet läggs i kön automatiskt, och en administratör kan hämta det direkt med en knapp.
-Du behöver inte veta vilka län firman arbetar i.
+Underlaget frågar **SGU direkt om det område som slås upp**, via deras områdes-API. Det ger vad
+SGU har just nu, inte vad som fanns när någon senast laddade ner ett län. Svaret sparas i den
+lokala kopian, så att samma plats går snabbt nästa gång.
 
-Två saker är värda att känna till om själva datan:
+Underlaget visar alltid vilken källa siffrorna kommer från:
 
-**Läget är ungefärligt.** SGU sätter oftast brunnen på fastighetens huvudbyggnad utifrån
-fastighetsbeteckningen, inte på hålet. Deras egen bedömning: 0 avviker under 100 m, 1 under
-250 m, 2 osäkert, 3 okontrollerat. En grannbrunn kan därför ligga längre bort i registret än i
-verkligheten. Står det inga brunnar inom radien, pröva en större innan du drar slutsatsen att
-trakten är oborrad.
+| Märkning | Betyder |
+|---|---|
+| **färsk från SGU** | Frågan gick igenom, siffrorna är aktuella |
+| **nedladdad kopia** | SGU gick inte att nå, siffrorna kan sakna nyare brunnar |
 
-**Öppna data uppdateras en gång i veckan** medan SGU:s kartvisare visar databasen direkt. En
-nyinrapporterad brunn syns därför på deras karta innan den finns här.
+Går direktfrågan inte igenom används den nedladdade kopian, och orsaken hamnar i
+Systemhändelser. Svarar SGU med något som inte ser filtrerat ut kastas svaret bort hellre än
+används, eftersom halv data är värre än tydligt gammal data.
+
+Den nedladdade kopian per län är alltså numera en snabbhets- och reservlösning, inte en
+förutsättning. Den behövs om servern saknar internet, eller om SGU ligger nere.
+
+### Om anropet mot SGU
+
+Områdesfrågan går mot deras OGC-tjänst:
+
+```
+api.sgu.se/oppnadata/brunnar/ogc/features/v1/collections/brunnar/items
+  ?bbox=<väst,syd,öst,nord i WGS84>&limit=400&f=json
+```
+
+Formatvärdet `f=json` är viktigt. Andra varianter av samma format ger hela datamängden i
+stället för rutan.
+
+Fältnamnen läses tolerant i flera stavningar, eftersom de skiljer sig mellan SGU:s bulkfiler
+och OGC-tjänsten. Jorddjup heter till exempel `jorddjup` i det ena och `djupTillBerg` i det
+andra.
+
+Innan ett svar används kontrolleras att punkterna faktiskt ligger i den efterfrågade rutan. Ett
+svar där brunnarna ligger utspridda över landet betyder att filtret inte tillämpats, och då
+kastas det bort till förmån för den nedladdade kopian. Ett tätt område med många brunnar
+accepteras däremot, eftersom kontrollen gäller läge och inte antal.
+
+### Om läget
+
+SGU sätter oftast brunnen på fastighetens huvudbyggnad utifrån fastighetsbeteckningen, inte på
+hålet. Deras egen bedömning: 0 avviker under 100 m, 1 under 250 m, 2 osäkert, 3 okontrollerat.
+En grannbrunn kan därför ligga längre bort i registret än i verkligheten. Områdesfrågan hämtar
+därför 400 m mer än radien, så att en brunn strax utanför inte försvinner helt.
 
 ### Tre fel som rättades i 3.11
 
