@@ -419,6 +419,34 @@ async def sgu_briefing(
         }
     resultat = await sgu.briefing(db, lat, lon, min(radius_m, 5000))
 
+    # Misslyckas direktfrågan är siffrorna kanske ofullständiga. Det ska synas.
+    if resultat.get("live_fel"):
+        from datetime import datetime, timedelta, timezone as _tz
+
+        from sqlalchemy import func as _func
+
+        from ..models import SystemEvent
+        from ..services import events
+
+        senaste = (
+            await db.execute(
+                select(_func.max(SystemEvent.at)).where(SystemEvent.source == "sgu-direkt")
+            )
+        ).scalar()
+        if senaste is not None and senaste.tzinfo is None:
+            senaste = senaste.replace(tzinfo=_tz.utc)
+        if senaste is None or datetime.now(_tz.utc) - senaste > timedelta(hours=1):
+            await events.logga(
+                db,
+                level="varning",
+                source="sgu-direkt",
+                message="Kunde inte fråga SGU om området, använder nedladdad kopia",
+                detail=(
+                    f"{resultat['live_fel']}\n\nUnderlaget bygger då på den senast "
+                    "nedladdade kopian, som kan sakna nyare brunnar."
+                ),
+            )
+
     # Saknas länet: lägg det i kön så att det finns nästa gång, utan att någon
     # behöver be om det.
     saknat = resultat.get("saknat_lan")
@@ -427,9 +455,10 @@ async def sgu_briefing(
 
         conf = await get_setting(db, "sgu", {"lan": [], "auto": True, "dagar": 7})
         koade = list(conf.get("auto_lan") or [])
-        if saknat["lanskod"] not in koade and saknat["lanskod"] not in (conf.get("lan") or []):
-            koade.append(saknat["lanskod"])
-            conf["auto_lan"] = koade
+        redan = set(koade) | set(conf.get("lan") or [])
+        nya = [x["kod"] for x in saknat.get("alla", []) if x["kod"] not in redan]
+        if nya:
+            conf["auto_lan"] = koade + nya
             await save_setting(db, "sgu", conf)
             resultat["lan_koat"] = True
     return resultat
