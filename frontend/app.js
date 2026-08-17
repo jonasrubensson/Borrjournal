@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "3.13.0";
+const UI_VERSION = "4.0.1";
 
 const S = {
   token: localStorage.getItem("bj_token") || null,
@@ -1558,22 +1558,36 @@ async function loadBriefing(params) {
       return;
     }
     if (b.saknat_lan) {
+      const lan = b.saknat_lan.alla || [{ kod: b.saknat_lan.lanskod, namn: b.saknat_lan.namn }];
       box.innerHTML = `<p class="lead" style="margin-top:0">
-        <strong>${esc(b.saknat_lan.namn)}s län är inte hämtat.</strong> Underlaget bygger på
-        SGU:s brunnsarkiv, som laddas ner ett län i taget.</p>
-        <p class="hint">${
-          b.lan_koat
-            ? `Länet är nu köat och hämtas automatiskt inom ett dygn. ${
-                S.user.role === "admin" ? "Vill du inte vänta:" : ""
-              }`
-            : "Länet ligger redan i kön."
-        }</p>
-        ${
-          S.user.role === "admin"
-            ? `<div class="row"><button class="btn pri sm" onclick="hamtaLanNu('${b.saknat_lan.lanskod}')">
-               Hämta ${esc(b.saknat_lan.namn)} nu</button></div>`
-            : ""
-        }`;
+        <strong>${
+          b.saknat_lan.sakert
+            ? `${esc(b.saknat_lan.namn)}s län är inte hämtat.`
+            : `Länet för den här platsen är inte hämtat.`
+        }</strong>
+        Underlaget bygger på SGU:s brunnsarkiv, som laddas ner ett län i taget.</p>
+      ${
+        b.saknat_lan.sakert
+          ? ""
+          : `<p class="hint">Platsen ligger nära en länsgräns. Det gäller något av
+             ${lan.map((l) => esc(l.namn)).join(" eller ")}.</p>`
+      }
+      <p class="hint">${
+        b.lan_koat
+          ? "Länen är köade och hämtas automatiskt inom ett dygn."
+          : "Länen ligger redan i kön."
+      }</p>
+      ${
+        S.user.role === "admin"
+          ? `<div class="row">${lan
+              .map(
+                (l) => `<button class="btn pri sm" onclick="hamtaLanNu('${l.kod}')">
+                Hämta ${esc(l.namn)} nu</button>`
+              )
+              .join("")}</div>
+             <p class="hint">Tar någon minut per län. Underlaget uppdateras direkt efteråt.</p>`
+          : `<p class="hint">Be en administratör hämta länet under Inställningar → SGU.</p>`
+      }`;
       return;
     }
     if (b.troligen_fel_lan) {
@@ -1592,7 +1606,17 @@ async function loadBriefing(params) {
       return;
     }
     box.innerHTML = `<p class="lead" style="margin-top:0">Inga registrerade brunnar inom
-      ${b.radius_m} m.</p>
+      ${b.radius_m} m.${
+        b.datakalla === "SGU direkt"
+          ? " Frågan gick direkt till SGU, så det är vad de har just nu."
+          : ""
+      }</p>
+      ${
+        b.datakalla !== "SGU direkt"
+          ? `<p class="hint" style="color:var(--brass)">SGU gick inte att fråga direkt, så det här
+             bygger på den nedladdade kopian. Den kan sakna brunnar.</p>`
+          : ""
+      }
       <p class="hint">SGU sätter ofta brunnen på fastighetens mittpunkt, så en grannbrunn kan
       ligga längre bort i registret än i verkligheten. Pröva en större radie innan du drar
       slutsatsen att trakten är oborrad.</p>
@@ -1604,7 +1628,18 @@ async function loadBriefing(params) {
   box.innerHTML = `
   <p class="lead" style="margin-top:0">
     <strong>${b.antal} grannbrunnar</strong> inom ${b.radius_m} m,
-    varav ${b.antal_vattenbrunnar} vattenbrunnar och ${b.antal_energibrunnar} energibrunnar.</p>
+    varav ${b.antal_vattenbrunnar} vattenbrunnar och ${b.antal_energibrunnar} energibrunnar.
+    ${
+      b.datakalla === "SGU direkt"
+        ? `<span class="tag ok" style="margin-left:6px">färsk från SGU</span>`
+        : `<span class="tag soon" style="margin-left:6px">nedladdad kopia</span>`
+    }</p>
+  ${
+    b.datakalla !== "SGU direkt"
+      ? `<p class="hint" style="margin-top:-4px">Kunde inte fråga SGU direkt just nu, så siffrorna
+         kommer från den senast nedladdade kopian och kan sakna nyare brunnar.</p>`
+      : ""
+  }
 
   <div class="facts" style="border-top:none;padding-top:4px;grid-template-columns:1fr 1fr">
     <div class="fact"><div class="k">Berg på</div><div class="v">${spann(b.jorddjup, "m")}
