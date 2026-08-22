@@ -22,6 +22,62 @@ events_router = APIRouter(prefix="/api/events", tags=["systemhändelser"])
 
 
 # ---------------- e-post ----------------
+@router.post("/signering/test")
+async def signering_test(
+    payload: dict,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Provkör hela uppsättningen och mejlar ett testmeddelande."""
+    from ..services import signering as sign
+
+    try:
+        return await sign.sjalvtest(db, (payload.get("till") or "").strip())
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)[:250]) from exc
+
+
+@router.get("/signering")
+async def signering_status(
+    _: User = Depends(require_admin), db: AsyncSession = Depends(get_db)
+):
+    """Är signeringstjänsten igång, och når vi den?"""
+    from ..config import settings as _s
+    from ..services import signering as sign
+
+    ut = {
+        "aktiverad": sign.aktiverad(),
+        "url": _s.signering_url,
+        "nyckel_satt": bool(_s.signering_nyckel),
+        "nyckel_lang_nog": len(_s.signering_nyckel or "") >= 24,
+        "nar": None,
+        "fel": "",
+    }
+    if not ut["aktiverad"]:
+        return ut
+
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{_s.signering_url.rstrip('/')}/api/halsa")
+            ut["nar"] = r.status_code == 200
+            if not ut["nar"]:
+                ut["fel"] = f"Tjänsten svarade {r.status_code}"
+    except Exception as exc:  # noqa: BLE001
+        ut["nar"] = False
+        ut["fel"] = str(exc)[:200]
+    return ut
+
+
+@router.get("/email/leverantorer")
+async def leverantorer(_: User = Depends(current_user)):
+    """Färdiga inställningar, så att ingen behöver leta upp portnummer."""
+    from ..services.notify import LEVERANTORER
+
+    return {"leverantorer": LEVERANTORER}
+
+
 @router.get("/email")
 async def read_email(_: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     return public_smtp(await get_setting(db, SMTP_KEY, DEFAULT_SMTP))
@@ -44,6 +100,16 @@ async def write_email(
     if isinstance(conf.get("recipients"), str):
         conf["recipients"] = [x.strip() for x in conf["recipients"].split(",") if x.strip()]
     await save_setting(db, SMTP_KEY, conf)
+
+    # Signeringstjänsten behöver samma uppgifter för att kunna skicka
+    # engångskoder. Skicka dem direkt så att det inte glöms bort.
+    try:
+        from ..services import signering as _sign
+
+        if _sign.aktiverad():
+            await _sign.synka_installningar(db)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[borrjournal] kunde inte synka mejl till signeringen: {exc}")
     await log_action(db, "SMTP_UPDATE", actor=user.username, request=request, detail=conf["host"])
     return public_smtp(conf)
 
@@ -228,3 +294,4 @@ async def acknowledge_events(
         r.acknowledged = True
     await db.commit()
     return {"acknowledged": len(rader)}
+

@@ -58,6 +58,12 @@ FORETAG_STANDARD = {
     # Automatiska påminnelser
     "paminn_obetald_efter_dagar": 7,
     "paminn_offert_efter_dagar": 10,
+    # Texter i signeringsflödet. Tomt betyder att standardtexten används.
+    # {rubrik} {belopp} {referens} {avsandare} {lank} {giltig_till} byts ut.
+    "signering_text_sida": "",
+    "signering_text_godkann": "",
+    "signering_text_bevis": "",
+    "signering_text_mejl": "",
 }
 
 
@@ -369,6 +375,15 @@ def quote_ut(q: Quote, rader: list[LineItem], kundnamn: str = "") -> dict:
         "sent_at": iso_utc(q.sent_at),
         "sent_to": q.sent_to,
         "decided_at": q.decided_at,
+        "signed_at": q.signed_at,
+        "signed_by": q.signed_by,
+        "signing_hash": q.signing_hash,
+        "signing_hash_signerad": q.signing_hash_signerad,
+        "signing_pending": q.signing_pending,
+        "signing_chain_ok": q.signing_chain_ok,
+        "signing_log": (
+            __import__("json").loads(q.signing_log) if q.signing_log else []
+        ),
         "created_at": iso_utc(q.created_at),
         "created_by": q.created_by,
         "lines": r,
@@ -568,6 +583,19 @@ async def update_quote(
     q = await _hamta_offert(db, quote_id)
     if payload.get("status") and payload["status"] not in QUOTE_STATUS:
         raise HTTPException(status_code=400, detail="Okänd status")
+
+    # Ligger offerten hos kunden för signering är det kunden som svarar. Att
+    # sätta besked för hand samtidigt skulle ge två motstridiga svar.
+    if payload.get("avbryt_signering"):
+        q.signing_pending = False
+    elif q.signing_pending and payload.get("status") in ("accepterad", "avslagen"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Offerten ligger hos kunden för signering. Avbryt signeringen först om "
+                "du ändå vill sätta besked för hand."
+            ),
+        )
     for falt in (
         "status", "title", "intro", "terms", "recipient_name", "recipient_address",
         "recipient_email", "valid_until", "discount_percent", "rot_deduction", "facility_id",
@@ -900,6 +928,117 @@ async def _spara_som_dokument(
     )
     db.add(post)
     return post
+
+
+@router.post("/quotes/{quote_id}/signering")
+async def skicka_till_signering(
+    quote_id: str,
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Skickar offerten för elektronisk signering och mejlar länken till kunden."""
+    from ..services import signering as sign
+    from ..services.notify import DEFAULT_SMTP, SMTP_KEY, get_setting, send_email
+
+    if not sign.aktiverad():
+        raise HTTPException(
+            status_code=400,
+            detail="Signeringstjänsten är inte konfigurerad. Se avsnittet Signering i README.",
+        )
+
+    q = await _hamta_offert(db, quote_id)
+    mottagare = (payload.get("recipient") or q.recipient_email or "").strip()
+    if "@" not in mottagare:
+        raise HTTPException(status_code=400, detail="Ange en giltig e-postadress")
+    rader = await _rader(db, quote_id=q.id)
+    if not rader:
+        raise HTTPException(status_code=400, detail="Offerten har inga rader")
+
+    q.recipient_email = mottagare
+    pdf = await _bygg_dokument(db, offert=q)
+    foretag = await _foretag(db)
+    total = summera([rad_ut(r) for r in rader], q.discount_percent)
+
+    try:
+        svar = await sign.skicka_for_signering(
+            db,
+            quote=q,
+            pdf=pdf,
+            foretag=foretag,
+            belopp_text=f"{belopp_text(total['brutto'])} kr",
+            giltig_dagar=int(foretag.get("offert_giltig_dagar") or 30),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    smtp = await get_setting(db, SMTP_KEY, DEFAULT_SMTP)
+    mall = foretag.get("signering_text_mejl", "") or (
+        "Hej,\n\n"
+        "Här kommer offert {referens}{rubrik_del} på {belopp}.\n\n"
+        "Öppna länken nedan för att läsa och godkänna den:\n\n"
+        "{lank}\n\n"
+        "Du får en engångskod till den här adressen innan du kan godkänna, så att vi "
+        "vet att det är du.\n"
+        "{giltig_del}\n"
+        "Med vänlig hälsning\n{avsandare}\n"
+    )
+    brodtext = mall.format(
+        referens=q.quote_no,
+        rubrik=q.title or "",
+        rubrik_del=f" avseende {q.title}" if q.title else "",
+        belopp=f"{belopp_text(total['brutto'])} kr",
+        lank=svar["lank"],
+        avsandare=foretag.get("namn", ""),
+        giltig_till=(svar.get("giltig_till") or "")[:10],
+        giltig_del=(
+            f"Länken gäller till {svar['giltig_till'][:10]}.\n"
+            if svar.get("giltig_till")
+            else ""
+        ),
+    )
+
+    try:
+        # Ingen bilaga här. Kunden ska läsa dokumentet på signeringssidan, så
+        # att det som godkänns är samma fil som loggas. En bilaga i förväg kan
+        # dessutom förväxlas med den signerade handlingen.
+        await send_email(
+            {**smtp, "enabled": True},
+            f"Offert {q.quote_no} för godkännande",
+            brodtext,
+            [mottagare],
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Signeringen skapades men mejlet gick inte iväg: {exc}. "
+            f"Länken är: {svar['lank']}",
+        ) from exc
+
+    q.status = "skickad" if q.status == "utkast" else q.status
+    q.signing_pending = True
+    q.sent_at = datetime.now(timezone.utc)
+    q.sent_to = mottagare
+    if q.customer_id:
+        db.add(
+            JournalEntry(
+                customer_id=q.customer_id,
+                facility_id=q.facility_id,
+                entry_type="Offert",
+                title=f"Offert {q.quote_no} skickad för signering",
+                body=f"Länk mejlad till {mottagare}. "
+                f"Kontrollsumma: {svar.get('pdf_hash', '')}",
+                author_id=user.id,
+                author_name=user.full_name or user.username,
+            )
+        )
+    await db.commit()
+    await log_action(
+        db, "QUOTE_SIGNING", actor=user.username, object_type="quote", object_id=q.id,
+        request=request, detail=f"{q.quote_no} till {mottagare}",
+    )
+    return {"ok": True, "recipient": mottagare, "giltig_till": svar.get("giltig_till")}
 
 
 @router.post("/quotes/{quote_id}/send")
