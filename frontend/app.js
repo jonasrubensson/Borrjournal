@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "4.7.0";
+const UI_VERSION = "4.7.1";
 
 const S = {
   funktioner: {},
@@ -194,7 +194,7 @@ async function doLogin() {
     go("oversikt");
     toast(`Inloggad som ${res.user.full_name || res.user.username}`);
     // Första gången någon loggar in: visa var saker finns
-    if (introBehovs()) setTimeout(() => visaIntro(true), 700);
+    if (introBehovs()) setTimeout(startaRundtur, 900);
   } catch (e) {
     if (e.status === 428) {
       loginNeedsTotp = true;
@@ -2798,118 +2798,142 @@ async function testaSignering() {
 }
 
 
-/* ---------------- introduktion ---------------- */
-/* Appen är byggd efter hur dagen ser ut, inte efter databasen. Det är inte
-   självklart för någon som öppnar den första gången, så det får en kort
-   genomgång. Den går att hoppa över och att ta om från Mer. */
-const INTRO_STEG = [
+/* ---------------- rundtur ---------------- */
+/* En genomgång som faktiskt går till varje vy i stället för att beskriva den.
+   Man ser sina egna siffror medan förklaringen står kvar längst ned, och
+   kortet kan flyttas undan om det täcker något man vill titta på. */
+const RUNDTUR = [
   {
-    rubrik: "Välkommen till Borrjournal",
+    vag: "oversikt",
+    rubrik: "Idag",
     text:
-      "Allt om era brunnar, kunder och jobb på ett ställe. Den här genomgången tar en halv " +
-      "minut och visar var saker finns. Du kan ta om den när som helst under Mer.",
-    bild: "M3 10 L10 3 L17 10 M5 8 v9 h10 V8",
+      "Här börjar dagen. Förfallna serviceärenden, obetalda fakturor och offerter utan " +
+      "besked ligger överst. Knapparna högst upp startar det du gör oftast.",
   },
   {
-    rubrik: "Idag visar vad som behöver göras",
+    vag: "kunder",
+    rubrik: "Kunder",
     text:
-      "Förfallna serviceärenden, obetalda fakturor och offerter utan besked. Härifrån " +
-      "startar du också en arbetsorder direkt när du är ute.",
-    bild: "M3 10 L10 3 L17 10 M5 8 v9 h10 V8",
+      "Hela registret. Sök på namn, fastighet, ort eller pumpmodell. Sökrutan längst upp " +
+      "letar i allt samtidigt, även i journalanteckningar.",
   },
   {
-    rubrik: "Kunder rymmer historiken",
+    vag: "kund",
+    rubrik: "Kundkortet",
     text:
-      "Varje kund har fem flikar: Översikt med det som är öppet, Journal med allt som hänt, " +
-      "Ekonomi med offerter och order, Filer med foton och protokoll, och Anläggning med " +
-      "brunnens data.",
-    bild: "M10 9 a3 3 0 1 0 0-6 a3 3 0 0 0 0 6 M3 17 c0-4 3-6 7-6 s7 2 7 6",
+      "Fem flikar. Översikt visar vad som är öppet just nu, Journal allt som hänt, Ekonomi " +
+      "offerter och arbetsorder, Filer foton och protokoll, Anläggning brunnens data.",
+    behover: "kund",
   },
   {
-    rubrik: "Besök är innan de blivit kunder",
+    vag: "besok",
+    rubrik: "Besök",
     text:
-      "Boka in ett platsbesök, få underlag om grannbrunnarnas djup och kapacitet från SGU, " +
-      "och gör kund av besöket när det blir affär. Ringer någon och vill ha ett pris finns " +
-      "Offert på förfrågan här.",
-    bild: "M10 17 s6-5.3 6-10a6 6 0 1 0-12 0c0 4.7 6 10 6 10z M10 5 v4 M8 7 h4",
+      "För dem som ännu inte är kunder. Boka ett platsbesök så hämtas underlag om " +
+      "grannbrunnarnas djup, jorddjup och kapacitet från SGU. Blir det affär gör du kund " +
+      "av besöket med en knapp.",
   },
   {
-    rubrik: "Fakturera samlar pengarna",
+    vag: "ekonomi",
+    rubrik: "Fakturera",
     text:
       "Vad som är utfört men inte fakturerat, och vad som är fakturerat men obetalt. " +
-      "Ingenting blir liggande.",
-    bild: "M3 5 h14 v10 H3z M3 8 h14 M6 12 h4",
+      "Systemet påminner av sig själv när något dröjer.",
   },
   {
-    rubrik: "Ute i fält",
+    vag: "mer",
+    rubrik: "Mer",
     text:
-      "Ta foton direkt från kameran, hämta din position på plats i stället för att skriva " +
-      "adress, och skriv arbetsordern medan du minns vad som gick åt. Kunden kan väljas efteråt.",
-    bild: "M4 7 h3 l1.5-2h5L15 7h1 a1 1 0 0 1 1 1v7 a1 1 0 0 1-1 1H4 a1 1 0 0 1-1-1V8 a1 1 0 0 1 1-1z M10 13 a2.5 2.5 0 1 0 0-5 a2.5 2.5 0 0 0 0 5",
-  },
-  {
-    rubrik: "Innan ni börjar på riktigt",
-    text:
-      "En administratör bör fylla i företagsuppgifter och logotyp, ställa in e-post, och " +
-      "hämta SGU-data för era län. Allt ligger under Mer, Inställningar.",
-    bild: "M10 13 a3 3 0 1 0 0-6 a3 3 0 0 0 0 6 M10 2v3M10 15v3M2 10h3M15 10h3",
+      "Allt som inte behövs varje dag: artiklar och lager, offertmallar, påminnelser, " +
+      "inaktiva kunder och inställningar. Härifrån tar du också om den här rundturen.",
   },
 ];
 
-function visaIntro(fran_borjan) {
-  S.introSteg = 0;
-  const gammal = document.getElementById("intro");
-  if (gammal) gammal.remove();
-  const holder = document.createElement("div");
-  holder.innerHTML = `<div id="intro" class="introskarm"><div class="introkort" id="introkort"></div></div>`;
-  document.body.appendChild(holder.firstElementChild);
-  ritaIntro();
+let rundturSteg = 0;
+
+function startaRundtur() {
+  rundturSteg = 0;
+  visaRundtur();
 }
 
-function ritaIntro() {
-  const steg = INTRO_STEG[S.introSteg];
-  const sista = S.introSteg === INTRO_STEG.length - 1;
-  const kort = document.getElementById("introkort");
-  if (!kort) return;
-  kort.innerHTML = `
-    <svg width="34" height="34" viewBox="0 0 20 20" fill="none" style="color:var(--water)">
-      <path d="${steg.bild}" stroke="currentColor" stroke-width="1.4"
-        stroke-linecap="round" stroke-linejoin="round"/></svg>
-    <h2>${esc(steg.rubrik)}</h2>
-    <p>${esc(steg.text)}</p>
-    <div class="introprickar">
-      ${INTRO_STEG.map(
-        (_, i) => `<span class="${i === S.introSteg ? "pa" : ""}"></span>`
-      ).join("")}
-    </div>
-    <div class="row" style="margin-top:16px">
-      ${
-        S.introSteg > 0
-          ? `<button class="btn ghost sm" onclick="introBak()">Bakåt</button>`
-          : `<button class="btn ghost sm" onclick="stangIntro()">Hoppa över</button>`
+async function visaRundtur() {
+  const steg = RUNDTUR[rundturSteg];
+  if (!steg) return avslutaRundtur();
+
+  // Gå till vyn så att man ser sina egna uppgifter, inte en beskrivning
+  if (steg.behover === "kund") {
+    try {
+      const kunder = S.data.customers || (await api("/customers"));
+      S.data.customers = kunder;
+      if (kunder.length) go("kund", kunder[0].id);
+      else {
+        rundturSteg += 1;
+        return visaRundtur();
       }
-      <button class="btn pri" style="margin-left:auto" onclick="${
-        sista ? "stangIntro()" : "introFram()"
-      }">${sista ? "Sätt igång" : "Nästa"}</button>
+    } catch (_) {
+      rundturSteg += 1;
+      return visaRundtur();
+    }
+  } else {
+    go(steg.vag);
+  }
+
+  await new Promise((r) => setTimeout(r, 400));
+  ritaRundturskort();
+}
+
+function ritaRundturskort() {
+  const steg = RUNDTUR[rundturSteg];
+  const sista = rundturSteg === RUNDTUR.length - 1;
+  let kort = document.getElementById("rundtur");
+  if (!kort) {
+    kort = document.createElement("div");
+    kort.id = "rundtur";
+    document.body.appendChild(kort);
+  }
+  kort.className = "rundtur";
+  kort.innerHTML = `
+    <div class="rundturhuvud">
+      <span class="rundturnr">${rundturSteg + 1} av ${RUNDTUR.length}</span>
+      <strong>${esc(steg.rubrik)}</strong>
+      <button class="rundturstang" onclick="avslutaRundtur()" title="Avsluta">✕</button>
+    </div>
+    <p>${esc(steg.text)}</p>
+    <div class="row" style="margin-top:12px">
+      ${
+        rundturSteg > 0
+          ? `<button class="btn ghost sm" onclick="rundturBak()">Bakåt</button>`
+          : `<button class="btn ghost sm" onclick="avslutaRundtur()">Hoppa över</button>`
+      }
+      <button class="btn ghost sm" onclick="flyttaRundtur()" title="Flytta undan">
+        Flytta</button>
+      <button class="btn pri sm" style="margin-left:auto" onclick="${
+        sista ? "avslutaRundtur()" : "rundturFram()"
+      }">${sista ? "Klar" : "Nästa"}</button>
     </div>`;
 }
 
-function introFram() {
-  S.introSteg = Math.min(INTRO_STEG.length - 1, S.introSteg + 1);
-  ritaIntro();
+function rundturFram() {
+  rundturSteg += 1;
+  visaRundtur();
 }
 
-function introBak() {
-  S.introSteg = Math.max(0, S.introSteg - 1);
-  ritaIntro();
+function rundturBak() {
+  rundturSteg = Math.max(0, rundturSteg - 1);
+  visaRundtur();
 }
 
-function stangIntro() {
+function flyttaRundtur() {
+  const kort = document.getElementById("rundtur");
+  if (kort) kort.classList.toggle("uppe");
+}
+
+function avslutaRundtur() {
   try {
     localStorage.setItem("bj_intro", UI_VERSION);
   } catch (_) {}
-  const el = document.getElementById("intro");
-  if (el) el.remove();
+  const kort = document.getElementById("rundtur");
+  if (kort) kort.remove();
 }
 
 function introBehovs() {
@@ -6788,10 +6812,7 @@ function render() {
     artiklar: viewArticles,
     mallar: viewTemplates,
     handelser: viewEvents,
-    intro: () => {
-      go("oversikt");
-      setTimeout(() => visaIntro(true), 200);
-    },
+    intro: () => setTimeout(startaRundtur, 100),
     gallring: viewGallring,
     ekonomi: viewEconomy,
     besok: (S.id ? viewVisit : viewVisits),

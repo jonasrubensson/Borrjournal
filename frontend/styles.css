@@ -212,7 +212,10 @@ legend{font-family:var(--cond);font-size:15px;font-weight:700;text-transform:upp
               font-size:9.5px;line-height:15px;min-width:16px;height:16px}
 
   /* Toppfält: sök tar plats, knappar behåller tumstorlek */
-  .top{padding:8px 12px;gap:8px}
+  /* Kortformen skrev tidigare över hela padding, inklusive utrymmet för
+     telefonens statusrad. Därför hamnade sökrutan under klockan. */
+  .top{padding:calc(8px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right))
+       8px calc(12px + env(safe-area-inset-left));gap:8px}
   .top .btn{padding:8px 10px;min-height:42px}
   .who span:not(.av){display:none}
   .view{padding:14px 12px 84px}
@@ -372,16 +375,23 @@ img.qr{border:1px solid var(--line);border-radius:3px;background:#fff;padding:6p
 .merrad .m{display:block;font-size:13px;color:var(--stone);margin-top:2px}
 .merrad .pil{color:var(--stone);font-size:16px}
 
-/* Introduktionen. Visas en gång, och går att ta om från Mer. */
-.introskarm{position:fixed;inset:0;z-index:200;background:rgba(14,31,42,.55);
-  display:flex;align-items:flex-end;justify-content:center;
-  padding:16px calc(16px + env(safe-area-inset-left)) calc(16px + env(safe-area-inset-bottom))
-          calc(16px + env(safe-area-inset-right))}
-@media (min-width:620px){.introskarm{align-items:center}}
-.introkort{background:#fff;border-radius:6px;padding:24px;max-width:460px;width:100%;
-  box-shadow:0 18px 48px rgba(14,31,42,.28)}
-.introkort h2{font-size:20px;margin:12px 0 8px;line-height:1.25}
-.introkort p{margin:0;color:var(--ink-2);font-size:15.5px;line-height:1.55}
-.introprickar{display:flex;gap:6px;margin-top:18px}
-.introprickar span{width:7px;height:7px;border-radius:50%;background:var(--line)}
-.introprickar span.pa{background:var(--water);width:20px;border-radius:4px}
+/* Rundturen. Ligger som en list längst ned så att vyn bakom syns, och kan
+   flyttas upp om den täcker något man vill titta på. */
+.rundtur{position:fixed;left:0;right:0;bottom:0;z-index:200;background:#fff;
+  border-top:2px solid var(--water);box-shadow:0 -10px 30px rgba(14,31,42,.18);
+  padding:14px calc(16px + env(safe-area-inset-right))
+          calc(14px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+  animation:rundturupp .22s ease}
+.rundtur.uppe{bottom:auto;top:0;border-top:none;border-bottom:2px solid var(--water);
+  box-shadow:0 10px 30px rgba(14,31,42,.18);
+  padding-top:calc(14px + env(safe-area-inset-top))}
+@keyframes rundturupp{from{transform:translateY(14px);opacity:0}to{transform:none;opacity:1}}
+@media (min-width:900px){.rundtur{left:auto;right:22px;bottom:22px;width:400px;border-radius:6px;
+  border:1px solid var(--line);border-top:2px solid var(--water)}}
+.rundturhuvud{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.rundturhuvud strong{font-size:16.5px}
+.rundturnr{font-family:var(--mono);font-size:11px;color:#fff;background:var(--water);
+  padding:2px 7px;border-radius:10px}
+.rundturstang{margin-left:auto;background:none;border:none;color:var(--stone);font-size:17px;
+  cursor:pointer;padding:2px 6px;min-height:auto}
+.rundtur p{margin:0;font-size:14.5px;line-height:1.5;color:var(--ink-2)}
