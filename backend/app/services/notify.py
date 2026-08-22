@@ -103,7 +103,141 @@ async def send_email(
     if conf.get("username"):
         kwargs["username"] = conf["username"]
         kwargs["password"] = conf.get("password") or ""
-    await aiosmtplib.send(message, **kwargs)
+
+    try:
+        await aiosmtplib.send(message, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(tolka_smtp_fel(exc, conf)) from exc
+
+
+def tolka_smtp_fel(exc: Exception, conf: dict) -> str:
+    """Översätter SMTP-fel till något som går att göra något åt.
+
+    Servrarnas egna meddelanden säger sällan vad man ska ändra. Gmail och
+    Microsoft har dessutom var sin fälla som inte har med lösenordet att göra.
+    """
+    text = str(exc)
+    host = (conf.get("host") or "").lower()
+    kod = ""
+    for m in ("535", "550", "554", "530", "421"):
+        if m in text:
+            kod = m
+            break
+
+    if "5.7.139" in text or "5.7.30" in text or (kod == "535" and "office365" in host):
+        return (
+            "Microsoft nekar inloggningen. Det beror nästan aldrig på lösenordet: "
+            "SMTP AUTH är avstängt som standard för varje brevlåda. En administratör "
+            "behöver slå på Autentiserad SMTP för kontot i Microsoft 365 admin center, "
+            "under Användare, Aktiva användare, E-post, Hantera e-postappar. "
+            f"({text[:120]})"
+        )
+    if kod == "535" and "gmail" in host:
+        return (
+            "Google nekar inloggningen. Med tvåstegsverifiering går det inte att använda "
+            "ditt vanliga lösenord: skapa ett app-lösenord på "
+            "myaccount.google.com/apppasswords och använd det i stället. "
+            f"({text[:120]})"
+        )
+    if kod == "535":
+        return f"Servern nekade användarnamn eller lösenord. ({text[:150]})"
+    if "5.7.60" in text or "SendAsDenied" in text:
+        return (
+            "Avsändaradressen får inte skicka från det inloggade kontot. Sätt avsändaren "
+            "till samma adress som användarnamnet, eller ge kontot rätt att skicka som "
+            f"den adressen. ({text[:120]})"
+        )
+    if "certificate" in text.lower() or "ssl" in text.lower():
+        return (
+            "TLS-anslutningen gick inte igenom. Kontrollera att port och krypteringsval "
+            "hör ihop: 587 med STARTTLS, eller 465 med SSL. Microsoft 365 stöder bara "
+            f"587 med STARTTLS. ({text[:120]})"
+        )
+    if "timed out" in text.lower() or "timeout" in text.lower():
+        return (
+            "Servern svarade inte i tid. Kontrollera adress och port, och att "
+            f"brandväggen släpper ut trafik dit. ({text[:120]})"
+        )
+    if "Connection refused" in text or "getaddrinfo" in text:
+        return f"Nådde inte servern. Kontrollera adressen och att servern är nåbar. ({text[:120]})"
+    return f"E-posten gick inte iväg: {text[:200]}"
+
+
+# Färdiga inställningar för de vanligaste leverantörerna.
+LEVERANTORER = {
+    "gmail": {
+        "namn": "Gmail eller Google Workspace",
+        "host": "smtp.gmail.com",
+        "port": 587,
+        "security": "starttls",
+        "hjalp": (
+            "Användarnamn är hela adressen. Har kontot tvåstegsverifiering måste du skapa "
+            "ett app-lösenord på myaccount.google.com/apppasswords och använda det, inte "
+            "ditt vanliga lösenord."
+        ),
+    },
+    "smtp2go": {
+        "namn": "SMTP2GO",
+        "host": "mail.smtp2go.com",
+        "port": 587,
+        "security": "starttls",
+        "hjalp": (
+            "Skapa en SMTP-användare i deras panel, det är den du loggar in med, inte "
+            "ditt kontolösenord. Verifiera er avsändardomän så att mejlen inte hamnar i "
+            "skräpposten. Portarna 587, 2525 och 8025 fungerar om brandväggen stoppar 587."
+        ),
+    },
+    "brevo": {
+        "namn": "Brevo",
+        "host": "smtp-relay.brevo.com",
+        "port": 587,
+        "security": "starttls",
+        "hjalp": (
+            "Användarnamnet är den inloggning du får under SMTP och API, och lösenordet är "
+            "den SMTP-nyckel som skapas där. Verifiera avsändardomänen."
+        ),
+    },
+    "mailgun": {
+        "namn": "Mailgun",
+        "host": "smtp.eu.mailgun.org",
+        "port": 587,
+        "security": "starttls",
+        "hjalp": (
+            "Använd den europeiska servern om kontot är skapat i EU, annars "
+            "smtp.mailgun.org. Användarnamn och lösenord hittas under Sending, Domain "
+            "settings, SMTP credentials."
+        ),
+    },
+    "postmark": {
+        "namn": "Postmark",
+        "host": "smtp.postmarkapp.com",
+        "port": 587,
+        "security": "starttls",
+        "hjalp": (
+            "Både användarnamn och lösenord är samma Server API Token. Avsändaradressen "
+            "måste vara en verifierad Sender Signature."
+        ),
+    },
+    "office365": {
+        "namn": "Microsoft 365 eller Outlook",
+        "host": "smtp.office365.com",
+        "port": 587,
+        "security": "starttls",
+        "hjalp": (
+            "Bara port 587 med STARTTLS fungerar, inte 465. En administratör måste dessutom "
+            "slå på Autentiserad SMTP för brevlådan, det är avstängt som standard. "
+            "Microsoft håller på att fasa ut lösenordsinloggning för SMTP, så räkna med att "
+            "det behöver bytas mot en tjänst för utskick längre fram."
+        ),
+    },
+    "eget": {
+        "namn": "Annan eller egen server",
+        "host": "",
+        "port": 587,
+        "security": "starttls",
+        "hjalp": "Fyll i uppgifterna du fått av den som driver e-postservern.",
+    },
+}
 
 
 # ---------------- webbpush ----------------
