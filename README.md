@@ -820,6 +820,187 @@ Besök med koordinat har tre länkar: **Visa på karta** och **Vägbeskrivning**
 **Se platsen** visar bara punkten. Alla öppnas i ny flik med `noopener`, så att den externa sidan
 inte kan röra appen.
 
+## Signering av offerter
+
+En fristående tjänst i en egen container, med egen databas och egen domän. Den vet ingenting om
+kunder, anläggningar eller journaler — bara att ett dokument ska godkännas av en viss
+e-postadress.
+
+**Borrjournal öppnar aldrig någon väg inåt.** Den skickar dokumentet utåt och frågar sedan med
+jämna mellanrum om något hänt, precis som med e-post. Borrjournal kan därför ligga kvar bakom
+mTLS.
+
+### Slå på signeringen
+
+Lägg till i `.env` och kör `./uppdatera.sh`:
+
+```
+SIGNERING_NYCKEL=<openssl rand -hex 32>
+SIGNERING_URL=http://signering:8000
+SIGNERING_URL_PUBLIK=https://signera.dinfirma.se
+```
+
+**SIGNERING_URL_PUBLIK är den adress kunden får i mejlet.** Sätts den inte pekar länkarna på
+exempeladressen och fungerar inte. För test på egen server duger `http://din-server:8010`,
+men använd https innan riktiga kunder får länkar.
+
+**E-post ställs in på ett enda ställe:** Inställningar → Notiser. Uppgifterna skickas
+automatiskt vidare till signeringstjänsten när de sparas och när en signering skapas. Vill du
+hellre slippa ha lösenordet på den publika tjänsten sätter du `SMTP_HOST` med flera i miljön
+i stället, då används de och det som skickas från Borrjournal ignoreras.
+
+**Provkör innan första kunden.** Inställningar → Signering har en knapp som kontrollerar
+adress och e-post och skickar ett testmeddelande till dig, utan att någon kund berörs.
+
+### Så går det till
+
+1. **Skicka för signering** på offerten. Kunden får ett mejl med en länk. Ingen bilaga här —
+   det som ska godkännas läses på signeringssidan, så att det som loggas är samma fil.
+2. Kunden öppnar länken och begär en engångskod till sin e-post.
+3. Först efter rätt kod visas dokumentet. Kunden kan rita sin namnteckning, kryssar i att den
+   godkänner, och signerar.
+4. Kunden får **den signerade handlingen som bilaga**, med tidpunkt, IP-adress och dokumentets
+   kontrollsumma i meddelandet.
+5. Borrjournal hämtar hem allt, sparar bland kundens dokument med journalrad, och säger till att
+   tjänsten får radera sin kopia.
+
+Den signerade handlingen får **en signaturrad längst ned på varje sida** i originalet, utöver
+beviset sist. Skriver någon ut en enskild sida syns det därför att den är godkänd.
+
+### Var loggen finns
+
+Signeringens händelseförlopp sparas på fyra ställen, med olika syften:
+
+| Var | Vad du hittar |
+|---|---|
+| **På offerten** | Hela händelseförloppet i en tabell: tidpunkt, händelse, IP-adress och
+webbläsare, plus dokumentets kontrollsumma och om kedjan är obruten. Enklaste stället |
+| **I den signerade PDF:en** | Samma uppgifter på en bevissida sist, plus namnteckningen. Det
+är den handling du visar upp i en tvist |
+| **I kundens journal** | En anteckning med hela förloppet i text, så att det syns i kundens
+historik tillsammans med allt annat |
+| **I händelseloggen** | Inställningar, Logg. Visar vem hos er som skickade offerten för
+signering och när |
+
+Kunden får dessutom sin egen kopia mejlad direkt efter signeringen, med tidpunkt, IP-adress och
+kontrollsumma, och den signerade handlingen som bilaga. Det är en poäng i sig: någon som påstår
+att de inte signerat måste också förklara varför de inte reagerade på kvittensen.
+
+Går något fel i bakgrunden, till exempel att kedjan visar sig bruten när resultatet hämtas hem,
+hamnar det i **Mer, Systemhändelser**.
+
+### Medan kunden funderar
+
+När en offert ligger hos kunden för signering visas **Väntar på kundens signering** på
+offerten, och knapparna för att sätta besked för hand är borta. Det är kunden som svarar, och
+två svar samtidigt skulle bli motstridiga.
+
+Behöver du ändå svara själv, till exempel för att kunden ringde i stället, finns **Avbryt och
+svara själv**. Länken kunden fått slutar inte fungera, och signerar de ändå hämtas svaret hem
+som vanligt.
+
+### Kontrollsummor
+
+Efter signering får kunden **två filer** i kvittensen, var och en med sin egen kontrollsumma
+utskriven i mejlet:
+
+| Fil | Vad det är |
+|---|---|
+| `OFF-1003.pdf` | Det kunden godkände. Summan på signeringsbeviset gäller den här filen |
+| `OFF-1003 signerad.pdf` | Samma handling med signaturrad på varje sida och beviset sist |
+
+Båda sparas också bland kundens dokument, och båda summorna visas på offerten i appen.
+
+Kontrollera en fil:
+
+```
+certutil -hashfile "OFF-1003.pdf" SHA256      Windows
+shasum -a 256 "OFF-1003.pdf"                   macOS och Linux
+```
+
+**Algoritmen är SHA-256.** Summan gäller alltid den fil vars namn står bredvid den. Den
+signerade filen kan av naturliga skäl inte innehålla sin egen summa, därför står den i mejlet
+och i appen i stället.
+
+### Egna texter
+
+**Inställningar → Företag** har fyra texter som går att skriva om: mejlet med länken,
+inledningen på signeringssidan, texten kunden kryssar i, och förklaringen på signeringsbeviset.
+Lämnas de tomma används standardtexterna.
+
+I texterna byts `{referens}`, `{rubrik}`, `{belopp}`, `{avsandare}`, `{lank}` och
+`{giltig_till}` ut mot rätt värden.
+
+Var försiktig med förklaringen på beviset. Standardtexten talar om vad kontrollsummorna betyder
+och att signaturen är en enkel elektronisk signatur. Skrivs det bort blir beviset svagare.
+
+### Vad som gör beviset starkt
+
+* **Hashkedja.** Varje post i loggen innehåller kontrollsumman av den föregående. Ändras en rad
+  i efterhand bryts kedjan och det går att upptäcka — även om det är ni som ändrar.
+* **Allt loggas**, inte bara signaturen: när länken skickades, när den öppnades, varifrån,
+  hur många kodförsök som gjordes.
+* **Dokumentets kontrollsumma** är beräknad på exakt den fil kunden såg.
+* **Revisionssida** läggs sist i den signerade PDF:en med allt detta.
+
+### Vad det inte är
+
+Detta är en **enkel elektronisk signatur**. Den är bindande enligt eIDAS artikel 25.1 och svensk
+avtalsfrihet, men engångskoden bevisar att någon hade tillgång till en e-postlåda, inte vem
+personen är. BankID knyter till personnummer och är en annan sak i en tvist. Datamodellen är
+förberedd för att byta signeringssteget mot BankID utan att röra resten.
+
+### Inställningar
+
+```
+SIGNERING_NYCKEL=<openssl rand -hex 32>
+SIGNERING_URL=http://signering:8000
+SIGNERING_URL_PUBLIK=https://signera.dinfirma.se
+```
+
+Tjänsten behöver en egen domän eller underdomän som pekar på port 8010, **utan** mTLS. Bara den
+domänen är publik, Borrjournal förblir stängd.
+
+## E-post
+
+Appen skickar bara utående post: påminnelser, offerter och signeringslänkar. Den tar aldrig
+emot mejl. Därför behövs ingen brevlåda, bara en avsändare.
+
+Välj leverantör under **Inställningar → Notiser** så fylls server, port och kryptering i.
+
+| Leverantör | Server | Att tänka på |
+|---|---|---|
+| **SMTP2GO** | mail.smtp2go.com | Skapa en SMTP-användare i panelen, det är den du loggar in
+med. Portarna 2525 och 8025 fungerar också om brandväggen stoppar 587 |
+| **Brevo** | smtp-relay.brevo.com | Lösenordet är SMTP-nyckeln, inte kontolösenordet |
+| **Mailgun** | smtp.eu.mailgun.org | Använd EU-servern om kontot är skapat i EU |
+| **Postmark** | smtp.postmarkapp.com | Användarnamn och lösenord är samma API-token |
+| **Gmail** | smtp.gmail.com | Med tvåstegsverifiering krävs **app-lösenord** från
+myaccount.google.com/apppasswords |
+| **Microsoft 365** | smtp.office365.com | SMTP AUTH är avstängt som standard och måste slås på
+av en administratör. Port 465 fungerar aldrig |
+
+Alla använder port 587 med STARTTLS om inget annat anges.
+
+**En relätjänst är att föredra framför en vanlig brevlåda.** De är byggda för utgående post,
+har ingen autentisering som stängs av, låter er använda en egen avsändardomän och visar om
+mejlen kommit fram. Microsoft håller dessutom på att fasa ut lösenordsinloggning för SMTP helt,
+så den vägen kommer behöva bytas ändå.
+
+**Verifiera avsändardomänen** (SPF och DKIM) hos den leverantör ni väljer. Utan det hamnar
+offerter och signeringslänkar lätt i kundens skräppost, och då spelar resten ingen roll.
+
+Går något fel översätts serverns svar till något man kan agera på, i stället för en rå felkod.
+
+## Första gången
+
+Första inloggningen visar en kort genomgång i sju steg: vad **Idag**, **Kunder**, **Besök** och
+**Fakturera** är till för, hur kundkortets fem flikar hänger ihop, vad som är gjort för arbete
+ute i fält, och vad en administratör bör ställa in innan ni börjar på riktigt.
+
+Den går att hoppa över och att ta om när som helst under **Mer, Så fungerar appen**. Varje
+användare får den en gång, på sin egen enhet.
+
 ## Inaktiva kunder och gallring
 
 **Mer, Inaktiva kunder och gallring.** Två frågor med olika syfte i samma vy.
