@@ -215,11 +215,15 @@ def las_ui_version() -> str:
 
 @app.get("/api/version")
 async def version():
+    from .services import signering as _sign
+
     ui = las_ui_version()
     return {
         "version": APP_VERSION,
         "ui_version": ui,
         "in_sync": (ui == APP_VERSION) if ui else None,
+        # Gränssnittet visar bara funktioner som faktiskt går att använda
+        "funktioner": {"signering": _sign.aktiverad()},
     }
 
 

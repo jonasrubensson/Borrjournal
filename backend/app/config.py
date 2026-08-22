@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     # "https://challenges.cloudflare.com https://static.cloudflareinsights.com"
     csp_extra_sources: str = ""
 
+    # Signeringstjänsten. Tom URL stänger av funktionen.
+    signering_url: str = ""
+    signering_nyckel: str = ""
+
     # SGU:s brunnsarkiv, öppna data. Töm sgu_bulk_url för att stänga av.
     # Bulkfiler per län, en fil per anrop. Verifierat format.
     sgu_bulk_url: str = "https://resource.sgu.se/data/oppnadata/grundvatten/brunnar"

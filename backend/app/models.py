@@ -436,6 +436,15 @@ class Quote(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sent_to: Mapped[str] = mapped_column(String(255), default="")
     decided_at: Mapped[str] = mapped_column(String(10), default="")
+    # Signeringens händelseförlopp som JSON, för att kunna visas på offerten
+    signing_log: Mapped[str] = mapped_column(Text, default="")
+    signed_at: Mapped[str] = mapped_column(String(30), default="")
+    signed_by: Mapped[str] = mapped_column(String(200), default="")
+    signing_hash: Mapped[str] = mapped_column(String(64), default="")
+    signing_chain_ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    signing_hash_signerad: Mapped[str] = mapped_column(String(64), default="")
+    # Satt när offerten ligger hos signeringstjänsten och väntar på kundens svar
+    signing_pending: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
     created_by: Mapped[str] = mapped_column(String(120), default="")

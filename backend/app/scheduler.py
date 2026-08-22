@@ -151,6 +151,18 @@ async def loop() -> None:
             # Förfallna påminnelser kollas varje varv, alltså varje minut
             await _check_reminders()
 
+            # Har någon signerat? Frågan går ut från oss, aldrig tvärtom.
+            try:
+                from .services import signering as _sign
+
+                if _sign.aktiverad():
+                    async with SessionLocal() as db:
+                        r = await _sign.hamta_resultat(db)
+                        if r["hamtade"]:
+                            print(f"[schemaläggare] {r['hamtade']} signeringar hämtade")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[schemaläggare] signeringskontroll misslyckades: {exc}")
+
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - schemaläggaren får aldrig dö
