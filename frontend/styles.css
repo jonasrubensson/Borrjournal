@@ -35,7 +35,12 @@ a{color:var(--water)}
 .side .foot button{background:none;border:none;color:#8FA9B2;padding:0;font-family:var(--mono);font-size:10.5px;text-decoration:underline}
 
 .main{min-width:0;display:flex;flex-direction:column}
-.top{background:var(--panel);border-bottom:1px solid var(--line);padding:10px 22px;display:flex;gap:14px;align-items:center;position:sticky;top:0;z-index:20}
+/* viewport-fit=cover gör att sidan går ända upp under telefonens statusrad.
+   Utan padding hamnar sökfältet under klockan och går inte att träffa. */
+.top{background:var(--panel);border-bottom:1px solid var(--line);
+  padding:calc(10px + env(safe-area-inset-top)) calc(22px + env(safe-area-inset-right)) 10px
+          calc(22px + env(safe-area-inset-left));
+  display:flex;gap:14px;align-items:center;position:sticky;top:0;z-index:20}
 .search{flex:1;max-width:460px;position:relative}
 .search input{width:100%;padding:8px 10px 8px 32px;border:1px solid var(--line);border-radius:var(--r);font-family:inherit;font-size:15px;background:#FBFCFC}
 .search input:focus{border-color:var(--water);background:#fff;outline:none}
@@ -366,3 +371,17 @@ img.qr{border:1px solid var(--line);border-radius:3px;background:#fff;padding:6p
 .merrad strong{display:block;font-size:15.5px;font-weight:600}
 .merrad .m{display:block;font-size:13px;color:var(--stone);margin-top:2px}
 .merrad .pil{color:var(--stone);font-size:16px}
+
+/* Introduktionen. Visas en gång, och går att ta om från Mer. */
+.introskarm{position:fixed;inset:0;z-index:200;background:rgba(14,31,42,.55);
+  display:flex;align-items:flex-end;justify-content:center;
+  padding:16px calc(16px + env(safe-area-inset-left)) calc(16px + env(safe-area-inset-bottom))
+          calc(16px + env(safe-area-inset-right))}
+@media (min-width:620px){.introskarm{align-items:center}}
+.introkort{background:#fff;border-radius:6px;padding:24px;max-width:460px;width:100%;
+  box-shadow:0 18px 48px rgba(14,31,42,.28)}
+.introkort h2{font-size:20px;margin:12px 0 8px;line-height:1.25}
+.introkort p{margin:0;color:var(--ink-2);font-size:15.5px;line-height:1.55}
+.introprickar{display:flex;gap:6px;margin-top:18px}
+.introprickar span{width:7px;height:7px;border-radius:50%;background:var(--line)}
+.introprickar span.pa{background:var(--water);width:20px;border-radius:4px}

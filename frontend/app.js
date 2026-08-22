@@ -2,9 +2,10 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "4.0.1";
+const UI_VERSION = "4.7.0";
 
 const S = {
+  funktioner: {},
   token: localStorage.getItem("bj_token") || null,
   user: JSON.parse(localStorage.getItem("bj_user") || "null"),
   route: "oversikt",
@@ -119,6 +120,7 @@ const MER_POSTER = [
   ["nara", "Jobb i närheten", "Vad som ligger runt omkring"],
   ["ny", "Registrera anläggning", "Ny brunn eller pump"],
   ["konto", "Mitt konto", "Lösenord, tvåfaktor, textstorlek"],
+  ["intro", "Så fungerar appen", "Kort genomgång av var saker finns"],
   ["gallring", "Inaktiva kunder och gallring", "Vem har varit tyst, vad ska rensas"],
   ["handelser", "Systemhändelser", "Fel i bakgrunden"],
 ];
@@ -191,6 +193,8 @@ async function doLogin() {
     await laddaForetag();
     go("oversikt");
     toast(`Inloggad som ${res.user.full_name || res.user.username}`);
+    // Första gången någon loggar in: visa var saker finns
+    if (introBehovs()) setTimeout(() => visaIntro(true), 700);
   } catch (e) {
     if (e.status === 428) {
       loginNeedsTotp = true;
@@ -2691,6 +2695,231 @@ async function haevSparr(anvandare, ip) {
   adminInloggningar();
 }
 
+
+async function adminSignering() {
+  const token = claim();
+  const d = await api("/notifications/signering");
+  if (!current(token) || !$("#adminbody")) return;
+  S.data.signering = d;
+
+  const steg = (nr, rubrik, ok, text) => `
+    <div class="filerow">
+      <div class="ftype" style="background:${ok === true ? "#2E7D5B" : ok === false ? "#A6402F" : "var(--stone)"}">${
+        ok === true ? "✓" : ok === false ? "!" : nr
+      }</div>
+      <div style="flex:1;min-width:0"><div style="font-weight:600">${rubrik}</div>
+        <div class="fmeta">${text}</div></div></div>`;
+
+  $("#adminbody").innerHTML = `
+  <div class="card"><div class="hd"><h2>Signering av offerter</h2>
+    <span class="tag ${d.aktiverad && d.nar ? "ok" : "n"}">${
+      d.aktiverad && d.nar ? "Igång" : d.aktiverad ? "Når inte tjänsten" : "Inte påslagen"
+    }</span></div>
+    <div class="pad">
+      <p class="lead" style="margin-top:0">Kunden får offerten som bilaga och en länk. På länken
+        styrker kunden sin e-postadress med en engångskod och godkänner. Signerad handling med
+        fullständig logg mejlas tillbaka till kunden och sparas bland kundens dokument.</p>
+
+      ${steg(1, "Tjänsten svarar", d.aktiverad ? d.nar : null,
+        d.nar === true
+          ? `Svarar på ${esc(d.url)}`
+          : d.aktiverad
+            ? `Når inte ${esc(d.url)}. ${esc(d.fel || "")}`
+            : "Sätt SIGNERING_URL i .env och starta om")}
+      ${steg(2, "Delad nyckel", d.nyckel_satt ? d.nyckel_lang_nog : null,
+        !d.nyckel_satt
+          ? "SIGNERING_NYCKEL saknas i .env"
+          : !d.nyckel_lang_nog
+            ? "För kort, minst 24 tecken krävs"
+            : "Satt och tillräckligt lång")}
+      ${steg(3, "E-post", null,
+        "Hämtas från Inställningar, Notiser och skickas automatiskt till tjänsten. " +
+        "Kör testet nedan för att se att det fungerar.")}
+      ${steg(4, "Publik adress", null,
+        "Den adress kunden får i mejlet. Måste gå att nå utifrån, utan klientcertifikat.")}
+
+      ${
+        d.aktiverad && d.nar
+          ? `<div class="eyebrow" style="margin-top:18px">Provkör</div>
+             <p class="hint" style="margin-top:0">Kontrollerar adress och e-post utan att någon
+               kund berörs. Fyll i din egen adress så skickas ett testmeddelande dit.</p>
+             <div class="row">
+               <input id="sig_till" placeholder="din@adress.se" style="flex:1;min-width:190px">
+               <button class="btn pri sm" onclick="testaSignering()">Provkör</button>
+             </div>
+             <div id="sig_resultat"></div>`
+          : `<div class="pad" style="padding:12px;background:#FBF6EA;border-radius:3px;margin-top:12px">
+             <p style="margin:0 0 8px"><strong>Så här slår du på det.</strong> Lägg till i
+               <code>.env</code>:</p>
+             <pre style="margin:0;font-size:12px;font-family:var(--mono);white-space:pre-wrap">SIGNERING_NYCKEL=&lt;openssl rand -hex 32&gt;
+SIGNERING_URL=http://signering:8000
+SIGNERING_URL_PUBLIK=http://din-server:8010</pre>
+             <p class="hint" style="margin:8px 0 0">Kör sedan <code>./uppdatera.sh</code>.
+               Nyckeln måste vara samma på båda sidor. För test på egen server duger en
+               http-adress med IP eller värdnamn, men använd https innan riktiga kunder
+               får länkar.</p></div>`
+      }
+    </div></div>`;
+}
+
+async function testaSignering() {
+  const box = $("#sig_resultat");
+  box.innerHTML = `<div class="skel" style="margin-top:12px"></div>`;
+  try {
+    const r = await api("/notifications/signering/test", {
+      method: "POST",
+      body: { till: val("sig_till") },
+    });
+    const rad = (ok, text) =>
+      `<div style="display:flex;gap:8px;padding:4px 0;font-size:14px">
+        <span style="color:${ok ? "var(--ok)" : "var(--alert)"};font-weight:700">${ok ? "✓" : "✗"}</span>
+        <span>${text}</span></div>`;
+
+    box.innerHTML =
+      `<div style="margin-top:12px">` +
+      rad(r.publik_url_satt, `Publik adress: <code>${esc(r.publik_url)}</code>`) +
+      rad(r.mejl_konfigurerat,
+        r.mejl_konfigurerat
+          ? `E-post via ${esc(r.mejl_server)} (${esc(r.mejl_kalla)})`
+          : "E-post saknas hos tjänsten") +
+      (r.mejl_fungerar === null
+        ? ""
+        : rad(r.mejl_fungerar,
+            r.mejl_fungerar
+              ? "Testmeddelande skickat, kolla inkorgen"
+              : `Utskicket misslyckades: ${esc(r.mejl_fel)}`)) +
+      (r.varningar || [])
+        .map((v) => `<p class="hint" style="color:var(--brass);margin:8px 0 0">${esc(v)}</p>`)
+        .join("") +
+      `</div>`;
+  } catch (e) {
+    box.innerHTML = `<p class="hint" style="color:var(--alert);margin-top:12px">${esc(e.message)}</p>`;
+  }
+}
+
+
+/* ---------------- introduktion ---------------- */
+/* Appen är byggd efter hur dagen ser ut, inte efter databasen. Det är inte
+   självklart för någon som öppnar den första gången, så det får en kort
+   genomgång. Den går att hoppa över och att ta om från Mer. */
+const INTRO_STEG = [
+  {
+    rubrik: "Välkommen till Borrjournal",
+    text:
+      "Allt om era brunnar, kunder och jobb på ett ställe. Den här genomgången tar en halv " +
+      "minut och visar var saker finns. Du kan ta om den när som helst under Mer.",
+    bild: "M3 10 L10 3 L17 10 M5 8 v9 h10 V8",
+  },
+  {
+    rubrik: "Idag visar vad som behöver göras",
+    text:
+      "Förfallna serviceärenden, obetalda fakturor och offerter utan besked. Härifrån " +
+      "startar du också en arbetsorder direkt när du är ute.",
+    bild: "M3 10 L10 3 L17 10 M5 8 v9 h10 V8",
+  },
+  {
+    rubrik: "Kunder rymmer historiken",
+    text:
+      "Varje kund har fem flikar: Översikt med det som är öppet, Journal med allt som hänt, " +
+      "Ekonomi med offerter och order, Filer med foton och protokoll, och Anläggning med " +
+      "brunnens data.",
+    bild: "M10 9 a3 3 0 1 0 0-6 a3 3 0 0 0 0 6 M3 17 c0-4 3-6 7-6 s7 2 7 6",
+  },
+  {
+    rubrik: "Besök är innan de blivit kunder",
+    text:
+      "Boka in ett platsbesök, få underlag om grannbrunnarnas djup och kapacitet från SGU, " +
+      "och gör kund av besöket när det blir affär. Ringer någon och vill ha ett pris finns " +
+      "Offert på förfrågan här.",
+    bild: "M10 17 s6-5.3 6-10a6 6 0 1 0-12 0c0 4.7 6 10 6 10z M10 5 v4 M8 7 h4",
+  },
+  {
+    rubrik: "Fakturera samlar pengarna",
+    text:
+      "Vad som är utfört men inte fakturerat, och vad som är fakturerat men obetalt. " +
+      "Ingenting blir liggande.",
+    bild: "M3 5 h14 v10 H3z M3 8 h14 M6 12 h4",
+  },
+  {
+    rubrik: "Ute i fält",
+    text:
+      "Ta foton direkt från kameran, hämta din position på plats i stället för att skriva " +
+      "adress, och skriv arbetsordern medan du minns vad som gick åt. Kunden kan väljas efteråt.",
+    bild: "M4 7 h3 l1.5-2h5L15 7h1 a1 1 0 0 1 1 1v7 a1 1 0 0 1-1 1H4 a1 1 0 0 1-1-1V8 a1 1 0 0 1 1-1z M10 13 a2.5 2.5 0 1 0 0-5 a2.5 2.5 0 0 0 0 5",
+  },
+  {
+    rubrik: "Innan ni börjar på riktigt",
+    text:
+      "En administratör bör fylla i företagsuppgifter och logotyp, ställa in e-post, och " +
+      "hämta SGU-data för era län. Allt ligger under Mer, Inställningar.",
+    bild: "M10 13 a3 3 0 1 0 0-6 a3 3 0 0 0 0 6 M10 2v3M10 15v3M2 10h3M15 10h3",
+  },
+];
+
+function visaIntro(fran_borjan) {
+  S.introSteg = 0;
+  const gammal = document.getElementById("intro");
+  if (gammal) gammal.remove();
+  const holder = document.createElement("div");
+  holder.innerHTML = `<div id="intro" class="introskarm"><div class="introkort" id="introkort"></div></div>`;
+  document.body.appendChild(holder.firstElementChild);
+  ritaIntro();
+}
+
+function ritaIntro() {
+  const steg = INTRO_STEG[S.introSteg];
+  const sista = S.introSteg === INTRO_STEG.length - 1;
+  const kort = document.getElementById("introkort");
+  if (!kort) return;
+  kort.innerHTML = `
+    <svg width="34" height="34" viewBox="0 0 20 20" fill="none" style="color:var(--water)">
+      <path d="${steg.bild}" stroke="currentColor" stroke-width="1.4"
+        stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <h2>${esc(steg.rubrik)}</h2>
+    <p>${esc(steg.text)}</p>
+    <div class="introprickar">
+      ${INTRO_STEG.map(
+        (_, i) => `<span class="${i === S.introSteg ? "pa" : ""}"></span>`
+      ).join("")}
+    </div>
+    <div class="row" style="margin-top:16px">
+      ${
+        S.introSteg > 0
+          ? `<button class="btn ghost sm" onclick="introBak()">Bakåt</button>`
+          : `<button class="btn ghost sm" onclick="stangIntro()">Hoppa över</button>`
+      }
+      <button class="btn pri" style="margin-left:auto" onclick="${
+        sista ? "stangIntro()" : "introFram()"
+      }">${sista ? "Sätt igång" : "Nästa"}</button>
+    </div>`;
+}
+
+function introFram() {
+  S.introSteg = Math.min(INTRO_STEG.length - 1, S.introSteg + 1);
+  ritaIntro();
+}
+
+function introBak() {
+  S.introSteg = Math.max(0, S.introSteg - 1);
+  ritaIntro();
+}
+
+function stangIntro() {
+  try {
+    localStorage.setItem("bj_intro", UI_VERSION);
+  } catch (_) {}
+  const el = document.getElementById("intro");
+  if (el) el.remove();
+}
+
+function introBehovs() {
+  try {
+    return !localStorage.getItem("bj_intro");
+  } catch (_) {
+    return false;
+  }
+}
+
 /* ---------------- systemhändelser ---------------- */
 /* Bakgrundsjobb har ingen användare att svara. Utan den här listan blir ett
    misslyckat adressuppslag en rad i containerloggen som ingen läser. */
@@ -2764,14 +2993,17 @@ let forhandTimer = null;
 let forhandUrl = null;
 
 function forhandsPanel(path) {
-  return `<div class="card" id="forhandskort" style="margin-top:16px">
+  return `<div class="card" id="forhandskort" style="margin-top:16px;max-width:none">
     <div class="hd"><h2>Förhandsgranskning</h2>
       <span class="hint" id="forhandstatus" style="margin:0"></span>
-      <button class="btn ghost sm" style="margin-left:auto" onclick="doljForhand()">Dölj</button>
+      <a class="btn ghost sm" style="margin-left:auto" id="forhandsoppna" href="#" target="_blank"
+        rel="noopener">Öppna i eget fönster</a>
+      <button class="btn ghost sm" onclick="doljForhand()">Dölj</button>
     </div>
     <div class="pad" style="padding:0">
       <iframe id="forhandsram" title="Förhandsgranskning av dokumentet"
-        style="width:100%;height:70vh;min-height:420px;border:0;display:block;background:#EFF2F1"></iframe>
+        style="width:100%;height:82vh;min-height:520px;border:0;display:block;
+        background:#EFF2F1"></iframe>
     </div>
     <div class="pad" style="border-top:1px solid var(--line)">
       <p class="hint" style="margin:0">Uppdateras automatiskt när du ändrar rader eller texter.
@@ -2794,7 +3026,11 @@ async function uppdateraForhand(path, direkt = false) {
       if (forhandUrl) URL.revokeObjectURL(forhandUrl);
       forhandUrl = URL.createObjectURL(blob);
       const ram2 = document.getElementById("forhandsram");
-      if (ram2) ram2.src = forhandUrl + "#toolbar=0&navpanes=0";
+      // FitH gör att sidan fyller bredden. Utan det visar webbläsaren PDF:en i
+      // sin egen standardzoom, som blir en liten miniatyr mitt i en stor yta.
+      if (ram2) ram2.src = forhandUrl + "#view=FitH&toolbar=0&navpanes=0&pagemode=none";
+      const oppna = document.getElementById("forhandsoppna");
+      if (oppna) oppna.href = forhandUrl;
       if (status) status.textContent = `Uppdaterad ${new Date().toLocaleTimeString("sv-SE").slice(0, 5)}`;
     } catch (_) {
       if (status) status.textContent = "Kunde inte visa";
@@ -2896,6 +3132,7 @@ const genomforSkick = (...a) => enGang('genomforSkick', () => _genomforSkick(...
 const saveCustomer = (...a) => enGang('saveCustomer', () => _saveCustomer(...a));
 const nyOrder = (...a) => enGang('nyOrder', () => _nyOrder(...a));
 const snabbOrder = (...a) => enGang('snabbOrder', () => _snabbOrder(...a));
+const skickaSignering = (...a) => enGang('skickaSignering', () => _skickaSignering(...a));
 
 /* ---------------- pengar: gemensamt ---------------- */
 const kr = (v) =>
@@ -3220,6 +3457,15 @@ async function viewQuote() {
     <button class="btn ghost" onclick="skrivUt('/api/quotes/${q.id}/pdf')">Skriv ut</button>
     <button class="btn ghost" onclick="laddaNer('/api/quotes/${q.id}/pdf?ladda_ner=true','${esc(q.quote_no)}.pdf')">Ladda ner</button>
     ${laser ? "" : `<button class="btn pri" onclick="skickaOffert()">Mejla till kund</button>`}
+    ${
+      laser || !q.lines.length || q.signing_pending
+        ? ""
+        : S.funktioner.signering
+          ? `<button class="btn" onclick="skickaSignering()">Skicka för signering</button>`
+          : S.user.role === "admin"
+            ? `<button class="btn ghost" onclick="go('admin','signering')">Signering är inte påslagen</button>`
+            : ""
+    }
     ${laser ? "" : `<button class="btn ghost" onclick="sparaSomMall()">Spara som mall</button>`}
     ${
       !laser && !q.customer_id && !q.visit_id
@@ -3320,6 +3566,26 @@ function forhandUtkast() {
   }, 900);
 }
 
+async function avbrytSignering() {
+  if (
+    !confirm(
+      "Avbryt signeringen?\n\nLänken kunden fått slutar inte fungera, men du kan sätta " +
+        "besked för hand igen. Har kunden redan signerat hämtas det svaret ändå hem."
+    )
+  )
+    return;
+  try {
+    await api(`/quotes/${S.data.quote.id}`, {
+      method: "PATCH",
+      body: { avbryt_signering: true },
+    });
+    toast("Signeringen avbruten");
+    viewQuote();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
 async function offertBesked(status) {
   await api(`/quotes/${S.data.quote.id}`, { method: "PATCH", body: { status } });
   toast(status === "accepterad" ? "Markerad som accepterad" : "Markerad som avslagen");
@@ -3333,6 +3599,30 @@ async function taBortOffert() {
   toast("Offerten borttagen");
   if (q.customer_id) go("kund", q.customer_id + "/offerter");
   else go("besok", q.visit_id);
+}
+
+/* Skickar offerten för elektronisk signering. Kunden får en länk, styrker sin
+   e-postadress med en engångskod och godkänner. Signerad PDF med fullständig
+   logg hämtas hem automatiskt och hamnar bland kundens dokument. */
+async function _skickaSignering() {
+  const q = S.data.quote;
+  const mottagare = prompt(
+    "Vilken e-postadress ska godkänna offerten?\n\nKunden får en engångskod till just den " +
+      "adressen, så den måste vara rätt.",
+    q.recipient_email || ""
+  );
+  if (mottagare === null) return;
+  if (!mottagare.includes("@")) return toast("Ange en giltig e-postadress", true);
+  try {
+    const r = await api(`/quotes/${q.id}/signering`, {
+      method: "POST",
+      body: { recipient: mottagare.trim() },
+    });
+    toast(`Skickad till ${r.recipient}. Svaret hämtas automatiskt.`);
+    viewQuote();
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 function skickaOffert() {
@@ -5608,18 +5898,22 @@ function planFrom(facilityId) {
 async function viewAdmin() {
   const token = claim();
   const tab =
-    S.tab && ["konton", "inloggningar", "foretag", "notiser", "sgu", "backup", "logg"].includes(S.tab)
+    S.tab &&
+    ["konton", "inloggningar", "signering", "foretag", "notiser", "sgu", "backup", "logg"].includes(
+      S.tab
+    )
       ? S.tab
       : "konton";
   const T = (id, label) =>
     `<button class="${tab === id ? "on" : ""}" onclick="go('admin','${id}')">${label}</button>`;
   mountShell(`
     <div class="spread"><div><div class="eyebrow">Administration</div><h1>Inställningar</h1></div></div>
-    <div class="tabs">${T("konton", "Konton")}${T("inloggningar", "Inloggningar")}${T("foretag", "Företag")}${T("notiser", "Notiser")}${T("sgu", "SGU")}${T("backup", "Backup")}${T("logg", "Logg")}</div>
+    <div class="tabs">${T("konton", "Konton")}${T("inloggningar", "Inloggningar")}${T("signering", "Signering")}${T("foretag", "Företag")}${T("notiser", "Notiser")}${T("sgu", "SGU")}${T("backup", "Backup")}${T("logg", "Logg")}</div>
     <div id="adminbody"><div class="skel"></div><div class="skel"></div></div>`);
 
   if (tab === "konton") await adminUsers();
   else if (tab === "inloggningar") await adminInloggningar();
+  else if (tab === "signering") await adminSignering();
   else if (tab === "foretag") await adminCompany();
   else if (tab === "sgu") await adminSgu();
   else if (tab === "notiser") await adminNotifications();
@@ -5844,8 +6138,12 @@ async function resetTotp(userId, namn) {
 
 async function adminNotifications() {
   const token = claim();
-  const mail = await api("/notifications/email");
+  const [mail, lev] = await Promise.all([
+    api("/notifications/email"),
+    api("/notifications/email/leverantorer").catch(() => ({ leverantorer: {} })),
+  ]);
   if (!current(token) || !$("#adminbody")) return;
+  S.data.mailLeverantorer = lev.leverantorer;
   $("#adminbody").innerHTML = `
   <p class="lead" style="margin-top:0;margin-bottom:16px">Notiser, tvåfaktor och textstorlek för
     ditt eget konto finns under <a href="#/konto">Mitt konto</a>. Här nedan ställs e-post in för
@@ -5853,6 +6151,16 @@ async function adminNotifications() {
 
   <div class="card"><div class="hd"><h2>E-post</h2>
     <span class="tag ${mail.enabled ? "ok" : "n"}">${mail.enabled ? "Aktiv" : "Av"}</span></div><div class="pad">
+    <label class="f">Vilken e-postleverantör</label>
+    <div class="row" style="margin-bottom:6px">
+      ${Object.entries(lev.leverantorer || {})
+        .map(
+          ([nyckel, l]) =>
+            `<button class="btn ghost sm" onclick="valjLeverantor('${nyckel}')">${esc(l.namn)}</button>`
+        )
+        .join("")}
+    </div>
+    <div class="hint" id="lev_hjalp"></div>
     <div class="fgrid">
       <div><label class="f" for="mh">SMTP-server</label><input id="mh" value="${esc(mail.host || "")}" placeholder="smtp.leverantor.se"></div>
       <div><label class="f" for="mp">Port</label><input id="mp" type="number" value="${esc(mail.port || 587)}"></div>
@@ -6224,6 +6532,25 @@ async function adminCompany() {
         dagar därefter. Med 30 och 7 dyker den upp 37 dagar efter fakturadatum.</div>
     </div></div>
 
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Texter vid signering</h2></div>
+    <div class="pad">
+      <p class="lead" style="margin-top:0">Lämna tomt så används standardtexten. I texterna kan du
+        använda <code>{referens}</code>, <code>{rubrik}</code>, <code>{belopp}</code>,
+        <code>{avsandare}</code>, <code>{lank}</code> och <code>{giltig_till}</code>, som byts ut
+        mot rätt värden.</p>
+      <label class="f" for="f_sig_mejl">Mejlet som skickas med länken</label>
+      <textarea id="f_sig_mejl" rows="7" placeholder="Standardtext används"></textarea>
+      <label class="f" for="f_sig_sida">Inledningen på signeringssidan</label>
+      <textarea id="f_sig_sida" rows="2" placeholder="Avsändaren har skickat ett dokument för godkännande"></textarea>
+      <label class="f" for="f_sig_godkann">Texten kunden kryssar i</label>
+      <textarea id="f_sig_godkann" rows="3" placeholder="Jag har läst dokumentet och godkänner {rubrik} på {belopp}. Jag är införstådd med att detta är bindande."></textarea>
+      <label class="f" for="f_sig_bevis">Förklaringen på signeringsbeviset</label>
+      <textarea id="f_sig_bevis" rows="5" placeholder="Standardtext om kontrollsummor och signaturens rättsliga innebörd"></textarea>
+      <p class="hint">Var försiktig med den sista. Standardtexten förklarar vad kontrollsummorna
+        betyder och att signaturen är en enkel elektronisk signatur. Tas det bort blir beviset
+        svagare.</p>
+    </div></div>
+
   <div class="card"><div class="hd"><h2>Uppgifter på offerter och arbetsorder</h2></div><div class="pad">
     <p class="lead" style="margin-top:0">Det här står överst på varje PDF som skickas till kund.</p>
     <div class="fgrid">
@@ -6246,6 +6573,16 @@ async function adminCompany() {
     <button class="btn pri sm" style="margin-top:14px" id="f_spara">Spara</button>
   </div></div>`;
   hydreraBilder($("#adminbody"));
+  // Textrutorna fylls efter renderingen, annars måste innehållet escapas två gånger
+  for (const [id, nyckel] of [
+    ["f_sig_mejl", "signering_text_mejl"],
+    ["f_sig_sida", "signering_text_sida"],
+    ["f_sig_godkann", "signering_text_godkann"],
+    ["f_sig_bevis", "signering_text_bevis"],
+  ]) {
+    const ruta = $("#" + id);
+    if (ruta) ruta.value = f[nyckel] || "";
+  }
   $("#f_spara").onclick = async () => {
     try {
       await api("/company", {
@@ -6258,6 +6595,10 @@ async function adminCompany() {
           betalningsvillkor_dagar: parseInt(val("f_betalvillkor"), 10) || 30,
           paminn_obetald_efter_dagar: parseInt(val("f_obetald"), 10) || 7,
           paminn_offert_efter_dagar: parseInt(val("f_offert"), 10) || 10,
+          signering_text_mejl: val("f_sig_mejl"),
+          signering_text_sida: val("f_sig_sida"),
+          signering_text_godkann: val("f_sig_godkann"),
+          signering_text_bevis: val("f_sig_bevis"),
         },
       });
       toast("Företagsuppgifterna sparade");
@@ -6267,6 +6608,20 @@ async function adminCompany() {
       toast(e.message, true);
     }
   };
+}
+
+/* Fyller i server, port och kryptering så att ingen behöver leta upp dem, och
+   visar den fälla som är typisk för leverantören. */
+function valjLeverantor(nyckel) {
+  const l = (S.data.mailLeverantorer || {})[nyckel];
+  if (!l) return;
+  if (l.host) $("#mh").value = l.host;
+  $("#mp").value = l.port;
+  const krypt = $("#ms");
+  if (krypt) krypt.value = l.security;
+  const hjalp = $("#lev_hjalp");
+  if (hjalp) hjalp.innerHTML = `<strong>${esc(l.namn)}:</strong> ${esc(l.hjalp)}`;
+  if (l.host) toast(`${l.namn} ifyllt`);
 }
 
 async function adminSgu() {
@@ -6433,6 +6788,10 @@ function render() {
     artiklar: viewArticles,
     mallar: viewTemplates,
     handelser: viewEvents,
+    intro: () => {
+      go("oversikt");
+      setTimeout(() => visaIntro(true), 200);
+    },
     gallring: viewGallring,
     ekonomi: viewEconomy,
     besok: (S.id ? viewVisit : viewVisits),
@@ -6470,7 +6829,9 @@ try {
 (async () => {
   try {
     const r = await fetch("/api/version", { cache: "no-store" });
-    const { version, ui_version } = await r.json();
+    const svar = await r.json();
+    const { version, ui_version } = svar;
+    S.funktioner = svar.funktioner || {};
     if (version === UI_VERSION) return;
 
     // Servern läser gränssnittets version från disk. Skiljer den sig från vad
