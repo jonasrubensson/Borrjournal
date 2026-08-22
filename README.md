@@ -994,12 +994,13 @@ Går något fel översätts serverns svar till något man kan agera på, i stäl
 
 ## Första gången
 
-Första inloggningen visar en kort genomgång i sju steg: vad **Idag**, **Kunder**, **Besök** och
-**Fakturera** är till för, hur kundkortets fem flikar hänger ihop, vad som är gjort för arbete
-ute i fält, och vad en administratör bör ställa in innan ni börjar på riktigt.
+Första inloggningen startar en **rundtur i sex steg som faktiskt går till varje vy**. Man ser
+sina egna uppgifter medan förklaringen står kvar längst ned: Idag, Kunder, ett riktigt
+kundkort, Besök, Fakturera och Mer.
 
-Den går att hoppa över och att ta om när som helst under **Mer, Så fungerar appen**. Varje
-användare får den en gång, på sin egen enhet.
+Kortet går att flytta upp om det täcker något man vill titta på, och att hoppa över. Ta om den
+när som helst under **Mer, Så fungerar appen**. Varje användare får den en gång på sin egen
+enhet.
 
 ## Inaktiva kunder och gallring
 
