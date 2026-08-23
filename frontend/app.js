@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "4.7.1";
+const UI_VERSION = "4.8.0";
 
 const S = {
   funktioner: {},
@@ -3016,95 +3016,96 @@ async function kvitteraHandelser() {
 let forhandTimer = null;
 let forhandUrl = null;
 
-function forhandsPanel(path) {
+function forhandsPanel(bas) {
   return `<div class="card" id="forhandskort" style="margin-top:16px;max-width:none">
     <div class="hd"><h2>Förhandsgranskning</h2>
       <span class="hint" id="forhandstatus" style="margin:0"></span>
-      <a class="btn ghost sm" style="margin-left:auto" id="forhandsoppna" href="#" target="_blank"
-        rel="noopener">Öppna i eget fönster</a>
-      <button class="btn ghost sm" onclick="doljForhand()">Dölj</button>
+      <button class="btn ghost sm" style="margin-left:auto" onclick="doljForhand()">Dölj</button>
     </div>
-    <div class="pad" style="padding:0">
-      <iframe id="forhandsram" title="Förhandsgranskning av dokumentet"
-        style="width:100%;height:82vh;min-height:520px;border:0;display:block;
-        background:#EFF2F1"></iframe>
-    </div>
+    <div class="pad" id="forhandssidor" style="background:#EFF2F1"></div>
     <div class="pad" style="border-top:1px solid var(--line)">
-      <p class="hint" style="margin:0">Uppdateras automatiskt när du ändrar rader eller texter.
+      <p class="hint" style="margin:0">Uppdateras när du ändrar rader eller texter.
         Det här är exakt det kunden får.</p>
     </div></div>`;
 }
 
-async function uppdateraForhand(path, direkt = false) {
-  const ram = document.getElementById("forhandsram");
-  if (!ram) return;
+/* Sidorna renderas till bilder på servern i stället för att visas som PDF i en
+   ram. iPhone och iPad visar aldrig PDF inuti en sida, och aldrig alls från en
+   blob-adress, vilket gjorde att förhandsgranskningen blev tom på telefon. */
+async function uppdateraForhand(bas, direkt = false) {
+  const box = document.getElementById("forhandssidor");
+  if (!box) return;
   clearTimeout(forhandTimer);
   const status = document.getElementById("forhandstatus");
 
   const kor = async () => {
     if (status) status.textContent = "Uppdaterar…";
     try {
-      const res = await fetch(path, { headers: { Authorization: `Bearer ${S.token}` } });
-      if (!res.ok) throw new Error("kunde inte hämta");
-      const blob = await res.blob();
-      if (forhandUrl) URL.revokeObjectURL(forhandUrl);
-      forhandUrl = URL.createObjectURL(blob);
-      const ram2 = document.getElementById("forhandsram");
-      // FitH gör att sidan fyller bredden. Utan det visar webbläsaren PDF:en i
-      // sin egen standardzoom, som blir en liten miniatyr mitt i en stor yta.
-      if (ram2) ram2.src = forhandUrl + "#view=FitH&toolbar=0&navpanes=0&pagemode=none";
-      const oppna = document.getElementById("forhandsoppna");
-      if (oppna) oppna.href = forhandUrl;
-      if (status) status.textContent = `Uppdaterad ${new Date().toLocaleTimeString("sv-SE").slice(0, 5)}`;
-    } catch (_) {
-      if (status) status.textContent = "Kunde inte visa";
+      const { sidor } = await api(`${bas}/sidor`);
+      const stampel = Date.now();
+      box.innerHTML = Array.from({ length: sidor }, (_, i) =>
+        `<img class="forhandssida" data-auth-src="/api${bas}/sida/${i + 1}.png?v=${stampel}"
+          alt="Sida ${i + 1} av ${sidor}">`
+      ).join("");
+      hydreraBilder(box);
+      if (status)
+        status.textContent =
+          `${sidor} sida${sidor > 1 ? "r" : ""} · ` +
+          new Date().toLocaleTimeString("sv-SE").slice(0, 5);
+    } catch (e) {
+      box.innerHTML = `<p class="hint" style="padding:14px;margin:0">Kunde inte visa
+        förhandsgranskningen. ${esc(e.message)}</p>`;
+      if (status) status.textContent = "";
     }
   };
   if (direkt) return kor();
-  // Kort fördröjning, annars byggs en PDF per tangenttryckning
+  // Kort fördröjning, annars renderas dokumentet vid varje tangenttryckning
   forhandTimer = setTimeout(kor, 700);
 }
 
-function visaForhand(path) {
-  S.forhand = path;
+function visaForhand(bas) {
+  S.forhand = bas;
   try {
     localStorage.setItem("bj_forhand", "1");
   } catch (_) {}
   const knapp = document.getElementById("forhandsknapp");
   if (knapp) knapp.remove();
   const holder = document.createElement("div");
-  holder.innerHTML = forhandsPanel(path);
+  holder.innerHTML = forhandsPanel(bas);
   $("#view").appendChild(holder.firstElementChild);
-  uppdateraForhand(path, true);
+  uppdateraForhand(bas, true);
 }
 
 function doljForhand() {
+  const bas = S.forhand;
   S.forhand = null;
   try {
     localStorage.removeItem("bj_forhand");
   } catch (_) {}
   const kort = document.getElementById("forhandskort");
   if (kort) kort.remove();
-  if (forhandUrl) {
-    URL.revokeObjectURL(forhandUrl);
-    forhandUrl = null;
-  }
+  // Lägg tillbaka knappen direkt. Utan det försvinner hela avsnittet tills
+  // vyn råkar ritas om, och det ser ut som att funktionen gått sönder.
+  if (bas) laggForhandsknapp(bas);
+}
+
+function laggForhandsknapp(bas) {
+  if (document.getElementById("forhandsknapp")) return;
+  const holder = document.createElement("div");
+  holder.innerHTML = `<div class="row" id="forhandsknapp" style="margin-top:16px">
+    <button class="btn ghost" onclick="visaForhand('${bas}')">Visa förhandsgranskning</button>
+    <span class="hint" style="margin:0">Uppdateras medan du bygger dokumentet.</span></div>`;
+  $("#view").appendChild(holder.firstElementChild);
 }
 
 /* Kopplar in panelen på offert- och ordervyn */
-function kopplaForhand(path) {
+function kopplaForhand(bas) {
   let pa = false;
   try {
     pa = localStorage.getItem("bj_forhand") === "1";
   } catch (_) {}
-  if (pa) visaForhand(path);
-  else {
-    const holder = document.createElement("div");
-    holder.innerHTML = `<div class="row" id="forhandsknapp" style="margin-top:16px">
-      <button class="btn ghost" onclick="visaForhand('${path}')">Visa förhandsgranskning</button>
-      <span class="hint" style="margin:0">Uppdateras medan du bygger dokumentet.</span></div>`;
-    $("#view").appendChild(holder.firstElementChild);
-  }
+  if (pa) visaForhand(bas);
+  else laggForhandsknapp(bas);
 }
 
 
@@ -3157,6 +3158,7 @@ const saveCustomer = (...a) => enGang('saveCustomer', () => _saveCustomer(...a))
 const nyOrder = (...a) => enGang('nyOrder', () => _nyOrder(...a));
 const snabbOrder = (...a) => enGang('snabbOrder', () => _snabbOrder(...a));
 const skickaSignering = (...a) => enGang('skickaSignering', () => _skickaSignering(...a));
+const aterkallaOffert = (...a) => enGang('aterkallaOffert', () => _aterkallaOffert(...a));
 
 /* ---------------- pengar: gemensamt ---------------- */
 const kr = (v) =>
@@ -3497,10 +3499,13 @@ async function viewQuote() {
         : ""
     }
     ${
-      !laser && q.status === "skickad"
-        ? `<button class="btn ghost" onclick="offertBesked('accepterad')">Accepterad</button>
-           <button class="btn ghost" onclick="offertBesked('avslagen')">Avslagen</button>`
-        : ""
+      laser || q.status !== "skickad"
+        ? ""
+        : q.signing_pending
+          ? `<span class="tag soon" style="align-self:center">Väntar på kundens signering</span>
+             <button class="btn ghost" onclick="aterkallaOffert()">Dra tillbaka</button>`
+          : `<button class="btn ghost" onclick="offertBesked('accepterad')">Kunden tackade ja</button>
+             <button class="btn ghost" onclick="offertBesked('avslagen')">Kunden tackade nej</button>`
     }
     ${
       !laser && q.status === "accepterad" && q.customer_id
@@ -3549,7 +3554,7 @@ async function viewQuote() {
   // Textrutorna fylls efter renderingen, så att innehållet inte behöver escapas två gånger
   if ($("#q_intro")) $("#q_intro").value = q.intro || "";
   if ($("#q_villkor")) $("#q_villkor").value = q.terms || "";
-  kopplaForhand(`/api/quotes/${q.id}/pdf`);
+  kopplaForhand(`/quotes/${q.id}`);
 }
 
 async function _sparaOffert() {
@@ -3590,11 +3595,14 @@ function forhandUtkast() {
   }, 900);
 }
 
-async function avbrytSignering() {
+/* Drar tillbaka offerten. Länken kunden fått slutar fungera direkt, till
+   skillnad från att bara sluta vänta på svar. Har kunden redan hunnit signera
+   går det inte: ett godkännande kan inte tas tillbaka i efterhand. */
+async function _aterkallaOffert() {
   if (
     !confirm(
-      "Avbryt signeringen?\n\nLänken kunden fått slutar inte fungera, men du kan sätta " +
-        "besked för hand igen. Har kunden redan signerat hämtas det svaret ändå hem."
+      "Dra tillbaka offerten?\n\nLänken kunden fått slutar fungera direkt och de kan inte " +
+        "längre signera. Du kan skicka en ny offert efteråt."
     )
   )
     return;
@@ -3603,7 +3611,7 @@ async function avbrytSignering() {
       method: "PATCH",
       body: { avbryt_signering: true },
     });
-    toast("Signeringen avbruten");
+    toast("Offerten återkallad, länken fungerar inte längre");
     viewQuote();
   } catch (e) {
     toast(e.message, true);
@@ -3830,7 +3838,7 @@ async function viewOrder() {
   }`;
 
   if (kanRedigera) $("#radform").innerHTML = await radFormular(o.id, "order");
-  kopplaForhand(`/api/work-orders/${o.id}/pdf`);
+  kopplaForhand(`/work-orders/${o.id}`);
 }
 
 async function orderStatus(status) {

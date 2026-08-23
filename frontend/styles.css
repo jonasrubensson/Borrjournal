@@ -395,3 +395,8 @@ img.qr{border:1px solid var(--line);border-radius:3px;background:#fff;padding:6p
 .rundturstang{margin-left:auto;background:none;border:none;color:var(--stone);font-size:17px;
   cursor:pointer;padding:2px 6px;min-height:auto}
 .rundtur p{margin:0;font-size:14.5px;line-height:1.5;color:var(--ink-2)}
+
+/* Förhandsgranskningens sidor */
+.forhandssida{display:block;width:100%;height:auto;background:#fff;margin:0 auto 10px;
+  box-shadow:0 2px 10px rgba(14,31,42,.14);border-radius:2px}
+.forhandssida:last-child{margin-bottom:0}
