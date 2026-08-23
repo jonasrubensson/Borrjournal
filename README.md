@@ -899,6 +899,24 @@ Behöver du ändå svara själv, till exempel för att kunden ringde i stället,
 svara själv**. Länken kunden fått slutar inte fungera, och signerar de ändå hämtas svaret hem
 som vanligt.
 
+### Dra tillbaka en offert
+
+Medan offerten ligger hos kunden för signering finns **Dra tillbaka**. Länken slutar fungera
+direkt, kunden kan inte längre signera, och det journalförs.
+
+Har kunden redan hunnit signera går det inte. Ett godkännande kan inte tas tillbaka i efterhand,
+och en logg som ändras är ingen logg. Då får du beskedet att svaret hämtas hem inom en minut.
+
+Knapparna heter **Kunden tackade ja** och **Kunden tackade nej**, inte Accepterad och Avslagen.
+Det är kunden som bestämmer, ni antecknar bara vad de sa — till exempel när någon ringer i
+stället för att signera. Under pågående signering är de därför borta.
+
+### Förhandsgranskning
+
+Sidorna renderas till bilder på servern i stället för att visas som PDF i en ram. iPhone och
+iPad visar aldrig PDF inuti en sida, så förhandsgranskningen blev tom på telefon. Bilder
+fungerar överallt.
+
 ### Kontrollsummor
 
 Efter signering får kunden **två filer** i kvittensen, var och en med sin egen kontrollsumma
