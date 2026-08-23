@@ -358,6 +358,43 @@ async def resultat(db: AsyncSession = Depends(db_session)):
     return {"antal": len(ut), "poster": ut}
 
 
+@app.post("/api/aterkalla", dependencies=[Depends(kontrollera_nyckel)])
+async def aterkalla(payload: dict, db: AsyncSession = Depends(db_session)):
+    """Drar tillbaka en utskickad handling. Länken slutar fungera direkt.
+
+    Redan signerade handlingar rörs inte. Ett godkännande som skett kan inte
+    tas tillbaka i efterhand, och en logg som ändras är ingen logg.
+    """
+    referens = (payload.get("referens") or "").strip()
+    if not referens:
+        raise HTTPException(status_code=400, detail="Ange referens")
+
+    poster = (
+        await db.execute(select(Signering).where(Signering.referens == referens))
+    ).scalars().all()
+
+    aterkallade, redan_signerade = [], []
+    for p in poster:
+        if p.status == "signerad":
+            redan_signerade.append(p.referens)
+            continue
+        p.status = "aterkallad"
+        # Tokenet blir obrukbart: hashen matchar inget riktigt token längre
+        p.token_hash = "aterkallad-" + p.id
+        p.pdf = b""
+        await audit.logga(
+            db, p.id, "aterkallad",
+            beskrivning=f"Avsändaren drog tillbaka handlingen: {payload.get('orsak', '')}"[:255],
+            commit=False,
+        )
+        aterkallade.append(p.id)
+    await db.commit()
+    return {
+        "aterkallade": len(aterkallade),
+        "redan_signerade": redan_signerade,
+    }
+
+
 @app.post("/api/kvittera", dependencies=[Depends(kontrollera_nyckel)])
 async def kvittera(payload: dict, db: AsyncSession = Depends(db_session)):
     """Borrjournal bekräftar att resultatet är sparat hos dem.

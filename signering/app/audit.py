@@ -37,6 +37,7 @@ TEXTER = {
     "avbojd": "Dokumentet avböjt",
     "kvitto_skickat": "Kvittens skickad till mottagaren",
     "utgangen": "Länken har gått ut",
+    "aterkallad": "Handlingen drogs tillbaka av avsändaren",
 }
 
 
