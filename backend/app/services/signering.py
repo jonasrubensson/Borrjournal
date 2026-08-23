@@ -316,3 +316,19 @@ async def _ta_emot(db: AsyncSession, post: dict) -> None:
                 "Bevisvärdet är försvagat."
             ),
         )
+
+
+async def aterkalla(db: AsyncSession, quote) -> dict:
+    """Drar tillbaka en offert hos signeringstjänsten."""
+    import httpx
+
+    if not aktiverad():
+        return {"aterkallade": 0}
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(
+            f"{settings.signering_url.rstrip('/')}/api/aterkalla",
+            headers=_huvuden(),
+            json={"referens": quote.quote_no, "orsak": "Återkallad i Borrjournal"},
+        )
+        r.raise_for_status()
+    return r.json()
