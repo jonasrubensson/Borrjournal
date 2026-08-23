@@ -587,7 +587,40 @@ async def update_quote(
     # Ligger offerten hos kunden för signering är det kunden som svarar. Att
     # sätta besked för hand samtidigt skulle ge två motstridiga svar.
     if payload.get("avbryt_signering"):
+        # Länken ska sluta fungera, inte bara flaggan rensas
+        if q.signing_pending:
+            from ..services import signering as _sign
+
+            try:
+                svar = await _sign.aterkalla(db, q)
+                if svar.get("redan_signerade"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Kunden har redan signerat. Svaret hämtas hem inom en minut, "
+                            "vänta in det i stället."
+                        ),
+                    )
+            except HTTPException:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Kunde inte dra tillbaka hos signeringstjänsten: {exc}",
+                ) from exc
         q.signing_pending = False
+        if q.customer_id:
+            db.add(
+                JournalEntry(
+                    customer_id=q.customer_id,
+                    facility_id=q.facility_id,
+                    entry_type="Offert",
+                    title=f"Offert {q.quote_no} återkallad",
+                    body="Signeringslänken slutade fungera.",
+                    author_id=user.id,
+                    author_name=user.full_name or user.username,
+                )
+            )
     elif q.signing_pending and payload.get("status") in ("accepterad", "avslagen"):
         raise HTTPException(
             status_code=409,
@@ -1039,6 +1072,87 @@ async def skicka_till_signering(
         request=request, detail=f"{q.quote_no} till {mottagare}",
     )
     return {"ok": True, "recipient": mottagare, "giltig_till": svar.get("giltig_till")}
+
+
+@router.get("/quotes/{quote_id}/sida/{sidnr}.png")
+async def offert_sida(
+    quote_id: str,
+    sidnr: int,
+    bredd: int = 900,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Renderar en sida ur offerten som bild.
+
+    iPhone och iPad visar inte PDF inuti en ram på sidan, och aldrig från en
+    blob-adress. En bild fungerar överallt, och kräver inte att man lämnar
+    sidan för att se vad man håller på att skicka.
+    """
+    q = await _hamta_offert(db, quote_id)
+    return _rendera_sida(await _bygg_dokument(db, offert=q), sidnr, bredd)
+
+
+@router.get("/work-orders/{order_id}/sida/{sidnr}.png")
+async def order_sida(
+    order_id: str,
+    sidnr: int,
+    bredd: int = 900,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    o = await _hamta_order(db, order_id)
+    return _rendera_sida(await _bygg_dokument(db, order=o), sidnr, bredd)
+
+
+def _rendera_sida(pdf: bytes, sidnr: int, bredd: int) -> Response:
+    import io
+
+    import pypdfium2 as pdfium
+
+    dok = pdfium.PdfDocument(io.BytesIO(pdf))
+    antal = len(dok)
+    if sidnr < 1 or sidnr > antal:
+        raise HTTPException(status_code=404, detail="Sidan finns inte")
+    sida = dok[sidnr - 1]
+    skala = max(0.5, min(3.0, bredd / max(1.0, sida.get_width())))
+    bild = sida.render(scale=skala).to_pil()
+    buffert = io.BytesIO()
+    bild.save(buffert, "PNG", optimize=True)
+    return Response(
+        buffert.getvalue(),
+        media_type="image/png",
+        headers={"X-Antal-Sidor": str(antal), "Cache-Control": "no-store"},
+    )
+
+
+@router.get("/quotes/{quote_id}/sidor")
+async def offert_sidantal(
+    quote_id: str,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    import io
+
+    import pypdfium2 as pdfium
+
+    q = await _hamta_offert(db, quote_id)
+    pdf = await _bygg_dokument(db, offert=q)
+    return {"sidor": len(pdfium.PdfDocument(io.BytesIO(pdf)))}
+
+
+@router.get("/work-orders/{order_id}/sidor")
+async def order_sidantal(
+    order_id: str,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    import io
+
+    import pypdfium2 as pdfium
+
+    o = await _hamta_order(db, order_id)
+    pdf = await _bygg_dokument(db, order=o)
+    return {"sidor": len(pdfium.PdfDocument(io.BytesIO(pdf)))}
 
 
 @router.post("/quotes/{quote_id}/send")
