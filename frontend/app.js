@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "4.8.0";
+const UI_VERSION = "4.10.0";
 
 const S = {
   funktioner: {},
@@ -1037,6 +1037,7 @@ function tabFacilities(c) {
         ${f.status_manual === "action" ? "Rensa flagga" : "Flagga åtgärd"}</button>
       <button class="btn ghost sm" onclick="facilityBriefing('${f.id}')">Grannbrunnar</button>
       <button class="btn ghost sm" onclick="shareDialog({facility_id:'${f.id}'})">Dela</button>
+      <button class="btn ghost sm" onclick="bestallVattenprov('${f.id}')">Vattenanalys</button>
       <button class="btn danger sm" onclick="removeFacility('${f.id}','${esc(f.facility_no)}')">Ta bort</button>
     </div>
     <div id="fedit-${f.id}"></div>`
@@ -1789,6 +1790,16 @@ async function shareDialog(target) {
   if (!box) return;
   const qs = new URLSearchParams(target).toString();
   const { fields, kind } = await api(`/share/fields?${qs}`);
+
+  // Gäller det en offert kan den signerade handlingen och andra dokument
+  // följa med, så att borraren ser vad kunden faktiskt godkänt.
+  let pdfer = [];
+  if (target.quote_id && S.data.quote && S.data.quote.customer_id) {
+    try {
+      const filer = await api(`/customers/${S.data.quote.customer_id}/files`);
+      pdfer = filer.filter((f) => (f.content_type || "").includes("pdf")).slice(0, 8);
+    } catch (_) {}
+  }
   box.innerHTML = `
   <div class="card" style="margin-top:18px;border-color:#C9DFE3">
     <div class="hd" style="background:#F4F9FA"><h2>Dela med extern borrare</h2></div>
@@ -1815,6 +1826,20 @@ async function shareDialog(target) {
           )
           .join("")}
       </div>
+      ${
+        pdfer.length
+          ? `<label class="f">Bifoga dokument</label>` +
+            pdfer
+              .map(
+                (f) => `<label style="display:flex;gap:8px;align-items:flex-start;font-size:14px;
+              padding:3px 0"><input type="checkbox" class="sharefil" value="${f.id}"
+              style="width:auto;margin-top:3px" ${
+                f.filename.includes("signerad") ? "checked" : ""
+              }><span>${esc(f.filename)}</span></label>`
+              )
+              .join("")
+          : ""
+      }
       <label class="f" for="sh_msg">Meddelande</label>
       <textarea id="sh_msg" placeholder="Hej, kan du ta det här jobbet vecka 34?"></textarea>
       <div class="row" style="margin-top:14px">
@@ -1828,6 +1853,7 @@ async function shareDialog(target) {
 async function sendShare(targetJson) {
   const target = typeof targetJson === "string" ? JSON.parse(targetJson) : targetJson;
   const fields = [...document.querySelectorAll(".sharefield:checked")].map((c) => c.value);
+  const filer = [...document.querySelectorAll(".sharefil:checked")].map((c) => c.value);
   try {
     const r = await api("/share", {
       method: "POST",
@@ -1837,6 +1863,7 @@ async function sendShare(targetJson) {
         subject: val("sh_sub"),
         message: val("sh_msg"),
         fields,
+        filer,
       },
     });
     toast(`Skickat till ${r.recipient}`);
@@ -2700,66 +2727,100 @@ async function adminSignering() {
   const token = claim();
   const d = await api("/notifications/signering");
   if (!current(token) || !$("#adminbody")) return;
-  S.data.signering = d;
-
-  const steg = (nr, rubrik, ok, text) => `
-    <div class="filerow">
-      <div class="ftype" style="background:${ok === true ? "#2E7D5B" : ok === false ? "#A6402F" : "var(--stone)"}">${
-        ok === true ? "✓" : ok === false ? "!" : nr
-      }</div>
-      <div style="flex:1;min-width:0"><div style="font-weight:600">${rubrik}</div>
-        <div class="fmeta">${text}</div></div></div>`;
 
   $("#adminbody").innerHTML = `
-  <div class="card"><div class="hd"><h2>Signering av offerter</h2>
+  <div class="card" style="margin-bottom:18px"><div class="hd"><h2>Signering av offerter</h2>
     <span class="tag ${d.aktiverad && d.nar ? "ok" : "n"}">${
-      d.aktiverad && d.nar ? "Igång" : d.aktiverad ? "Når inte tjänsten" : "Inte påslagen"
+      d.aktiverad && d.nar ? "Igång" : d.aktiverad ? "Når inte tjänsten" : "Avstängd"
     }</span></div>
     <div class="pad">
-      <p class="lead" style="margin-top:0">Kunden får offerten som bilaga och en länk. På länken
-        styrker kunden sin e-postadress med en engångskod och godkänner. Signerad handling med
-        fullständig logg mejlas tillbaka till kunden och sparas bland kundens dokument.</p>
-
-      ${steg(1, "Tjänsten svarar", d.aktiverad ? d.nar : null,
-        d.nar === true
-          ? `Svarar på ${esc(d.url)}`
-          : d.aktiverad
-            ? `Når inte ${esc(d.url)}. ${esc(d.fel || "")}`
-            : "Sätt SIGNERING_URL i .env och starta om")}
-      ${steg(2, "Delad nyckel", d.nyckel_satt ? d.nyckel_lang_nog : null,
-        !d.nyckel_satt
-          ? "SIGNERING_NYCKEL saknas i .env"
-          : !d.nyckel_lang_nog
-            ? "För kort, minst 24 tecken krävs"
-            : "Satt och tillräckligt lång")}
-      ${steg(3, "E-post", null,
-        "Hämtas från Inställningar, Notiser och skickas automatiskt till tjänsten. " +
-        "Kör testet nedan för att se att det fungerar.")}
-      ${steg(4, "Publik adress", null,
-        "Den adress kunden får i mejlet. Måste gå att nå utifrån, utan klientcertifikat.")}
+      <p class="lead" style="margin-top:0">Kunden får en länk, styrker sin e-postadress med en
+        engångskod och godkänner. Signerad handling med fullständig logg mejlas tillbaka och
+        sparas bland kundens dokument.</p>
 
       ${
-        d.aktiverad && d.nar
-          ? `<div class="eyebrow" style="margin-top:18px">Provkör</div>
-             <p class="hint" style="margin-top:0">Kontrollerar adress och e-post utan att någon
-               kund berörs. Fyll i din egen adress så skickas ett testmeddelande dit.</p>
-             <div class="row">
-               <input id="sig_till" placeholder="din@adress.se" style="flex:1;min-width:190px">
-               <button class="btn pri sm" onclick="testaSignering()">Provkör</button>
-             </div>
-             <div id="sig_resultat"></div>`
-          : `<div class="pad" style="padding:12px;background:#FBF6EA;border-radius:3px;margin-top:12px">
-             <p style="margin:0 0 8px"><strong>Så här slår du på det.</strong> Lägg till i
-               <code>.env</code>:</p>
-             <pre style="margin:0;font-size:12px;font-family:var(--mono);white-space:pre-wrap">SIGNERING_NYCKEL=&lt;openssl rand -hex 32&gt;
-SIGNERING_URL=http://signering:8000
-SIGNERING_URL_PUBLIK=http://din-server:8010</pre>
-             <p class="hint" style="margin:8px 0 0">Kör sedan <code>./uppdatera.sh</code>.
-               Nyckeln måste vara samma på båda sidor. För test på egen server duger en
-               http-adress med IP eller värdnamn, men använd https innan riktiga kunder
-               får länkar.</p></div>`
+        d.fran_env
+          ? `<div class="info" style="background:#F4F7F7;padding:12px;border-radius:3px;
+             font-size:13.5px;margin-bottom:14px">Inställningarna kommer från <code>.env</code>
+             och styrs därifrån. Ta bort <code>SIGNERING_URL</code> ur .env om du hellre vill
+             sköta dem här.</div>`
+          : ""
       }
-    </div></div>`;
+
+      <label style="display:flex;gap:10px;align-items:center;font-size:15px;padding:8px 0">
+        <input type="checkbox" id="sg_pa" ${d.pa ? "checked" : ""} style="width:auto"
+          ${d.fran_env ? "disabled" : ""}>
+        <span>Använd signering</span></label>
+
+      ${fld("sg_url", "Adress till tjänsten, internt", d.url || "http://signering:8000")}
+      <div class="hint" style="margin-top:-6px">Så här når Borrjournal tjänsten. Kör båda i
+        samma docker-compose är <code>http://signering:8000</code> rätt.</div>
+
+      ${fld("sg_publik", "Adress kunden får i mejlet", d.publik_url || "")}
+      <div class="hint" style="margin-top:-6px">Måste gå att nå utifrån, utan klientcertifikat.
+        För test på egen server duger <code>http://din-server:8010</code>.</div>
+
+      <label class="f" for="sg_nyckel">Delad nyckel</label>
+      <input id="sg_nyckel" type="password" autocomplete="new-password"
+        placeholder="${d.nyckel_satt ? "Sparad, lämna tomt för att behålla" : "Minst 24 tecken"}"
+        ${d.fran_env ? "disabled" : ""}>
+      <div class="hint" style="margin-top:2px">Samma värde måste stå i signeringstjänstens
+        <code>SHARED_SECRET</code>. Skapa ett med <code>openssl rand -hex 32</code>.
+        <button class="linkbtn" style="color:var(--water-dark);text-decoration:underline"
+          onclick="slumpaNyckel()">Slumpa en åt mig</button></div>
+
+      ${
+        d.fran_env
+          ? ""
+          : `<div class="row" style="margin-top:14px">
+             <button class="btn pri sm" onclick="sparaSignering()">Spara</button></div>`
+      }
+    </div></div>
+
+  <div class="card"><div class="hd"><h2>Provkör</h2></div><div class="pad">
+    <p class="lead" style="margin-top:0">Kontrollerar adress och e-post utan att någon kund
+      berörs. Fyll i din egen adress så skickas ett testmeddelande dit.</p>
+    <div class="row">
+      <input id="sig_till" placeholder="din@adress.se" style="flex:1;min-width:190px">
+      <button class="btn sm" onclick="testaSignering()">Provkör</button>
+    </div>
+    <div id="sig_resultat"></div>
+    ${
+      d.nar === false
+        ? `<p class="hint" style="color:var(--alert);margin-top:10px">Når inte
+           ${esc(d.url)}. ${esc(d.fel || "")}</p>`
+        : ""
+    }
+  </div></div>`;
+}
+
+function slumpaNyckel() {
+  const byte = new Uint8Array(32);
+  crypto.getRandomValues(byte);
+  const nyckel = [...byte].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const falt = $("#sg_nyckel");
+  falt.type = "text";
+  falt.value = nyckel;
+  toast("Kopiera nyckeln till signeringstjänstens SHARED_SECRET");
+}
+
+async function sparaSignering() {
+  try {
+    const r = await api("/notifications/signering", {
+      method: "PUT",
+      body: {
+        pa: $("#sg_pa").checked,
+        url: val("sg_url"),
+        publik_url: val("sg_publik"),
+        nyckel: val("sg_nyckel"),
+      },
+    });
+    toast(r.aktiverad ? "Sparat, signeringen är igång" : "Sparat");
+    S.funktioner.signering = r.aktiverad;
+    adminSignering();
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 async function testaSignering() {
@@ -2841,11 +2902,51 @@ const RUNDTUR = [
       "Systemet påminner av sig själv när något dröjer.",
   },
   {
+    vag: "ekonomi",
+    rubrik: "Offert till signering",
+    text:
+      "En offert kan mejlas som PDF, eller skickas för elektronisk signering. Då styrker " +
+      "kunden sin e-postadress med en engångskod och godkänner på skärmen. Ni får tillbaka " +
+      "en signerad handling med tidpunkt, IP-adress och hela händelseförloppet.",
+  },
+  {
+    vag: "artiklar",
+    rubrik: "Artiklar och lager",
+    text:
+      "Prislistan. Rader på offerter och arbetsorder hämtas härifrån, så priset blir rätt " +
+      "utan att någon minns det. Material som märks för lager dras av automatiskt när " +
+      "arbetsordern blir utförd.",
+  },
+  {
+    vag: "mallar",
+    rubrik: "Offertmallar",
+    text:
+      "Tre mallar finns från början: bergborrad brunn, energibrunn och pumpbyte. En offert " +
+      "du är nöjd med kan sparas som egen mall, så nästa liknande jobb tar en minut.",
+  },
+  {
+    vag: "paminnelser",
+    rubrik: "Påminnelser",
+    text:
+      "Service, vattenprov och intyg bevakas automatiskt utifrån anläggningarnas datum. " +
+      "Dessutom obetalda fakturor, offerter utan besked och besök utan återkoppling. " +
+      "Var och en får sina egna, och de stänger sig själva när saken är löst.",
+  },
+  {
     vag: "mer",
     rubrik: "Mer",
     text:
-      "Allt som inte behövs varje dag: artiklar och lager, offertmallar, påminnelser, " +
-      "inaktiva kunder och inställningar. Härifrån tar du också om den här rundturen.",
+      "Allt som inte behövs varje dag: inaktiva kunder och gallring, systemhändelser, " +
+      "backup och inställningar. Härifrån tar du också om den här rundturen.",
+  },
+  {
+    vag: "mer",
+    rubrik: "Innan ni börjar på riktigt",
+    text:
+      "En administratör bör fylla i företagsuppgifter och logotyp, ställa in e-post, hämta " +
+      "SGU-data för era län och slå på signering om ni vill använda det. Allt ligger under " +
+      "Inställningar.",
+    knapp: { text: "Öppna inställningar", vag: "admin", tab: "foretag" },
   },
 ];
 
@@ -2899,6 +3000,14 @@ function ritaRundturskort() {
       <button class="rundturstang" onclick="avslutaRundtur()" title="Avsluta">✕</button>
     </div>
     <p>${esc(steg.text)}</p>
+    ${
+      steg.knapp
+        ? `<div class="row" style="margin-top:10px">
+           <button class="btn sm" onclick="avslutaRundtur();go('${steg.knapp.vag}','${
+             steg.knapp.tab || ""
+           }')">${esc(steg.knapp.text)}</button></div>`
+        : ""
+    }
     <div class="row" style="margin-top:12px">
       ${
         rundturSteg > 0
@@ -2941,6 +3050,61 @@ function introBehovs() {
     return !localStorage.getItem("bj_intro");
   } catch (_) {
     return false;
+  }
+}
+
+
+/* ---------------- vattenanalys ---------------- */
+async function bestallVattenprov(facilityId) {
+  const d = await api("/water-sample/types");
+  const box = document.createElement("div");
+  box.innerHTML = `
+  <div class="card" id="provkort" style="margin-top:16px;border-color:#C9DFE3">
+    <div class="hd" style="background:#F4F9FA"><h2>Beställ vattenanalys</h2></div>
+    <div class="pad">
+      <p class="lead" style="margin-top:0">Brunnens uppgifter, koordinat och kontaktperson följer
+        med automatiskt. Svaret går till er företagsadress.</p>
+      ${fld("prov_till", "Laboratoriets e-postadress", d.labb || "", "email")}
+      <label class="f">Analyser</label>
+      ${Object.entries(d.typer)
+        .map(
+          ([nyckel, text]) => `<label style="display:flex;gap:9px;align-items:flex-start;
+          padding:5px 0;font-size:14.5px">
+          <input type="checkbox" class="provtyp" value="${nyckel}" style="width:auto;margin-top:3px"
+            ${nyckel === "normal" ? "checked" : ""}>
+          <span>${esc(text)}</span></label>`
+        )
+        .join("")}
+      <label class="f" for="prov_medd">Meddelande till labbet</label>
+      <textarea id="prov_medd" rows="2" placeholder="Frivilligt"></textarea>
+      <div class="row" style="margin-top:12px">
+        <button class="btn pri sm" onclick="skickaProvbestallning('${facilityId}')">Skicka beställning</button>
+        <button class="btn ghost sm" onclick="document.getElementById('provkort').remove()">Avbryt</button>
+      </div>
+    </div></div>`;
+  const mal = $("#tabbody") || $("#view");
+  mal.appendChild(box.firstElementChild);
+  scrollTill(document.getElementById("provkort"));
+}
+
+async function _skickaProvbestallning(facilityId) {
+  const typer = [...document.querySelectorAll(".provtyp:checked")].map((c) => c.value);
+  if (!typer.length) return toast("Välj minst en analys", true);
+  try {
+    const r = await api("/water-sample", {
+      method: "POST",
+      body: {
+        facility_id: facilityId,
+        recipient: val("prov_till"),
+        typer,
+        meddelande: val("prov_medd"),
+      },
+    });
+    toast(`Beställning skickad till ${r.recipient}`);
+    document.getElementById("provkort").remove();
+    if (S.route === "kund") laddaKund(S.id);
+  } catch (e) {
+    toast(e.message, true);
   }
 }
 
@@ -3159,6 +3323,8 @@ const nyOrder = (...a) => enGang('nyOrder', () => _nyOrder(...a));
 const snabbOrder = (...a) => enGang('snabbOrder', () => _snabbOrder(...a));
 const skickaSignering = (...a) => enGang('skickaSignering', () => _skickaSignering(...a));
 const aterkallaOffert = (...a) => enGang('aterkallaOffert', () => _aterkallaOffert(...a));
+const skickaProvbestallning = (...a) =>
+  enGang('skickaProvbestallning', () => _skickaProvbestallning(...a));
 
 /* ---------------- pengar: gemensamt ---------------- */
 const kr = (v) =>
@@ -3509,7 +3675,8 @@ async function viewQuote() {
     }
     ${
       !laser && q.status === "accepterad" && q.customer_id
-        ? `<button class="btn pri" onclick="skapaOrderFranOffert()">Skapa arbetsorder</button>`
+        ? `<button class="btn pri" onclick="skapaOrderFranOffert()">Skapa arbetsorder</button>
+           <button class="btn" onclick="shareDialog({quote_id:'${q.id}'})">Skicka till borrare</button>`
         : ""
     }
   </div>
@@ -3551,6 +3718,12 @@ async function viewQuote() {
   }`;
 
   if (kanRedigera) $("#radform").innerHTML = await radFormular(q.id, "quote");
+  // Behållare för delningsdialogen, samma mönster som förhandsgranskningen
+  if (!document.getElementById("sharebox")) {
+    const box = document.createElement("div");
+    box.id = "sharebox";
+    $("#view").appendChild(box);
+  }
   // Textrutorna fylls efter renderingen, så att innehållet inte behöver escapas två gånger
   if ($("#q_intro")) $("#q_intro").value = q.intro || "";
   if ($("#q_villkor")) $("#q_villkor").value = q.terms || "";
@@ -4717,6 +4890,7 @@ async function lookupAddress() {
     if (field) field.value = S.form.coordinates;
     hint.innerHTML = `Hittade <strong>${esc(r.label.split(",").slice(0, 3).join(", "))}</strong>.
       Kontrollera att det stämmer, adressuppslag träffar sällan exakt på borrhålet.`;
+    visaNyttUnderlag(r.latitude, r.longitude);
   } catch (e) {
     hint.innerHTML = `<span style="color:var(--alert)">${esc(e.message)}</span>`;
   }
@@ -5151,7 +5325,8 @@ async function viewNewFacility() {
             <button class="btn ghost sm" type="button" onclick="lookupAddress()">Hämta från adressen</button>
             <button class="btn ghost sm" type="button" onclick="fillPosition()">Hämta min position</button>
             <span class="hint" id="coordhint" style="margin:0">Decimalgrader eller SWEREF 99 TM, båda fungerar.</span>
-          </div></div>
+          </div>
+          <div id="nybriefing"></div></div>
         ${fSelect("permit_status", "Anmälan till kommunen", ["Inte påbörjad", "Inskickad", "Beviljad", "Krävs inte"])}
       </div>
       ${fArea("access_notes", "Åtkomst och förutsättningar", "Framkomlighet för rigg, lutning, elskåp, var slam får läggas.")}
@@ -5221,6 +5396,85 @@ async function viewNewFacility() {
 }
 
 let coordTimer;
+/* Grannbrunnarnas djup, jorddjup och kapacitet är mest värda innan man borrar,
+   alltså just när anläggningen registreras. Underlaget hämtas därför så fort
+   en koordinat finns, utan att någon behöver be om det. */
+let nyBriefingTimer;
+async function visaNyttUnderlag(lat, lon) {
+  const box = document.getElementById("nybriefing");
+  if (!box) return;
+  clearTimeout(nyBriefingTimer);
+  nyBriefingTimer = setTimeout(async () => {
+    box.innerHTML = `<div class="skel" style="margin-top:10px"></div>`;
+    try {
+      const radie = S.filter.nyRadie || 1000;
+      const b = await api(`/sgu/briefing?lat=${lat}&lon=${lon}&radius_m=${radie}`);
+      box.innerHTML = renderaNyttUnderlag(b, lat, lon);
+    } catch (e) {
+      box.innerHTML = `<p class="hint" style="margin-top:8px">${esc(e.message)}</p>`;
+    }
+  }, 500);
+}
+
+function renderaNyttUnderlag(b, lat, lon) {
+  const radier = [500, 1000, 2000, 5000]
+    .map(
+      (m) => `<button class="btn ghost sm" type="button"
+      style="${m === b.radius_m ? "border-color:var(--water);color:var(--water-dark)" : ""}"
+      onclick="S.filter.nyRadie=${m};visaNyttUnderlag(${lat},${lon})">${
+        m >= 1000 ? m / 1000 + " km" : m + " m"
+      }</button>`
+    )
+    .join("");
+
+  if (b.saknat_lan) {
+    return `<div class="grannruta">
+      <strong>${esc(b.saknat_lan.namn)}s län är inte hämtat</strong>
+      <p class="hint" style="margin:4px 0 0">Underlaget om grannbrunnar bygger på SGU:s
+        brunnsarkiv. Länet är köat och hämtas automatiskt.</p></div>`;
+  }
+  if (!b.antal) {
+    return `<div class="grannruta">
+      <strong>Inga registrerade brunnar inom ${b.radius_m} m</strong>
+      <p class="hint" style="margin:4px 0 6px">SGU sätter ofta brunnen på fastighetens
+        mittpunkt, så pröva en större radie.</p>
+      <div class="row">${radier}</div></div>`;
+  }
+
+  const spann = (v, e) => (v ? `${v.min}–${v.max} ${e}` : "—");
+  return `<div class="grannruta">
+    <div class="row" style="margin-bottom:6px">
+      <strong>${b.antal} grannbrunnar inom ${b.radius_m} m</strong>
+      ${
+        b.datakalla === "SGU direkt"
+          ? `<span class="tag ok">färsk från SGU</span>`
+          : `<span class="tag soon">nedladdad kopia</span>`
+      }
+    </div>
+    <div class="grannfakta">
+      <div><span>Berg på</span><strong>${spann(b.jorddjup, "m")}</strong></div>
+      <div><span>Foderrör</span><strong>${spann(b.foderror, "m")}</strong></div>
+      <div><span>Borrdjup</span><strong>${spann(b.borrdjup_vatten, "m")}</strong></div>
+      <div><span>Kapacitet</span><strong>${spann(b.kapacitet, "l/h")}</strong></div>
+    </div>
+    ${
+      b.varsta_foderror
+        ? `<p class="hint" style="margin:6px 0 0">Mest foderrör i området:
+           <strong>${b.varsta_foderror.meter} m</strong>, ${b.varsta_foderror.avstand_m} m
+           härifrån. Värt att ta höjd för.</p>`
+        : ""
+    }
+    ${
+      b.jorddjup && b.borrdjup_vatten
+        ? `<p class="hint" style="margin:6px 0 0">Att räkna med: foderrör omkring
+           ${Math.round((b.foderror || b.jorddjup).median)} m, borrdjup omkring
+           ${Math.round(b.borrdjup_vatten.median)} m.</p>`
+        : ""
+    }
+    <div class="row" style="margin-top:8px">${radier}</div>
+  </div>`;
+}
+
 function checkCoord(value) {
   clearTimeout(coordTimer);
   coordTimer = setTimeout(async () => {
@@ -5230,6 +5484,8 @@ function checkCoord(value) {
       hint.textContent = "Decimalgrader eller SWEREF 99 TM, båda fungerar.";
       delete S.form.latitude;
       delete S.form.longitude;
+      const ruta = document.getElementById("nybriefing");
+      if (ruta) ruta.innerHTML = "";
       return;
     }
     const r = await api(`/coordinates/parse?q=${encodeURIComponent(value)}`);
@@ -5237,6 +5493,8 @@ function checkCoord(value) {
       S.form.latitude = r.latitude;
       S.form.longitude = r.longitude;
       hint.innerHTML = `Tolkat som <strong>${r.latitude}, ${r.longitude}</strong>`;
+      // Visa vad grannarna stötte på, medan man ändå står med formuläret
+      visaNyttUnderlag(r.latitude, r.longitude);
     } else {
       delete S.form.latitude;
       delete S.form.longitude;
@@ -5255,6 +5513,7 @@ async function fillPosition() {
     S.form.longitude = pos.lon;
     $("#fld_coordinates").value = S.form.coordinates;
     hint.textContent = `Position hämtad, noggrannhet ±${Math.round(pos.acc)} m.`;
+    visaNyttUnderlag(pos.lat, pos.lon);
   } catch (e) {
     hint.innerHTML = `<span style="color:var(--alert)">${esc(e.message)}</span>`;
   }

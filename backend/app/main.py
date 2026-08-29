@@ -91,6 +91,15 @@ async def lifespan(app: FastAPI):
                 )
     except Exception as exc:  # noqa: BLE001
         print(f"[borrjournal] kunde inte generera påminnelser vid start: {exc}")
+    # Signeringens inställningar kan ligga i databasen i stället för i .env
+    try:
+        from .services import signering as _sign
+
+        async with SessionLocal() as _db:
+            await _sign.las_installningar(_db)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[borrjournal] kunde inte läsa signeringsinställningar: {exc}")
+
     task = asyncio.create_task(scheduler.loop())
     try:
         yield

@@ -314,6 +314,15 @@ Tre olika saker kan ligga bakom att inga grannbrunnar visas, och de kräver olik
 Strår det att trakten inte verkar vara hämtad visas också hur långt bort närmaste nedladdade
 brunn ligger. Är det tiotals mil har fel län hämtats.
 
+### Grannbrunnar när du registrerar
+
+När du registrerar en ny anläggning dyker underlaget upp **direkt under koordinatfältet**, så
+snart en koordinat finns — antingen inskriven, hämtad från adressen eller från **Hämta min
+position**. Det är då siffrorna är som mest värda, innan hålet är borrat.
+
+Visar berg, foderrör, borrdjup och kapacitet hos grannarna, plus vem som krävde mest foderrör.
+Radien går att ändra mellan 500 m och 5 km utan att lämna formuläret.
+
 ### Varifrån siffrorna kommer
 
 Underlaget frågar **SGU direkt om det område som slås upp**, via deras områdes-API. Det ger vad
@@ -832,25 +841,15 @@ mTLS.
 
 ### Slå på signeringen
 
-Lägg till i `.env` och kör `./uppdatera.sh`:
+**Inställningar → Signering.** Kryssa i Använd signering, fyll i adressen till tjänsten, den
+publika adressen kunden får i mejlet, och en delad nyckel. Knappen **Slumpa en åt mig** skapar
+en nyckel — kopiera den till signeringstjänstens `SHARED_SECRET`. Ingen omstart behövs.
 
-```
-SIGNERING_NYCKEL=<openssl rand -hex 32>
-SIGNERING_URL=http://signering:8000
-SIGNERING_URL_PUBLIK=https://signera.dinfirma.se
-```
+Vill du hellre hålla hemligheterna i `.env` går det fortfarande: sätt `SIGNERING_URL` och
+`SIGNERING_NYCKEL` där, så används de och fälten i gränssnittet låses.
 
-**SIGNERING_URL_PUBLIK är den adress kunden får i mejlet.** Sätts den inte pekar länkarna på
-exempeladressen och fungerar inte. För test på egen server duger `http://din-server:8010`,
-men använd https innan riktiga kunder får länkar.
-
-**E-post ställs in på ett enda ställe:** Inställningar → Notiser. Uppgifterna skickas
-automatiskt vidare till signeringstjänsten när de sparas och när en signering skapas. Vill du
-hellre slippa ha lösenordet på den publika tjänsten sätter du `SMTP_HOST` med flera i miljön
-i stället, då används de och det som skickas från Borrjournal ignoreras.
-
-**Provkör innan första kunden.** Inställningar → Signering har en knapp som kontrollerar
-adress och e-post och skickar ett testmeddelande till dig, utan att någon kund berörs.
+**Provkör innan första kunden.** Knappen kontrollerar adress och e-post och skickar ett
+testmeddelande till dig, utan att någon kund berörs.
 
 ### Så går det till
 
@@ -1019,6 +1018,28 @@ kundkort, Besök, Fakturera och Mer.
 Kortet går att flytta upp om det täcker något man vill titta på, och att hoppa över. Ta om den
 när som helst under **Mer, Så fungerar appen**. Varje användare får den en gång på sin egen
 enhet.
+
+## Skicka vidare
+
+### Till en underleverantör
+
+På en godkänd offert finns **Skicka till borrare**. Kryssa i vad som ska med: plats och
+koordinat, kontaktperson, vad ärendet gäller, **raderna ur offerten** och underlaget om
+grannbrunnar. Den signerade handlingen och andra dokument hos kunden kan bifogas.
+
+Bara det du kryssar i följer med, och mejlet går ut från er egen adress. Ingenting öppnas
+utåt. Vanlig mottagare kan förifyllas under Inställningar, Företag.
+
+Samma dialog finns på anläggningen och på besök, med de fält som är relevanta där.
+
+### Beställa vattenanalys
+
+**Vattenanalys** på anläggningen mejlar en beställning till laboratoriet med brunnens
+uppgifter, koordinat, kontaktperson på plats och åtkomstanteckningar. Välj analyser: normal,
+utvidgad, mikrobiologisk, radon eller tungmetaller.
+
+Svarsadressen är er företagsadress, och beställningen journalförs på anläggningen.
+Laboratoriets adress förifylls från Inställningar, Företag.
 
 ## Inaktiva kunder och gallring
 

@@ -181,6 +181,8 @@ class NyIn(BaseModel):
     referens: str
     rubrik: str = ""
     avsandare: str = ""
+    avsandare_person: str = ""
+    avsandare_epost: str = ""
     belopp: float = 0.0
     belopp_text: str = ""
     mottagare_epost: str
@@ -210,6 +212,8 @@ async def ny(payload: NyIn, db: AsyncSession = Depends(db_session)):
         referens=payload.referens[:40],
         rubrik=payload.rubrik[:200],
         avsandare=payload.avsandare[:200],
+        avsandare_person=payload.avsandare_person[:200],
+        avsandare_epost=payload.avsandare_epost[:200],
         belopp=payload.belopp,
         belopp_text=payload.belopp_text[:60],
         mottagare_epost=payload.mottagare_epost.strip()[:200],
@@ -625,6 +629,19 @@ async def begar_kod(token: str, request: Request, db: AsyncSession = Depends(db_
     )
 
 
+def avsandartext(post) -> str:
+    """Vem handlingen kommer från, så begripligt som möjligt.
+
+    Ett personnamn känns igen. Firmanamnet ensamt gör det inte alltid, och
+    saknas båda blir det bara "Avsändare", vilket inte hjälper någon.
+    """
+    person = (post.avsandare_person or "").strip()
+    firma = (post.avsandare or "").strip()
+    if person and firma:
+        return f"{person} på {firma}"
+    return person or firma or "Avsändaren"
+
+
 def _maskera(epost: str) -> str:
     namn, _, doman = epost.partition("@")
     if len(namn) <= 2:
@@ -872,7 +889,7 @@ def _signeringssida(token: str, post: Signering) -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{post.rubrik or post.referens}</title>{_STIL}</head><body>
 <div class="kort">
-  <div class="avsandare">{post.text_sida or (post.avsandare or "Avsändare") + " har skickat ett dokument för godkännande"}</div>
+  <div class="avsandare">{post.text_sida or avsandartext(post) + " har skickat ett dokument för godkännande"}</div>
   <h1>{post.rubrik or post.referens}</h1>
   {f'<div class="belopp">{post.belopp_text}</div>' if post.belopp_text else ''}
   <p class="liten">{post.referens} · giltig till {post.giltig_till.strftime("%Y-%m-%d")}</p>

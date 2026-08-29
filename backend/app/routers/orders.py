@@ -64,6 +64,11 @@ FORETAG_STANDARD = {
     "signering_text_godkann": "",
     "signering_text_bevis": "",
     "signering_text_mejl": "",
+    # Laboratorium för vattenanalyser, förifylls vid beställning
+    "labb_epost": "",
+    "labb_namn": "",
+    # Vanliga mottagare för delning med underleverantör
+    "borrare_epost": "",
 }
 
 
@@ -1002,6 +1007,8 @@ async def skicka_till_signering(
             foretag=foretag,
             belopp_text=f"{belopp_text(total['brutto'])} kr",
             giltig_dagar=int(foretag.get("offert_giltig_dagar") or 30),
+            avsandare_person=user.full_name or user.username,
+            avsandare_epost=user.email or foretag.get("epost", ""),
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -1015,7 +1022,7 @@ async def skicka_till_signering(
         "Du får en engångskod till den här adressen innan du kan godkänna, så att vi "
         "vet att det är du.\n"
         "{giltig_del}\n"
-        "Med vänlig hälsning\n{avsandare}\n"
+        "Med vänlig hälsning\n{person}\n{avsandare}\n"
     )
     brodtext = mall.format(
         referens=q.quote_no,
@@ -1024,6 +1031,7 @@ async def skicka_till_signering(
         belopp=f"{belopp_text(total['brutto'])} kr",
         lank=svar["lank"],
         avsandare=foretag.get("namn", ""),
+        person=user.full_name or user.username,
         giltig_till=(svar.get("giltig_till") or "")[:10],
         giltig_del=(
             f"Länken gäller till {svar['giltig_till'][:10]}.\n"

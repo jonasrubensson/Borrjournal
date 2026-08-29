@@ -400,3 +400,13 @@ img.qr{border:1px solid var(--line);border-radius:3px;background:#fff;padding:6p
 .forhandssida{display:block;width:100%;height:auto;background:#fff;margin:0 auto 10px;
   box-shadow:0 2px 10px rgba(14,31,42,.14);border-radius:2px}
 .forhandssida:last-child{margin-bottom:0}
+
+/* Grannbrunnar i registreringsformuläret */
+.grannruta{margin-top:10px;padding:12px;background:#F4F9FA;border:1px solid #C9DFE3;
+  border-radius:3px;font-size:14px}
+.grannfakta{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;
+  margin-top:8px}
+.grannfakta div{background:#fff;border-radius:3px;padding:8px 10px}
+.grannfakta span{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;
+  color:var(--stone)}
+.grannfakta strong{font-size:15px;font-family:var(--mono)}

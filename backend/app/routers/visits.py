@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import settings
 from ..db import get_db
 from ..models import Customer, Facility, JournalEntry, ShareLog, User, Visit
 from ..schemas import customer_out, facility_out, iso_utc
@@ -467,6 +468,7 @@ async def sgu_briefing(
 # ---------- dela med extern borrare ----------
 FALT = {
     "plats": "Fastighet, adress och koordinat",
+    "offertrader": "Vad som ska utföras, raderna ur offerten",
     "kontakt": "Namn och telefon till kontaktpersonen",
     "arende": "Vad ärendet gäller",
     "atkomst": "Åtkomst och förutsättningar",
@@ -480,18 +482,27 @@ FALT = {
 # Att visa dem hade gett kryssrutor som tyst inte producerar någonting.
 FALT_BESOK = ["plats", "kontakt", "arende", "atkomst", "grannar"]
 FALT_ANLAGGNING = ["plats", "kontakt", "atkomst", "borrning", "berg", "pump", "grannar"]
+# En godkänd offert innehåller det en underleverantör behöver för att kunna
+# köra ut: var det är, vem som möter upp, vad som ska göras och vad grannarna
+# stötte på.
+FALT_OFFERT = ["plats", "kontakt", "arende", "atkomst", "grannar", "offertrader"]
 FORVALDA_BESOK = ["plats", "arende", "atkomst"]
 FORVALDA_ANLAGGNING = ["plats", "atkomst", "borrning"]
+FORVALDA_OFFERT = ["plats", "kontakt", "arende", "grannar", "offertrader"]
 
 
 @router.get("/share/fields")
 async def share_fields(
     visit_id: str | None = None,
     facility_id: str | None = None,
+    quote_id: str | None = None,
     _: User = Depends(current_user),
 ):
-    """Vilka fält som går att dela beror på om det är ett besök eller en anläggning."""
-    if visit_id:
+    """Vilka fält som går att dela beror på vad man delar."""
+    if quote_id:
+        nycklar, forvalda = FALT_OFFERT, FORVALDA_OFFERT
+        etiketter = {**FALT}
+    elif visit_id:
         nycklar, forvalda = FALT_BESOK, FORVALDA_BESOK
         etiketter = {**FALT, "atkomst": "Anteckningar från platsen"}
     else:
@@ -521,7 +532,12 @@ async def share(
     mottagare = (payload.get("recipient") or "").strip()
     if "@" not in mottagare:
         raise HTTPException(status_code=400, detail="Ange en giltig e-postadress")
-    tillatna = FALT_BESOK if payload.get("visit_id") else FALT_ANLAGGNING
+    if payload.get("quote_id"):
+        tillatna = FALT_OFFERT
+    elif payload.get("visit_id"):
+        tillatna = FALT_BESOK
+    else:
+        tillatna = FALT_ANLAGGNING
     onskade = payload.get("fields", [])
     valda = [f for f in onskade if f in tillatna]
     if not valda:
@@ -581,6 +597,66 @@ async def share(
                 "",
             ]
         lat, lon = facility.latitude, facility.longitude
+
+    elif payload.get("quote_id"):
+        from ..models import Customer, LineItem, Quote
+
+        q = (
+            await db.execute(select(Quote).where(Quote.id == payload["quote_id"]))
+        ).scalar_one_or_none()
+        if q is None:
+            raise HTTPException(status_code=404, detail="Offerten finns inte")
+        c = None
+        if q.customer_id:
+            c = (
+                await db.execute(select(Customer).where(Customer.id == q.customer_id))
+            ).unique().scalar_one_or_none()
+        if q.facility_id:
+            facility = (
+                await db.execute(select(Facility).where(Facility.id == q.facility_id))
+            ).unique().scalar_one_or_none()
+
+        rubrik = f"{q.quote_no}, {q.title or 'arbete'}"
+        lat = facility.latitude if facility else None
+        lon = facility.longitude if facility else None
+
+        if "plats" in valda:
+            rader += [
+                "PLATS",
+                f"  Fastighet: {(c.property_designation if c else '') or '—'}",
+                f"  Adress: {(c.address if c else q.recipient_address) or '—'}"
+                + (f", {c.municipality}" if c and c.municipality else ""),
+                f"  Koordinat: {(facility.coordinates if facility else '') or (f'{lat}, {lon}' if lat else '—')}",
+                "",
+            ]
+        if "kontakt" in valda:
+            rader += [
+                "KONTAKT",
+                f"  {(c.name if c else q.recipient_name) or '—'}",
+                f"  {(c.phone if c else '') or '—'}",
+                "",
+            ]
+        if "arende" in valda:
+            rader += ["ÄRENDE", f"  {q.title or '—'}", ""]
+            if q.intro:
+                rader += [f"  {q.intro}", ""]
+        if "atkomst" in valda and facility and facility.access_notes:
+            rader += ["ÅTKOMST", f"  {facility.access_notes}", ""]
+        if "offertrader" in valda:
+            poster = (
+                await db.execute(
+                    select(LineItem)
+                    .where(LineItem.quote_id == q.id)
+                    .order_by(LineItem.position)
+                )
+            ).scalars().all()
+            rader += ["ATT UTFÖRA"]
+            for r_ in poster:
+                rader.append(
+                    f"  {r_.quantity:g} {r_.unit} {r_.name}"
+                    + (f" ({r_.note})" if r_.note else "")
+                )
+            rader += [""]
 
     elif payload.get("visit_id"):
         visit = await get_visit(db, payload["visit_id"])
@@ -649,9 +725,28 @@ async def share(
     )
     amne = payload.get("subject") or f"Uppgifter: {rubrik}"
 
+    # Bilagor: den signerade handlingen och valda dokument hos kunden
+    bilagor = []
+    for fil_id in payload.get("filer") or []:
+        from ..models import StoredFile
+
+        fil = (
+            await db.execute(select(StoredFile).where(StoredFile.id == fil_id))
+        ).scalar_one_or_none()
+        if fil is None:
+            continue
+        vag = os.path.join(settings.data_dir, "files", fil.stored_name)
+        if not os.path.exists(vag):
+            continue
+        with open(vag, "rb") as fh:
+            bilagor.append((fil.filename, fh.read(), fil.content_type or "application/pdf"))
+        rader.append(f"Bifogat: {fil.filename}")
+
     smtp = await get_setting(db, SMTP_KEY, DEFAULT_SMTP)
     try:
-        await send_email({**smtp, "enabled": True}, amne, body, [mottagare])
+        await send_email(
+            {**smtp, "enabled": True}, amne, body, [mottagare], attachments=bilagor or None
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
@@ -708,3 +803,124 @@ async def share_log(
         }
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------- vattenprov
+PROVTYPER = {
+    "normal": "Normal analys, dricksvatten enskild brunn",
+    "utvidgad": "Utvidgad analys inklusive metaller",
+    "mikrobiologisk": "Mikrobiologisk analys",
+    "radon": "Radon i vatten",
+    "metaller": "Tungmetaller",
+}
+
+
+@router.post("/water-sample")
+async def bestall_vattenprov(
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_write),
+    db: AsyncSession = Depends(get_db),
+):
+    """Beställer vattenanalys hos ett laboratorium.
+
+    Analysen beställs sällan, och när den beställs är det samma uppgifter varje
+    gång: var brunnen står, vem som kan släppa in, och vilken analys det gäller.
+    Det behöver inte skrivas för hand.
+    """
+    from ..services.notify import DEFAULT_SMTP, SMTP_KEY, get_setting, send_email
+
+    mottagare = (payload.get("recipient") or "").strip()
+    if "@" not in mottagare:
+        raise HTTPException(status_code=400, detail="Ange laboratoriets e-postadress")
+
+    facility = (
+        await db.execute(select(Facility).where(Facility.id == payload.get("facility_id", "")))
+    ).unique().scalar_one_or_none()
+    if facility is None:
+        raise HTTPException(status_code=404, detail="Anläggningen finns inte")
+    c = facility.customer
+
+    typer = [t for t in (payload.get("typer") or []) if t in PROVTYPER]
+    if not typer:
+        raise HTTPException(status_code=400, detail="Välj minst en analys")
+
+    foretag = await get_setting(db, "foretag", {})
+    rader = [
+        f"Beställning av vattenanalys, {facility.facility_no}",
+        "",
+        "ANALYSER",
+    ]
+    rader += [f"  {PROVTYPER[t]}" for t in typer]
+    rader += [
+        "",
+        "PROVTAGNINGSPLATS",
+        f"  Fastighet: {c.property_designation or '—'}",
+        f"  Adress: {c.address or '—'}"
+        + (f", {c.municipality}" if c.municipality else ""),
+        f"  Koordinat: {facility.coordinates or (f'{facility.latitude}, {facility.longitude}' if facility.latitude else '—')}",
+        f"  Brunnstyp: {facility.facility_type}",
+        f"  Borrdjup: {facility.total_depth_m or '—'} m",
+        f"  Borrad: {facility.drilled_at or '—'}",
+        "",
+        "KONTAKT PÅ PLATS",
+        f"  {c.name}",
+        f"  {c.phone or '—'}",
+        f"  {c.email or '—'}",
+        "",
+    ]
+    if facility.access_notes:
+        rader += ["ÅTKOMST", f"  {facility.access_notes}", ""]
+    if payload.get("meddelande"):
+        rader += ["ÖVRIGT", f"  {payload['meddelande']}", ""]
+    rader += [
+        "SVAR SKICKAS TILL",
+        f"  {foretag.get('namn', '')}",
+        f"  {foretag.get('epost', '')}",
+        f"  {foretag.get('telefon', '')}",
+        "",
+        f"Beställt av {user.full_name or user.username} den {date.today().isoformat()}.",
+    ]
+    body = "\n".join(rader)
+
+    smtp = await get_setting(db, SMTP_KEY, DEFAULT_SMTP)
+    try:
+        await send_email(
+            {**smtp, "enabled": True},
+            f"Vattenanalys {facility.facility_no}, {c.property_designation or c.name}",
+            body,
+            [mottagare],
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Kunde inte skicka: {exc}. Kontrollera e-postinställningarna.",
+        ) from exc
+
+    db.add(
+        JournalEntry(
+            customer_id=c.id,
+            facility_id=facility.id,
+            entry_type="Vattenprov",
+            title=f"Vattenanalys beställd hos {mottagare}",
+            body="Analyser:\n"
+            + "\n".join(f"  {PROVTYPER[t]}" for t in typer)
+            + (f"\n\n{payload['meddelande']}" if payload.get("meddelande") else ""),
+            author_id=user.id,
+            author_name=user.full_name or user.username,
+        )
+    )
+    await db.commit()
+    await log_action(
+        db, "WATER_SAMPLE_ORDER", actor=user.username, object_type="facility",
+        object_id=facility.id, request=request, detail=f"till {mottagare}",
+    )
+    return {"ok": True, "recipient": mottagare, "typer": typer}
+
+
+@router.get("/water-sample/types")
+async def provtyper(_: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    from ..services.notify import get_setting
+
+    conf = await get_setting(db, "foretag", {})
+    return {"typer": PROVTYPER, "labb": conf.get("labb_epost", "")}

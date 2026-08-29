@@ -22,6 +22,40 @@ events_router = APIRouter(prefix="/api/events", tags=["systemhändelser"])
 
 
 # ---------------- e-post ----------------
+@router.put("/signering")
+async def spara_signering(
+    payload: dict,
+    request: Request,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sparar signeringens inställningar. Kräver ingen omstart."""
+    from ..services import signering as sign
+    from ..services.notify import save_setting
+
+    # Tomt fält betyder behåll den sparade nyckeln, inte radera den
+    nyckel = (payload.get("nyckel") or "").strip()
+    if not nyckel:
+        nyckel = sign.aktuell()["nyckel"]
+    if payload.get("pa"):
+        if not (payload.get("url") or "").strip():
+            raise HTTPException(status_code=400, detail="Ange adressen till tjänsten")
+        if len(nyckel) < 24:
+            raise HTTPException(
+                status_code=400, detail="Den delade nyckeln måste vara minst 24 tecken"
+            )
+    conf = {
+        "url": (payload.get("url") or "").strip().rstrip("/"),
+        "nyckel": nyckel,
+        "publik_url": (payload.get("publik_url") or "").strip().rstrip("/"),
+        "pa": bool(payload.get("pa")),
+    }
+    await save_setting(db, sign.NYCKEL_INSTALLNING, conf)
+    await sign.las_installningar(db)
+    await log_action(db, "SIGNING_SETTINGS", actor=user.username, request=request)
+    return {"sparat": True, "aktiverad": sign.aktiverad(), **sign.aktuell()}
+
+
 @router.post("/signering/test")
 async def signering_test(
     payload: dict,
@@ -45,11 +79,15 @@ async def signering_status(
     from ..config import settings as _s
     from ..services import signering as sign
 
+    a = sign.aktuell()
     ut = {
         "aktiverad": sign.aktiverad(),
-        "url": _s.signering_url,
-        "nyckel_satt": bool(_s.signering_nyckel),
-        "nyckel_lang_nog": len(_s.signering_nyckel or "") >= 24,
+        "url": a["url"],
+        "publik_url": a["publik_url"],
+        "fran_env": a["fran_env"],
+        "pa": a["pa"],
+        "nyckel_satt": bool(a["nyckel"]),
+        "nyckel_lang_nog": len(a["nyckel"]) >= 24,
         "nar": None,
         "fel": "",
     }
@@ -60,7 +98,7 @@ async def signering_status(
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{_s.signering_url.rstrip('/')}/api/halsa")
+            r = await client.get(f"{a['url'].rstrip('/')}/api/halsa")
             ut["nar"] = r.status_code == 200
             if not ut["nar"]:
                 ut["fel"] = f"Tjänsten svarade {r.status_code}"

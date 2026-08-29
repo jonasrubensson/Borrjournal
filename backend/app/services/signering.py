@@ -27,12 +27,43 @@ from ..config import settings
 from ..models import JournalEntry, Quote, StoredFile
 
 
+NYCKEL_INSTALLNING = "signering"
+STANDARD = {"url": "", "nyckel": "", "publik_url": "", "pa": False}
+
+# Läses in vid start och när inställningarna sparas. Miljövariabler vinner,
+# så att den som hellre håller hemligheter utanför databasen kan göra det.
+_konf: dict = {}
+
+
+async def las_installningar(db: AsyncSession) -> dict:
+    """Hämtar inställningarna, med .env som åsidosättning."""
+    from .notify import get_setting
+
+    global _konf
+    _konf = await get_setting(db, NYCKEL_INSTALLNING, STANDARD)
+    return aktuell()
+
+
+def aktuell() -> dict:
+    """Vad som faktiskt används just nu."""
+    url = settings.signering_url or _konf.get("url", "")
+    nyckel = settings.signering_nyckel or _konf.get("nyckel", "")
+    return {
+        "url": url,
+        "nyckel": nyckel,
+        "publik_url": _konf.get("publik_url", ""),
+        "fran_env": bool(settings.signering_url),
+        "pa": bool(url and len(nyckel) >= 24 and _konf.get("pa", bool(settings.signering_url))),
+    }
+
+
 def aktiverad() -> bool:
-    return bool(settings.signering_url and settings.signering_nyckel)
+    a = aktuell()
+    return bool(a["url"] and len(a["nyckel"]) >= 24 and a["pa"])
 
 
 def _huvuden() -> dict:
-    return {"X-Delad-Nyckel": settings.signering_nyckel}
+    return {"X-Delad-Nyckel": aktuell()["nyckel"]}
 
 
 async def synka_installningar(db: AsyncSession) -> bool:
@@ -54,7 +85,7 @@ async def synka_installningar(db: AsyncSession) -> bool:
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.put(
-                f"{settings.signering_url.rstrip('/')}/api/installningar",
+                f"{aktuell()['url'].rstrip('/')}/api/installningar",
                 headers=_huvuden(),
                 json={
                     "smtp": {
@@ -82,7 +113,7 @@ async def sjalvtest(db: AsyncSession, till: str = "") -> dict:
     await synka_installningar(db)
     async with httpx.AsyncClient(timeout=40.0) as client:
         r = await client.get(
-            f"{settings.signering_url.rstrip('/')}/api/sjalvtest",
+            f"{aktuell()['url'].rstrip('/')}/api/sjalvtest",
             headers=_huvuden(),
             params={"till": till} if till else None,
         )
@@ -100,6 +131,8 @@ async def skicka_for_signering(
     foretag: dict,
     belopp_text: str,
     giltig_dagar: int = 30,
+    avsandare_person: str = "",
+    avsandare_epost: str = "",
 ) -> dict:
     """Lämnar offerten till signeringstjänsten och får en länk tillbaka."""
     import httpx
@@ -115,12 +148,14 @@ async def skicka_for_signering(
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(
-            f"{settings.signering_url.rstrip('/')}/api/ny",
+            f"{aktuell()['url'].rstrip('/')}/api/ny",
             headers=_huvuden(),
             json={
                 "referens": quote.quote_no,
                 "rubrik": quote.title or "Offert",
                 "avsandare": foretag.get("namn", ""),
+                "avsandare_person": avsandare_person,
+                "avsandare_epost": avsandare_epost or foretag.get("epost", ""),
                 "belopp": 0.0,
                 "belopp_text": belopp_text,
                 "mottagare_epost": quote.recipient_email,
@@ -154,7 +189,7 @@ async def hamta_resultat(db: AsyncSession) -> dict:
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         r = await client.get(
-            f"{settings.signering_url.rstrip('/')}/api/resultat", headers=_huvuden()
+            f"{aktuell()['url'].rstrip('/')}/api/resultat", headers=_huvuden()
         )
         r.raise_for_status()
         svar = r.json()
@@ -171,7 +206,7 @@ async def hamta_resultat(db: AsyncSession) -> dict:
         # kvar hos tjänsten och kommer med nästa gång.
         if klara:
             await client.post(
-                f"{settings.signering_url.rstrip('/')}/api/kvittera",
+                f"{aktuell()['url'].rstrip('/')}/api/kvittera",
                 headers=_huvuden(),
                 json={"ids": klara},
             )
@@ -326,7 +361,7 @@ async def aterkalla(db: AsyncSession, quote) -> dict:
         return {"aterkallade": 0}
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.post(
-            f"{settings.signering_url.rstrip('/')}/api/aterkalla",
+            f"{aktuell()['url'].rstrip('/')}/api/aterkalla",
             headers=_huvuden(),
             json={"referens": quote.quote_no, "orsak": "Återkallad i Borrjournal"},
         )

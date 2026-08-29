@@ -41,6 +41,10 @@ class Signering(Base):
     referens: Mapped[str] = mapped_column(String(40), index=True)
     rubrik: Mapped[str] = mapped_column(String(200), default="")
     avsandare: Mapped[str] = mapped_column(String(200), default="")
+    # Personen som skickade, vid sidan av firmanamnet. Ett namn är lättare att
+    # känna igen än ett företagsnamn, och alla firmor har inte fyllt i sitt.
+    avsandare_person: Mapped[str] = mapped_column(String(200), default="")
+    avsandare_epost: Mapped[str] = mapped_column(String(200), default="")
     belopp: Mapped[float] = mapped_column(default=0.0)
     belopp_text: Mapped[str] = mapped_column(String(60), default="")
 
