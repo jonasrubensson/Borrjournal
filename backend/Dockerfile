@@ -20,6 +20,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
+# Gränssnittet bakas in i imagen. Monterades det från disken kunde backend och
+# gränssnitt gå isär vid en uppdatering, vilket var svårt att upptäcka. Nu följs
+# de alltid åt, och docker compose pull räcker för att uppdatera.
+COPY frontend ./frontend
+
 # Kör som vanlig användare
 RUN useradd -m -u 10001 borr && mkdir -p /data && chown -R borr:borr /app /data
 USER borr
