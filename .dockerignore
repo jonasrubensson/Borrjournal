@@ -1,0 +1,10 @@
+.git
+.github
+.env
+*.db
+*.db-*
+data/
+backuper-innan-uppdatering/
+__pycache__/
+*.pyc
+node_modules/

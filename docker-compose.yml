@@ -7,9 +7,10 @@
 
 services:
   app:
-    # Färdig image från registret, så att uppdatering blir docker compose pull.
-    # Vill du bygga själv fungerar docker compose build som förut.
-    image: ${BORRJOURNAL_IMAGE:-ghcr.io/OWNER/borrjournal:latest}
+    # Standard är ett lokalt namn, så att docker compose build och up fungerar
+    # direkt utan register. Vill du hämta färdiga images i stället: sätt
+    # BORRJOURNAL_IMAGE i .env till din adress i registret.
+    image: ${BORRJOURNAL_IMAGE:-borrjournal:local}
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -53,7 +54,7 @@ services:
   # Signeringstjänsten. Egen container, egen databas, egen domän.
   # Kan inte nå Borrjournal, bara svara när Borrjournal frågar.
   signering:
-    image: ${SIGNERING_IMAGE:-ghcr.io/OWNER/borrjournal-signering:latest}
+    image: ${SIGNERING_IMAGE:-borrjournal-signering:local}
     build:
       context: ./signering
     container_name: borrjournal-signering

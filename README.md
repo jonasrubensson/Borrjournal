@@ -1094,18 +1094,25 @@ docker compose pull
 docker compose up -d
 ```
 
-Sätt i `.env`, med ditt eget konto i stället för OWNER:
+Sätt i `.env`, med ditt eget konto i stället för `ditt-konto`:
 
 ```
-BORRJOURNAL_IMAGE=ghcr.io/OWNER/borrjournal:latest
-SIGNERING_IMAGE=ghcr.io/OWNER/borrjournal-signering:latest
+BORRJOURNAL_IMAGE=ghcr.io/ditt-konto/borrjournal:latest
+SIGNERING_IMAGE=ghcr.io/ditt-konto/borrjournal-signering:latest
 ```
 
-En taggad version (`git tag v4.11.0 && git push --tags`) ger även en image med det numret, så
+**Adressen måste vara helt med små bokstäver**, även om ditt kontonamn har versaler. Docker
+vägrar annars starta med *repository name must be lowercase*. `uppdatera.sh` kontrollerar det
+och säger till innan Docker hinner klaga. Arbetsflödet gör om ägarnamnet till små bokstäver
+automatiskt vid publicering.
+
+Lämnas raderna borta byggs imagerna lokalt i stället, vilket fungerar utan register.
+
+En taggad version (`git tag v4.11.1 && git push --tags`) ger även en image med det numret, så
 att det går att låsa fast eller gå tillbaka:
 
 ```
-BORRJOURNAL_IMAGE=ghcr.io/OWNER/borrjournal:4.11.0
+BORRJOURNAL_IMAGE=ghcr.io/ditt-konto/borrjournal:4.11.1
 ```
 
 Är paketet privat behöver servern logga in en gång:
