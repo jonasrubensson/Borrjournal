@@ -1081,32 +1081,63 @@ cd /sokvag/till/borrjournal
 ./uppdatera.sh
 ```
 
-Skriptet kontrollerar `.env`, tar en kopia av datavolymen, bygger om, väntar in appen och
-jämför sedan backend mot gränssnitt. Skiljer de sig säger det till med en gång i stället för
-att felet dyker upp hos en användare.
+Skriptet kontrollerar `.env`, tar en kopia av datavolymen, hämtar de nya imagerna, startar om
+och jämför sedan backend mot gränssnitt.
 
-### Tre fällor värda att känna till
+### Med färdiga images
 
-**1. Gränssnittet byggs inte in i imagen.** Katalogen `frontend` monteras in från disken:
+Ett arbetsflöde i `.github/workflows/bygg.yml` bygger båda imagerna vid varje push till main
+och lägger dem i GitHub Container Registry. Då blir uppdatering:
 
-```yaml
-    volumes:
-      - ./frontend:/app/frontend:ro
+```bash
+docker compose pull
+docker compose up -d
 ```
 
-Byter du bara backendfilerna får du en ny server med gammalt gränssnitt, hur många gånger du än
-kör `--no-cache`. Byt alltid ut båda. Servern läser numera gränssnittets version från disk, så
-`/api/version` svarar med båda och `in_sync` säger om de stämmer. Versionen står också längst ned
-under **Mer**.
+Sätt i `.env`, med ditt eget konto i stället för OWNER:
 
-**2. Radera aldrig projektkatalogen.** Där ligger `.env`, som inte följer med i git. Försvinner
+```
+BORRJOURNAL_IMAGE=ghcr.io/OWNER/borrjournal:latest
+SIGNERING_IMAGE=ghcr.io/OWNER/borrjournal-signering:latest
+```
+
+En taggad version (`git tag v4.11.0 && git push --tags`) ger även en image med det numret, så
+att det går att låsa fast eller gå tillbaka:
+
+```
+BORRJOURNAL_IMAGE=ghcr.io/OWNER/borrjournal:4.11.0
+```
+
+Är paketet privat behöver servern logga in en gång:
+
+```bash
+echo <token> | docker login ghcr.io -u <användarnamn> --password-stdin
+```
+
+### Bygga själv i stället
+
+```bash
+./uppdatera.sh --bygg
+```
+
+Bygger från källkoden i katalogen, som förut. Behövs om du inte vill använda ett register.
+
+### Gränssnittet ligger numera i imagen
+
+Tidigare monterades `./frontend` från disken. Det gjorde att backend och gränssnitt kunde gå
+isär vid en uppdatering, vilket var svårt att upptäcka. Nu bakas det in, så att delarna alltid
+följs åt och `docker compose pull` räcker.
+
+### Två fällor värda att känna till
+
+**1. Radera aldrig projektkatalogen.** Där ligger `.env`, som inte följer med i git. Försvinner
 den skapas en ny `SECRET_KEY`, och då blir alla utloggade eftersom deras inloggningar signerats
 med den gamla.
 
-**3. Katalognamnet styr vilken datavolym som används.** Volymen heter `<katalognamn>_data`. Ligger
-projektet i `borrjournal` används `borrjournal_data`. Klonar du om till `borrjournal-ny` får du en
-tom volym, och det ser ut som att all data är borta fast den ligger kvar i den gamla. Kontrollera
-med `docker volume ls`.
+**2. Katalognamnet styr vilken datavolym som används.** Volymen heter `<katalognamn>_data`.
+Ligger projektet i `borrjournal` används `borrjournal_data`. Klonar du om till `borrjournal-ny`
+får du en tom volym, och det ser ut som att all data är borta fast den ligger kvar i den gamla.
+Kontrollera med `docker volume ls`.
 
 ### Vad datan ligger i
 
@@ -1115,7 +1146,7 @@ med `docker volume ls`.
 | Databas, filer, backuper | Docker-volymen `<katalog>_data` | ja, så länge katalognamnet är detsamma |
 | Hemligheter | `.env` i projektkatalogen | bara om du inte raderar katalogen |
 | Backend | inbyggt i imagen | byggs om varje gång |
-| Gränssnitt | `./frontend` på disken | måste bytas ut för hand |
+| Gränssnitt | inbyggt i imagen | följer med backend |
 
 ### Om du hämtar koden från git
 

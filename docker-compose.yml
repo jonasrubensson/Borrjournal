@@ -7,7 +7,12 @@
 
 services:
   app:
-    build: ./backend
+    # Färdig image från registret, så att uppdatering blir docker compose pull.
+    # Vill du bygga själv fungerar docker compose build som förut.
+    image: ${BORRJOURNAL_IMAGE:-ghcr.io/OWNER/borrjournal:latest}
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: borrjournal-app
     restart: unless-stopped
     environment:
@@ -28,7 +33,6 @@ services:
       SECURITY_HEADERS: ${SECURITY_HEADERS:-true}
     volumes:
       - data:/data
-      - ./frontend:/app/frontend:ro
     # Appen klarar sig utan signeringstjänsten, men startar den finns är det
     # snyggast att den är uppe först.
     depends_on:
@@ -49,7 +53,9 @@ services:
   # Signeringstjänsten. Egen container, egen databas, egen domän.
   # Kan inte nå Borrjournal, bara svara när Borrjournal frågar.
   signering:
-    build: ./signering
+    image: ${SIGNERING_IMAGE:-ghcr.io/OWNER/borrjournal-signering:latest}
+    build:
+      context: ./signering
     container_name: borrjournal-signering
     restart: unless-stopped
     environment:
