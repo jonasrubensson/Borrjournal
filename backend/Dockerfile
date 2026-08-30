@@ -15,10 +15,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# Sökvägarna utgår från projektroten, eftersom byggkontexten är hela katalogen.
+# Det behövs för att gränssnittet ska kunna bakas in i samma image.
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app ./app
+COPY backend/app ./app
 
 # Gränssnittet bakas in i imagen. Monterades det från disken kunde backend och
 # gränssnitt gå isär vid en uppdatering, vilket var svårt att upptäcka. Nu följs
