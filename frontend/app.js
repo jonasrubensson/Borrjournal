@@ -2,7 +2,7 @@
 "use strict";
 
 // Höjs i takt med backend/app/version.py. Går de isär körs gammal backend-kod.
-const UI_VERSION = "4.10.0";
+const UI_VERSION = "4.11.0";
 
 const S = {
   funktioner: {},
