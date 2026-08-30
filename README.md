@@ -1121,6 +1121,15 @@ BORRJOURNAL_IMAGE=ghcr.io/ditt-konto/borrjournal:4.11.1
 echo <token> | docker login ghcr.io -u <användarnamn> --password-stdin
 ```
 
+### Kontrollera bygget först
+
+```bash
+./kontrollera-bygge.sh
+```
+
+Kontrollerar att Dockerfilernas sökvägar hänger ihop med byggkontexten och att imagenamnen
+är små bokstäver. Tar en sekund och fångar de fel som annars syns först mitt i ett bygge.
+
 ### Bygga själv i stället
 
 ```bash
